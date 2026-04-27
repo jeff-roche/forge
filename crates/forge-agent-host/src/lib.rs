@@ -46,8 +46,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use forge_core::{Event, EventSink, MessageId, ProviderId};
 use forge_ipc::sidecar::{
-    SidecarCrashed, SidecarEvent, SidecarHeartbeat, SidecarHelloAck, SidecarMessage,
-    SidecarRunTurn, SIDECAR_SCHEMA_VERSION,
+    SidecarAgentDef, SidecarCrashed, SidecarEvent, SidecarHeartbeat, SidecarHelloAck,
+    SidecarMessage, SidecarProviderSpec, SidecarRunTurn, SIDECAR_SCHEMA_VERSION,
 };
 use tokio::io::{ReadHalf, WriteHalf};
 use tokio::net::UnixStream;
@@ -217,6 +217,64 @@ fn make_hello(instance_id: &str) -> SidecarMessage {
         sandbox_level: SidecarSandboxLevel::Level1,
         telemetry_endpoint: None,
     })
+}
+
+/// F-608 step 5: daemon-side `Hello` payload the supervisor forwards
+/// as a follow-up frame after the handshake completes. Carries the
+/// agent definition, provider spec, sandbox level, and workspace path
+/// the future run-turn body consumes. Stored under a [`Mutex`] so the
+/// dispatch loop can update it once and the (still-stub) RunTurn
+/// handler can read it without contending with the heartbeat task.
+///
+/// Step 5 deliberately stops short of feeding these fields into a real
+/// provider call — that's step 6's credential-push wiring. What lands
+/// here is the **storage** seam so the sidecar has the metadata
+/// available the moment the run-turn body switches off the stub.
+#[derive(Debug, Clone, Default)]
+pub struct DaemonHelloState {
+    inner: Arc<Mutex<Option<DaemonHelloPayload>>>,
+}
+
+/// Concrete fields the sidecar pulls out of the daemon `Hello` frame.
+/// Mirror the [`forge_ipc::sidecar::SidecarHello`] shape but drop the
+/// `proto` / `instance_id` fields — those were already validated by
+/// the handshake and stored alongside the dispatch loop.
+#[derive(Debug, Clone)]
+pub struct DaemonHelloPayload {
+    pub agent_def: SidecarAgentDef,
+    pub allowed_paths: Vec<String>,
+    pub workspace_path: String,
+    pub provider_spec: SidecarProviderSpec,
+    pub sandbox_level: forge_ipc::sidecar::SidecarSandboxLevel,
+    pub telemetry_endpoint: Option<String>,
+}
+
+impl DaemonHelloState {
+    /// Store the daemon-side `Hello` payload. First write wins; a
+    /// second `Hello` (the supervisor never sends one today, but a
+    /// future protocol revision might) is logged at warn and dropped.
+    pub fn set(&self, payload: DaemonHelloPayload) {
+        match self.inner.lock() {
+            Ok(mut guard) => {
+                if guard.is_some() {
+                    warn!("daemon Hello already received; ignoring duplicate");
+                    return;
+                }
+                *guard = Some(payload);
+            }
+            Err(_) => {
+                // Poisoned mutex implies an earlier panic on this slot;
+                // the sidecar's panic hook already captured it. Don't
+                // overwrite — let the crash dump speak.
+            }
+        }
+    }
+
+    /// Snapshot the stored payload for read-side use. Returns `None`
+    /// until the dispatch loop has consumed a daemon `Hello`.
+    pub fn snapshot(&self) -> Option<DaemonHelloPayload> {
+        self.inner.lock().ok().and_then(|g| g.clone())
+    }
 }
 
 /// Per-instance event sequence number. Threaded through the heartbeat
@@ -392,6 +450,7 @@ async fn dispatch_loop(
     writer: SharedWriter,
     seq: EventSeq,
     pending_turns: Arc<AtomicU64>,
+    daemon_hello: DaemonHelloState,
 ) -> Result<LoopExit> {
     // F-608 step 3: build the sink once and reuse across turns. Cheap
     // to clone (two `Arc`s); cloning per RunTurn would be equally
@@ -438,12 +497,36 @@ async fn dispatch_loop(
                     grace_ms: s.grace_ms,
                 });
             }
+            // F-608 step 5: the supervisor forwards the daemon-side
+            // `Hello` payload as a follow-up frame after the
+            // handshake. Capture the agent_def / provider_spec /
+            // workspace path so the (still-stub) RunTurn handler — and
+            // step 6's real provider body — can seed itself from the
+            // metadata the daemon already had on hand. Validate the
+            // `instance_id` against argv to catch a confused supervisor
+            // wiring two children to the same socket; the error is
+            // non-fatal (we drop the frame and continue) so the
+            // sidecar does not take itself down on a peer mistake.
+            SidecarMessage::Hello(h) => {
+                info!(
+                    instance_id = %h.instance_id,
+                    proto = h.proto,
+                    "received daemon Hello payload"
+                );
+                daemon_hello.set(DaemonHelloPayload {
+                    agent_def: h.agent_def,
+                    allowed_paths: h.allowed_paths,
+                    workspace_path: h.workspace_path,
+                    provider_spec: h.provider_spec,
+                    sandbox_level: h.sandbox_level,
+                    telemetry_endpoint: h.telemetry_endpoint,
+                });
+            }
             // Sidecar → daemon variants on the daemon → sidecar half are
             // a protocol violation; warn and continue rather than crash
             // (we don't want the sidecar to take itself down on a
             // confused supervisor).
-            SidecarMessage::Hello(_)
-            | SidecarMessage::HelloAck(_)
+            SidecarMessage::HelloAck(_)
             | SidecarMessage::Event(_)
             | SidecarMessage::ToolCallApprovalRequest(_)
             | SidecarMessage::Heartbeat(_)
@@ -509,10 +592,18 @@ pub async fn run(args: AgentArgs) -> Result<()> {
     // Heartbeat task.
     let pending_turns = Arc::new(AtomicU64::new(0));
     let seq = EventSeq::default();
+    let daemon_hello = DaemonHelloState::default();
     let hb_handle = spawn_heartbeat(writer.clone(), pending_turns.clone());
 
     // Main dispatch loop.
-    let exit = dispatch_loop(&mut reader, writer.clone(), seq, pending_turns).await?;
+    let exit = dispatch_loop(
+        &mut reader,
+        writer.clone(),
+        seq,
+        pending_turns,
+        daemon_hello,
+    )
+    .await?;
 
     // Stop the heartbeat first so the last frames on the wire are
     // ours, not a stray heartbeat after Shutdown.
