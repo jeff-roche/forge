@@ -182,3 +182,11 @@ path = "tests/provider_swap.rs"
 [[test]]
 name = "sidecar_supervisor"
 path = "tests/sidecar_supervisor.rs"
+
+# F-608 step 5: BackgroundAgentRegistry sidecar wiring acceptance.
+# Drives the env-flag-gated `start()` path end-to-end: forks a real
+# `forged-agent` child via the supervisor and asserts an
+# `Event::ResourceSample` arrives on the registry bus (closes F-451).
+[[test]]
+name = "bg_agents_sidecar"
+path = "tests/bg_agents_sidecar.rs"

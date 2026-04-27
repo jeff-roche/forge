@@ -22,19 +22,47 @@
 //! DoD pins here is observable state, not pane geometry. See the
 //! `promote_removes_from_list` test below for the exact assertion.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use chrono::Utc;
 use forge_agents::{
     AgentDef, AgentInstance, AgentScope, InitialPrompt, Orchestrator, SpawnContext,
 };
-use forge_core::{ids::AgentId, AgentInstanceId, Event};
+use forge_core::{ids::AgentId, AgentInstanceId, Event, EventSink};
+use forge_ipc::sidecar::{
+    SidecarAgentDef, SidecarHello, SidecarProviderSpec, SidecarSandboxLevel, SIDECAR_PROTO_VERSION,
+};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, Mutex};
 
 use crate::resource_monitor::{default_sampler, ResourceMonitor, DEFAULT_TICK};
+use crate::sidecar::{SidecarHandle, SidecarSupervisor, SpawnParams};
+
+/// Env flag that enables the per-instance sidecar fork path. Read on
+/// every [`BackgroundAgentRegistry::start`] so an operator can flip the
+/// behavior between session boots without recompiling. Any value other
+/// than the empty string and `0` enables the sidecar path; the
+/// architecture doc §"Open questions / Feature-flag" pins the
+/// `FORGE_AGENT_SIDECAR=1` form as the canonical opt-in.
+const SIDECAR_ENV_FLAG: &str = "FORGE_AGENT_SIDECAR";
+
+/// Returns true when the `FORGE_AGENT_SIDECAR` env flag is set to a
+/// truthy value. Empty / unset / `0` / `false` all disable the path —
+/// any other value enables it. Mirrors the shape of the existing
+/// `FORGE_FORCE_SHELL_HANDSHAKE` flag the daemon already honors so
+/// operators have one mental model for opt-ins.
+fn sidecar_flag_enabled() -> bool {
+    match std::env::var(SIDECAR_ENV_FLAG) {
+        Ok(val) => {
+            let v = val.trim();
+            !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
+        }
+        Err(_) => false,
+    }
+}
 
 /// Channel capacity for the background-agent event bus. Matches
 /// `forge-session`'s `Session::event_tx` capacity (1024). A dropped
@@ -78,6 +106,102 @@ pub enum BgAgentError {
     Spawn(#[from] forge_agents::Error),
 }
 
+/// F-608 step 5 adapter: forwards every event the
+/// [`SidecarSupervisor`] emits onto the registry's broadcast bus, and
+/// — on the supervisor's retry-exhaustion path —
+/// drives [`Orchestrator::fail`] so the matching `AgentEvent::Failed`
+/// reaches downstream subscribers (the bg_agents forwarder converts
+/// that into `Event::BackgroundAgentCompleted` and clears the
+/// `tracked` set / monitor entry).
+///
+/// Sidecar-side `Event::ResourceSample` rides the same channel — the
+/// supervisor frames per-tick samples through this sink, the registry
+/// bus carries them, and the shell's `session:event` forwarder
+/// delivers them to the webview unchanged. This is what closes F-451.
+struct SidecarSinkBridge {
+    instance_id: AgentInstanceId,
+    events: broadcast::Sender<Event>,
+    orchestrator: Arc<Orchestrator>,
+}
+
+#[async_trait]
+impl EventSink for SidecarSinkBridge {
+    async fn emit(&self, event: Event) -> anyhow::Result<()> {
+        // Intercept the supervisor's failure-path completion so the
+        // orchestrator-side `AgentEvent::Failed` fires. The bg_agents
+        // forwarder converts that back into a single user-visible
+        // `BackgroundAgentCompleted` — re-emitting here would race the
+        // forwarder and double-deliver. Driving `orchestrator.fail`
+        // exclusively (and letting the existing forwarder publish the
+        // `Completed`) keeps emission count and ordering identical to
+        // the in-process path.
+        if let Event::BackgroundAgentCompleted { id, .. } = &event {
+            if id == &self.instance_id {
+                if let Err(e) = self
+                    .orchestrator
+                    .fail(
+                        &self.instance_id,
+                        "sidecar retry budget exhausted".to_string(),
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        target: "forge_session::bg_agents",
+                        instance_id = %self.instance_id,
+                        error = %e,
+                        "orchestrator.fail failed on sidecar retry exhaustion",
+                    );
+                }
+                return Ok(());
+            }
+        }
+        // Every other event (notably `ResourceSample`) flows straight
+        // onto the registry bus. `broadcast::Sender::send` errors only
+        // when no subscriber is attached — a benign warmup state.
+        let _ = self.events.send(event);
+        Ok(())
+    }
+}
+
+/// Build the daemon-side [`SidecarHello`] handed to the supervisor.
+/// Fields the sidecar needs to seed its run-loop state: `agent_def`,
+/// `provider_spec`, the workspace path. Step 5 forwards the
+/// already-loaded `AgentDef` straight through; step 6 will swap the
+/// stub `provider_spec` for the active provider's serializable shape.
+fn build_sidecar_hello(instance_id: &AgentInstanceId, def: &AgentDef) -> SidecarHello {
+    let isolation = match def.isolation {
+        forge_agents::Isolation::Trusted => "trusted",
+        forge_agents::Isolation::Process => "process",
+        forge_agents::Isolation::Container => "container",
+    };
+    SidecarHello {
+        proto: SIDECAR_PROTO_VERSION,
+        instance_id: instance_id.clone(),
+        agent_def: SidecarAgentDef {
+            name: def.name.clone(),
+            description: def.description.clone(),
+            body: def.body.clone(),
+            allowed_paths: def.allowed_paths.clone(),
+            isolation: isolation.to_string(),
+            memory_enabled: def.memory_enabled,
+        },
+        allowed_paths: def.allowed_paths.clone(),
+        // Workspace + provider plumbing are deferred to step 6's
+        // credential-push wiring — the architecture doc §"Step 6"
+        // owns the daemon-side credential / provider plumbing. Step 5
+        // ships a placeholder so the sidecar receives a well-formed
+        // frame today.
+        workspace_path: String::new(),
+        provider_spec: SidecarProviderSpec {
+            kind: "stub".to_string(),
+            model: "stub".to_string(),
+            base_url: None,
+        },
+        sandbox_level: SidecarSandboxLevel::Level1,
+        telemetry_endpoint: None,
+    }
+}
+
 /// Background-agent lifecycle owner.
 ///
 /// One instance per session. Holds a handle to the session's shared
@@ -98,6 +222,18 @@ pub struct BackgroundAgentRegistry {
     tracked: Arc<Mutex<HashSet<AgentInstanceId>>>,
     events: broadcast::Sender<Event>,
     monitor: Arc<ResourceMonitor>,
+    /// F-608 step 5: optional per-instance sidecar supervisor. When set
+    /// AND the `FORGE_AGENT_SIDECAR` env flag is enabled at `start()`
+    /// time, the registry forks a `forged-agent` child via this
+    /// supervisor and feeds the child's PID into [`ResourceMonitor`] —
+    /// closing F-451. Unset (default) preserves the legacy in-process
+    /// path with the daemon-PID no-op guard on the monitor.
+    sidecar_supervisor: Option<Arc<SidecarSupervisor>>,
+    /// F-608 step 5: live sidecar handles, keyed by instance id. Held
+    /// here so the `SidecarHandle::Drop` impl does not fire (and SIGKILL
+    /// the child) the moment `start()` returns. Removed on terminal
+    /// transition by the orchestrator-stream forwarder.
+    sidecar_handles: Arc<Mutex<HashMap<AgentInstanceId, SidecarHandle>>>,
 }
 
 impl BackgroundAgentRegistry {
@@ -164,7 +300,21 @@ impl BackgroundAgentRegistry {
             tracked: Arc::new(Mutex::new(HashSet::new())),
             events,
             monitor,
+            sidecar_supervisor: None,
+            sidecar_handles: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// F-608 step 5: bind a [`SidecarSupervisor`] used when the
+    /// `FORGE_AGENT_SIDECAR` env flag is enabled at `start()` time.
+    ///
+    /// Returns `self` so the caller can fluent-chain after `new` /
+    /// `with_monitor`. The flag check happens on every `start()` call
+    /// (not at construction time) so an operator can flip the behavior
+    /// across sessions without recompiling.
+    pub fn with_sidecar_supervisor(mut self, supervisor: Arc<SidecarSupervisor>) -> Self {
+        self.sidecar_supervisor = Some(supervisor);
+        self
     }
 
     /// Subscribe to background-agent lifecycle events. Each subscriber gets
@@ -262,16 +412,76 @@ impl BackgroundAgentRegistry {
             "started",
         );
 
-        // F-152 / F-370: no per-agent sidecar process exists yet. Passing
-        // the daemon's own PID hits the `ResourceMonitor::track` daemon-PID
-        // guard, which makes the call a deliberate no-op — no task is
-        // registered and no `ResourceSample` is emitted, so the UI
-        // AgentMonitor pills render the `—` placeholder instead of
-        // session-wide numbers that look per-instance. When a future step
-        // executor forks a provider sidecar per instance, it calls
-        // `registry.monitor().track(id, child_pid)` with the real PID and
-        // the event wiring below begins forwarding samples unchanged.
-        self.monitor.track(id.clone(), std::process::id()).await;
+        // F-608 step 5 / F-451: when the sidecar flag is on AND a
+        // supervisor is wired, fork the per-instance `forged-agent`
+        // child and feed its real PID into the resource monitor — the
+        // daemon-PID no-op guard then steps aside and per-instance
+        // `ResourceSample` events begin flowing on the registry bus
+        // (closing F-451). On supervisor spawn failure we fall through
+        // to the legacy daemon-PID path so a misconfigured operator
+        // still gets the lifecycle events; the failure is logged for
+        // triage.
+        let sidecar_pid = if sidecar_flag_enabled() {
+            match &self.sidecar_supervisor {
+                Some(supervisor) => {
+                    let hello = build_sidecar_hello(&id, &instance.def);
+                    let bridge: Arc<dyn EventSink> = Arc::new(SidecarSinkBridge {
+                        instance_id: id.clone(),
+                        events: self.events.clone(),
+                        orchestrator: Arc::clone(&self.orchestrator),
+                    });
+                    match supervisor
+                        .spawn(id.clone(), SpawnParams { hello }, bridge)
+                        .await
+                    {
+                        Ok(handle) => {
+                            let pid = handle.pid();
+                            // Hold the handle for the lifetime of the
+                            // instance — dropping it here would fire
+                            // `SidecarHandle::Drop` and SIGKILL the
+                            // child. The orchestrator-stream forwarder
+                            // below removes the entry on terminal
+                            // transition.
+                            self.sidecar_handles.lock().await.insert(id.clone(), handle);
+                            tracing::info!(
+                                target: "forge_session::bg_agents",
+                                instance_id = %id,
+                                child_pid = pid,
+                                "sidecar spawned for background agent",
+                            );
+                            Some(pid)
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "forge_session::bg_agents",
+                                instance_id = %id,
+                                error = %e,
+                                "sidecar spawn failed; falling back to in-process path",
+                            );
+                            None
+                        }
+                    }
+                }
+                None => {
+                    tracing::debug!(
+                        target: "forge_session::bg_agents",
+                        instance_id = %id,
+                        "sidecar flag set but no supervisor wired; staying in-process",
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // F-152 / F-370: with no real per-child PID we pass the
+        // daemon's own PID, which hits the `ResourceMonitor::track`
+        // daemon-PID guard and turns the call into a deliberate no-op.
+        // With a real PID (sidecar path) the monitor begins emitting
+        // per-instance `ResourceSample` events on the registry bus.
+        let track_pid = sidecar_pid.unwrap_or_else(std::process::id);
+        self.monitor.track(id.clone(), track_pid).await;
 
         // `broadcast::Sender::send` errors only when no subscribers are
         // attached — a valid warmup state for an embedded registry whose
@@ -289,6 +499,7 @@ impl BackgroundAgentRegistry {
         let events = self.events.clone();
         let tracked = Arc::clone(&self.tracked);
         let monitor = Arc::clone(&self.monitor);
+        let sidecar_handles = Arc::clone(&self.sidecar_handles);
         tokio::spawn(async move {
             while let Some(next) = stream.next().await {
                 let event = match next {
@@ -327,6 +538,14 @@ impl BackgroundAgentRegistry {
                 // id).
                 tracked.lock().await.remove(&target_id);
                 monitor.untrack(&target_id).await;
+                // F-608 step 5: drop the supervisor handle on terminal
+                // transition. `SidecarHandle::Drop` cooperatively
+                // signals the supervisor task to wind the child down;
+                // the supervisor itself emits a `BackgroundAgentCompleted`
+                // failure event on retry exhaustion (intercepted upstream
+                // by `SidecarSinkBridge`), so dropping here is purely
+                // cleanup, not lifecycle signalling.
+                let _removed = sidecar_handles.lock().await.remove(&target_id);
                 if !is_failed {
                     // F-371: `Completed` path gets its own info log. Failed
                     // already logged above with the reason attached.
