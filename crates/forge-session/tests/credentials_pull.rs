@@ -103,6 +103,7 @@ async fn run_turn_pulls_credential_when_context_supplied() {
 
     run_turn(
         Arc::clone(&session),
+        session.as_ref(),
         Arc::clone(&provider),
         "hello".to_string(),
         pending,
@@ -153,6 +154,7 @@ async fn run_turn_proceeds_when_credential_is_missing() {
 
     run_turn(
         Arc::clone(&session),
+        session.as_ref(),
         Arc::clone(&provider),
         "hello".to_string(),
         Arc::new(Mutex::new(HashMap::new())),
@@ -188,8 +190,10 @@ async fn run_turn_fails_when_credential_backend_errors() {
             .expect("construct mock"),
     );
 
+    let events_session = Arc::clone(&session);
     let err = run_turn(
         session,
+        events_session.as_ref(),
         provider,
         "hello".to_string(),
         Arc::new(Mutex::new(HashMap::new())),
@@ -233,8 +237,10 @@ async fn run_turn_skips_pull_when_no_context_supplied() {
             .expect("construct mock"),
     );
 
+    let events_session = Arc::clone(&session);
     run_turn(
         session,
+        events_session.as_ref(),
         provider,
         "hello".to_string(),
         Arc::new(Mutex::new(HashMap::new())),

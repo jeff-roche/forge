@@ -1,11 +1,11 @@
-//! F-608 step 2: `forged-agent` sidecar host.
+//! F-608 sidecar host: `forged-agent`.
 //!
-//! This crate ships the per-instance sidecar binary that the daemon spawns
-//! when `FORGE_AGENT_SIDECAR=1`. It owns the IPC plumbing — handshake,
-//! heartbeat, panic-hook crash dump, dispatch loop — and nothing else.
-//! The actual `run_turn` body lives in `forge-session`; step 3 refactors
-//! it behind an `EventSink` trait so the same body can run in-process or
-//! through this crate's outbound frame writer.
+//! This crate ships the per-instance sidecar binary that the daemon
+//! spawns when `FORGE_AGENT_SIDECAR=1`. It owns the IPC plumbing —
+//! handshake, heartbeat, panic-hook crash dump, dispatch loop — plus
+//! the [`IpcEventSink`] adapter that lets the orchestrator's run loop
+//! emit events out the per-instance Unix domain socket as
+//! [`SidecarMessage::Event`] frames.
 //!
 //! ## Wire flow
 //!
@@ -18,19 +18,23 @@
 //!     │ HelloAck { pid, started_at }   ──────▶│
 //!     │                                ◀──────│ Heartbeat (1 Hz, forever)
 //!     │ RunTurn { … }                  ──────▶│
+//!     │                                ◀──────│ Event::StepStarted       (stub)
 //!     │                                ◀──────│ Event::AssistantMessage  (stub)
 //!     │                                ◀──────│ Event::StepFinished      (stub)
 //!     │ Shutdown { grace_ms }          ──────▶│
 //!     │                                       │ drain → exit(0)
 //! ```
 //!
-//! ## Stub handlers
+//! ## Stub handlers — F-608 step 3
 //!
-//! Step 2 intentionally keeps the message handlers as stubs. `RunTurn`
-//! emits a deterministic placeholder event sequence so an integration
-//! test can verify the IPC plumbing end-to-end without depending on a
-//! real provider. Step 3 replaces the stub with the refactored
-//! `run_turn` body.
+//! `RunTurn` still emits a deterministic placeholder event sequence
+//! (so the integration test can verify the IPC plumbing end-to-end
+//! without depending on a real provider). What changed in step 3:
+//! every emit routes through [`forge_core::EventSink`] via
+//! [`IpcEventSink`], the same trait
+//! `forge_session::orchestrator::run_turn` consumes in-process. Step
+//! 4+ swaps the stub body for a call into the refactored
+//! orchestrator, passing the same sink as `&dyn EventSink`.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -38,8 +42,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use chrono::Utc;
-use forge_core::{MessageId, ProviderId};
+use forge_core::{Event, EventSink, MessageId, ProviderId};
 use forge_ipc::sidecar::{
     SidecarCrashed, SidecarEvent, SidecarHeartbeat, SidecarHelloAck, SidecarMessage,
     SidecarRunTurn, SIDECAR_SCHEMA_VERSION,
@@ -232,6 +237,61 @@ impl EventSeq {
 /// shutdown drain), so the half lives behind a tokio mutex.
 pub type SharedWriter = Arc<AsyncMutex<WriteHalf<UnixStream>>>;
 
+/// F-608 step 3: sidecar-side [`EventSink`] implementation.
+///
+/// The orchestrator's run loop (in `forge-session`) emits every
+/// `forge_core::Event` through the trait. In the daemon those land in
+/// the on-disk event log and IPC broadcast; in this crate, every emit
+/// is framed as a [`SidecarMessage::Event`] carrying a monotonic
+/// per-sidecar `seq` and written on the daemon-facing UDS — the daemon
+/// writes the event to the session log on the receiving end (§2 of
+/// `docs/architecture/agent-sidecar.md`).
+///
+/// Cloning is cheap (two `Arc`s) so the supervisor wiring in step 5
+/// can hand a clone to whatever loop drives the sidecar's run-turn
+/// body without juggling lifetimes.
+#[derive(Clone)]
+pub struct IpcEventSink {
+    writer: SharedWriter,
+    seq: EventSeq,
+}
+
+impl IpcEventSink {
+    /// Bind a sink to the sidecar's outbound writer half + per-process
+    /// event-sequence allocator. The same `EventSeq` instance must be
+    /// shared with the heartbeat task so a future ordering-aware
+    /// daemon can correlate heartbeat gaps against missing event
+    /// numbers.
+    pub fn new(writer: SharedWriter, seq: EventSeq) -> Self {
+        Self { writer, seq }
+    }
+}
+
+#[async_trait]
+impl EventSink for IpcEventSink {
+    /// Frame `event` as `SidecarMessage::Event { seq, event }` and
+    /// write it on the UDS. The lock on `writer` is held only across
+    /// the single `write_frame` call so concurrent emitters (e.g. a
+    /// future tool-approval request raised inside a turn) interleave
+    /// at frame granularity rather than blocking on each other for
+    /// the duration of a turn.
+    ///
+    /// Write failures propagate. The supervisor observes the EOF on
+    /// the daemon side and recycles the sidecar — letting the
+    /// orchestrator silently drop events on a broken pipe would
+    /// leave half-bracketed step windows in the daemon's session
+    /// log.
+    async fn emit(&self, event: Event) -> anyhow::Result<()> {
+        let frame = SidecarMessage::Event(SidecarEvent {
+            seq: self.seq.next(),
+            event,
+        });
+        let mut w = self.writer.lock().await;
+        forge_ipc::write_frame(&mut *w, &frame).await?;
+        Ok(())
+    }
+}
+
 /// Spawn the 1 Hz heartbeat task. Returns the join handle so the
 /// shutdown path can abort it before draining the writer for a clean
 /// last-frame ordering.
@@ -263,53 +323,54 @@ fn spawn_heartbeat(
 }
 
 /// Stub `RunTurn` handler. Emits a deterministic event sequence:
-/// `AssistantMessage { text: "[stub]" }` then `StepFinished`. Step 3
-/// replaces this with the refactored `run_turn` body.
-async fn handle_run_turn_stub(
-    writer: &SharedWriter,
-    seq: &EventSeq,
-    turn: SidecarRunTurn,
-) -> Result<()> {
-    use forge_core::{Event, StepId, StepKind, StepOutcome};
+/// `StepStarted`, `AssistantMessage { text: "[stub]" }`, `StepFinished`.
+///
+/// F-608 step 3: emissions now route through the
+/// [`EventSink`](forge_core::EventSink) trait via [`IpcEventSink`] —
+/// the same trait `forge-session::orchestrator::run_turn` consumes
+/// in-process. The on-the-wire bytes are unchanged from step 2; what
+/// changed is that the sidecar no longer hand-rolls
+/// `SidecarMessage::Event` framing inline. Step 4+ replaces the stub
+/// body entirely with a call into the refactored orchestrator,
+/// passing this same `IpcEventSink` as `&dyn EventSink`.
+async fn handle_run_turn_stub(events: &dyn EventSink, turn: SidecarRunTurn) -> Result<()> {
+    use forge_core::{StepId, StepKind, StepOutcome};
 
     let now = Utc::now();
     let assistant_id = MessageId::new();
     let step_id = StepId::new();
 
     // Step started so the UI sees a step boundary even from the stub.
-    let step_started = Event::StepStarted {
-        step_id: step_id.clone(),
-        instance_id: None,
-        kind: StepKind::Model,
-        started_at: now,
-        index: 1,
-        total: Some(1),
-    };
-    let assistant = Event::AssistantMessage {
-        id: assistant_id,
-        provider: ProviderId::from_string("stub".to_string()),
-        model: "stub".to_string(),
-        at: now,
-        stream_finalised: true,
-        text: std::sync::Arc::from("[stub]"),
-        branch_parent: turn.branch_parent.clone(),
-        branch_variant_index: turn.branch_variant_index.unwrap_or(0),
-    };
-    let step_finished = Event::StepFinished {
-        step_id,
-        outcome: StepOutcome::Ok,
-        duration_ms: 0,
-        token_usage: None,
-    };
-
-    for ev in [step_started, assistant, step_finished] {
-        let frame = SidecarMessage::Event(SidecarEvent {
-            seq: seq.next(),
-            event: ev,
-        });
-        let mut w = writer.lock().await;
-        forge_ipc::write_frame(&mut *w, &frame).await?;
-    }
+    events
+        .emit(Event::StepStarted {
+            step_id: step_id.clone(),
+            instance_id: None,
+            kind: StepKind::Model,
+            started_at: now,
+            index: 1,
+            total: Some(1),
+        })
+        .await?;
+    events
+        .emit(Event::AssistantMessage {
+            id: assistant_id,
+            provider: ProviderId::from_string("stub".to_string()),
+            model: "stub".to_string(),
+            at: now,
+            stream_finalised: true,
+            text: std::sync::Arc::from("[stub]"),
+            branch_parent: turn.branch_parent.clone(),
+            branch_variant_index: turn.branch_variant_index.unwrap_or(0),
+        })
+        .await?;
+    events
+        .emit(Event::StepFinished {
+            step_id,
+            outcome: StepOutcome::Ok,
+            duration_ms: 0,
+            token_usage: None,
+        })
+        .await?;
     Ok(())
 }
 
@@ -332,6 +393,13 @@ async fn dispatch_loop(
     seq: EventSeq,
     pending_turns: Arc<AtomicU64>,
 ) -> Result<LoopExit> {
+    // F-608 step 3: build the sink once and reuse across turns. Cheap
+    // to clone (two `Arc`s); cloning per RunTurn would be equally
+    // correct but pointless. The heartbeat task holds a separate
+    // clone of the underlying writer, so frame ordering between
+    // heartbeats and `Event` frames stays serialized through the
+    // tokio mutex.
+    let event_sink = IpcEventSink::new(writer.clone(), seq.clone());
     let mut buf = Vec::new();
     loop {
         let frame: SidecarMessage = match forge_ipc::read_frame_into(reader, &mut buf).await {
@@ -347,7 +415,7 @@ async fn dispatch_loop(
         match frame {
             SidecarMessage::RunTurn(turn) => {
                 pending_turns.fetch_add(1, Ordering::Relaxed);
-                let res = handle_run_turn_stub(&writer, &seq, turn).await;
+                let res = handle_run_turn_stub(&event_sink, turn).await;
                 pending_turns.fetch_sub(1, Ordering::Relaxed);
                 if let Err(e) = res {
                     error!(error = %e, "run_turn stub failed");
@@ -357,9 +425,12 @@ async fn dispatch_loop(
             | SidecarMessage::ToolCallRejected(_)
             | SidecarMessage::Credentials(_)
             | SidecarMessage::CompactTranscript(_) => {
-                // Step 2 leaves these as no-ops; step 3 wires them to
-                // the refactored run_turn.
-                debug!("ignoring non-RunTurn daemon message in step-2 stub handler");
+                // Steps 4+ wire these to the refactored orchestrator
+                // (approval queue, credential push, compaction
+                // proxy). Step 3 only swaps the run_turn emission
+                // path onto the EventSink trait — these stay no-ops
+                // until the orchestrator body lands here.
+                debug!("ignoring non-RunTurn daemon message in stub handler");
             }
             SidecarMessage::Shutdown(s) => {
                 info!(grace_ms = s.grace_ms, "received shutdown");

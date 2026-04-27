@@ -89,6 +89,7 @@ async fn agent_spawn_from_live_turn_registers_child_and_emits_sub_agent_spawned(
 
     run_turn(
         Arc::clone(&session),
+        session.as_ref(),
         provider,
         "go".to_string(),
         pending_approvals,

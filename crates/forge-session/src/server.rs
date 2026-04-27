@@ -1286,6 +1286,10 @@ async fn handle_connection<P: Provider + 'static>(
                         tokio::spawn(async move {
                             let result = run_turn(
                                 Arc::clone(&session),
+                                // F-608 step 3: in-process turn — `Session`
+                                // implements `EventSink`, so the same Arc
+                                // doubles as the emission target.
+                                session.as_ref(),
                                 provider,
                                 m.text,
                                 approvals,
