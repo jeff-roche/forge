@@ -48,6 +48,8 @@ fn step_started_retains_started_at_pinned_exception() {
         instance_id: None,
         kind: StepKind::Model,
         started_at: fixed_time(),
+        index: 1,
+        total: None,
     };
     let v = serde_json::to_value(&ev).unwrap();
     assert_eq!(

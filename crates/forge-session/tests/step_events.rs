@@ -349,6 +349,55 @@ async fn model_step_contains_assistant_events() {
 }
 
 #[tokio::test]
+async fn step_started_index_is_monotonic_one_based_per_turn() {
+    // F-606: every `StepStarted` carries a 1-based `index` that increments
+    // by exactly 1 across the turn — Model and Tool steps share the same
+    // counter so the AgentMonitor §9.2 chip can render `step N`
+    // consistently regardless of step kind.
+    let events = capture_turn_events(true).await;
+
+    let indices: Vec<u32> = events
+        .iter()
+        .filter_map(|e| {
+            if let Event::StepStarted { index, .. } = e {
+                Some(*index)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    assert!(
+        !indices.is_empty(),
+        "at least one StepStarted must be emitted; got: {:?}",
+        kinds_of(&events)
+    );
+    let expected: Vec<u32> = (1..=indices.len() as u32).collect();
+    assert_eq!(
+        indices, expected,
+        "StepStarted.index must be 1-based and monotonically increase by 1 per emission; got {indices:?}"
+    );
+}
+
+#[tokio::test]
+async fn step_started_total_is_unknown_during_turn() {
+    // F-606: today the orchestrator does not pre-plan the step list — the
+    // model decides what to call turn-by-turn — so `total` rides as
+    // `None`. UI falls back to `step N` (no `of M`). A future change may
+    // populate `total` retroactively or via a companion event.
+    let events = capture_turn_events(true).await;
+    for ev in &events {
+        if let Event::StepStarted { total, .. } = ev {
+            assert!(
+                total.is_none(),
+                "Phase-3 orchestrator emits StepStarted.total = None until step pre-planning lands; got Some({})",
+                total.unwrap()
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn tool_invoked_matches_tool_call_started_id() {
     let events = capture_turn_events(true).await;
 

@@ -653,6 +653,8 @@ fn step_started_wire_shape() {
             instance_id: None,
             kind: StepKind::Model,
             started_at: fixed_time(),
+            index: 1,
+            total: None,
         },
         json!({
             "type": "step_started",
@@ -660,6 +662,7 @@ fn step_started_wire_shape() {
             "instance_id": null,
             "kind": "model",
             "started_at": "2026-04-18T10:00:00Z",
+            "index": 1,
         }),
     );
 }
@@ -672,6 +675,8 @@ fn step_started_with_instance_id_wire_shape() {
             instance_id: Some(instance_id("inst-9")),
             kind: StepKind::Tool,
             started_at: fixed_time(),
+            index: 2,
+            total: None,
         },
         json!({
             "type": "step_started",
@@ -679,8 +684,58 @@ fn step_started_with_instance_id_wire_shape() {
             "instance_id": "inst-9",
             "kind": "tool",
             "started_at": "2026-04-18T10:00:00Z",
+            "index": 2,
         }),
     );
+}
+
+#[test]
+fn step_started_with_total_wire_shape() {
+    // F-606: when the orchestrator can populate `total`, it serializes
+    // alongside `index`. `total: None` is omitted via
+    // `#[serde(skip_serializing_if)]` so older clients never see a `null`
+    // they didn't previously read.
+    assert_wire_eq(
+        Event::StepStarted {
+            step_id: step_id("step-3"),
+            instance_id: None,
+            kind: StepKind::Model,
+            started_at: fixed_time(),
+            index: 3,
+            total: Some(7),
+        },
+        json!({
+            "type": "step_started",
+            "step_id": "step-3",
+            "instance_id": null,
+            "kind": "model",
+            "started_at": "2026-04-18T10:00:00Z",
+            "index": 3,
+            "total": 7,
+        }),
+    );
+}
+
+#[test]
+fn step_started_legacy_log_replay_defaults_index_zero() {
+    // F-606 backwards-compat: event logs written before the index/total
+    // fields existed must still deserialize. Missing fields fall back to
+    // `index: 0` (the "legacy / unknown" sentinel) and `total: None`.
+    let legacy: Event = serde_json::from_value(json!({
+        "type": "step_started",
+        "step_id": "step-legacy",
+        "instance_id": null,
+        "kind": "model",
+        "started_at": "2026-04-18T10:00:00Z",
+    }))
+    .expect("legacy step_started shape must round-trip via serde defaults");
+    match legacy {
+        Event::StepStarted { index, total, .. } => {
+            assert_eq!(index, 0, "legacy logs deserialize with index: 0 sentinel");
+            assert!(total.is_none(), "legacy logs deserialize with total: None");
+        }
+        other => panic!("expected StepStarted, got {other:?}"),
+    }
 }
 
 #[test]

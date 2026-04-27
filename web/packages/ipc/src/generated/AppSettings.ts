@@ -15,22 +15,22 @@ import type { WindowsSettings } from "./WindowsSettings";
  * refuse to load. This is the opposite of `ApprovalConfig`, where strict
  * validation protects the approval trust boundary.
  */
-export type AppSettings = { notifications: NotificationsSettings, windows: WindowsSettings,
+export type AppSettings = { notifications: NotificationsSettings, windows: WindowsSettings, 
 /**
  * Built-in provider connection details (F-585). Optional and
  * backwards-compatible: settings files without `[providers]` deserialize
  * to an empty map.
  */
-providers: ProvidersSettings,
+providers: ProvidersSettings, 
 /**
  * Catalog UI enable/disable flags (F-592). Open-shape map; absent =
  * enabled.
  */
-catalog: CatalogSettings,
+catalog: CatalogSettings, 
 /**
  * Dashboard UI preferences (F-597). Optional and backwards-compatible.
  */
-dashboard: DashboardSettings,
+dashboard: DashboardSettings, 
 /**
  * Per-agent cross-session memory toggles (F-602). Absent agents fall
  * back to the def-level `memory_enabled` frontmatter flag.
