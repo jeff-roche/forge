@@ -12,6 +12,7 @@ pub mod resource_monitor;
 pub mod sandbox;
 pub mod server;
 pub mod session;
+pub mod sidecar;
 pub mod socket_path;
 pub mod starttime;
 pub mod tools;

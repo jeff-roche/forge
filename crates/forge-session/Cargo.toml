@@ -66,11 +66,13 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
+async-trait = "0.1"
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support", "async_tokio"] }
 forge-cli = { path = "../forge-cli" }
 # F-586: enable the `RuntimeProvider::Mock` variant for the
 # `provider_swap` integration test. Production binaries leave this off.
 forge-providers = { path = "../forge-providers", features = ["testing"] }
+futures = "0.3"
 libc = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 similar = "2"
@@ -173,3 +175,10 @@ path = "tests/credentials_pull.rs"
 [[test]]
 name = "provider_swap"
 path = "tests/provider_swap.rs"
+
+# F-608 step 4: SidecarSupervisor acceptance tests. Spawns the
+# `forged-agent` binary under cargo's `CARGO_BIN_EXE_forged-agent`
+# rendezvous to drive a real handshake → run → shutdown lifecycle.
+[[test]]
+name = "sidecar_supervisor"
+path = "tests/sidecar_supervisor.rs"
