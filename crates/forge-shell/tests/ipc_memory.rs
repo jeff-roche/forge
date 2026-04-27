@@ -287,7 +287,7 @@ async fn save_agent_memory_rejects_path_separators_in_id() {
         "save_agent_memory",
         serde_json::json!({ "agentId": "../etc/passwd", "body": "x" }),
     );
-    assert!(err.contains("path separators"), "got {err}");
+    assert!(err.contains("[A-Za-z0-9_-]"), "got {err}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
