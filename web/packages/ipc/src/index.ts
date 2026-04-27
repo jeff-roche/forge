@@ -15,6 +15,7 @@ export type { FileContent } from './generated/FileContent';
 export type { Layout } from './generated/Layout';
 export type { Layouts } from './generated/Layouts';
 export type { LayoutTree } from './generated/LayoutTree';
+export type { MemorySettings } from './generated/MemorySettings';
 export type { MessageId } from './generated/MessageId';
 export type { NotificationMode } from './generated/NotificationMode';
 export type { NotificationsSettings } from './generated/NotificationsSettings';

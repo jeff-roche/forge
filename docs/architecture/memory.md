@@ -67,8 +67,20 @@ body in full.
 
 ## Per-agent opt-in
 
-Memory is OFF by default. An agent opts in by setting `memory: true`
-(or the explicit `memory_enabled: true`) in its frontmatter:
+Memory is OFF by default. An agent opts in via one of two channels:
+
+1. **Agent frontmatter** (`memory: true` / `memory_enabled: true` —
+   F-601 default).
+2. **Settings override** (`[memory.enabled.<agent>] = true|false` in
+   `settings.toml` — F-602). The Dashboard's Memory section writes this
+   scalar.
+
+The settings override **takes precedence** over the frontmatter flag.
+That lets the user opt INTO memory for an agent the author did not
+declare, and equally lets them opt OUT of an agent that does declare
+`memory: true`. The session daemon reads the merged settings at session
+start and computes the effective flag via
+`forge_session::server::effective_memory_enabled`.
 
 ```markdown
 ---
@@ -79,15 +91,22 @@ memory: true
 You are a long-running scribe...
 ```
 
-The flag controls **both** behaviors:
+```toml
+# .forge/settings.toml
+[memory.enabled]
+scribe = false      # disable scribe even though its frontmatter says memory: true
+researcher = true   # enable researcher even though its frontmatter omits the flag
+```
+
+The effective flag controls **both** behaviors:
 
 1. Whether the agent's memory body is loaded and appended to the system
    prompt.
 2. Whether the `memory.write` tool is registered on the dispatcher and
    thus discoverable by the agent.
 
-An agent that has not opted in cannot see the tool name and cannot read
-or write memory.
+An agent that resolves to disabled cannot see the tool name and cannot
+read or write memory.
 
 ## System-prompt injection
 
@@ -112,6 +131,31 @@ Both halves are optional and assembled by `forge_agents::assemble_system_prompt`
 
 The session does the assembly **once** per session start and stores the
 result as `Arc<str>` so per-turn cost stays at the existing refcount bump.
+
+## Dashboard Memory editor (F-602)
+
+The Dashboard surfaces a Memory section that lists every loaded agent
+with:
+
+- The agent's memory file path on disk (so the user can locate the file
+  for backup or external inspection).
+- File size, last-modified, and the F-601 monotonic version.
+- A toggle that flips `[memory.enabled.<agent>]` in workspace settings.
+- An Edit button opening a Markdown editor flyout (Monaco-host iframe).
+  Read-only when the effective flag is disabled — existing content is
+  visible but not editable.
+- A Clear button that wipes the memory file body to empty after a
+  confirmation step.
+
+The editor saves through the `save_agent_memory` Tauri command, which
+calls `MemoryStore::write` with `WriteMode::Replace`. The version
+counter increments and `updated_at` advances on every save — same
+contract as the agent's own `memory.write` tool.
+
+The editor's draft state lives only in the component's local signal /
+iframe buffer. **Editor drafts are never persisted to disk until the
+user clicks Save.** The "DO NOT store secrets" warning is surfaced both
+in the section header and inside the editor flyout.
 
 ## Active-agent selection
 

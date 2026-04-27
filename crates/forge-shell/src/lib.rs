@@ -44,6 +44,12 @@ pub mod dashboard_sessions;
 // tests link without Tauri; the `#[tauri::command]` wrappers are gated
 // behind `webview`.
 pub mod containers_ipc;
+// F-602: Dashboard Memory section commands (`list_agent_memory`,
+// `read_agent_memory`, `save_agent_memory`, `clear_agent_memory`). Pure
+// validators and the `build_agent_memory_entries` helper are always
+// compiled so non-webview tests link without Tauri; the
+// `#[tauri::command]` wrappers are gated behind `webview`.
+pub mod memory_ipc;
 // F-586: provider-selection commands (`dashboard_list_providers`,
 // `get_active_provider`, `set_active_provider`). Pure helpers
 // (`build_provider_list`, `is_known_provider_id`, `validate_provider_id`)
