@@ -279,7 +279,7 @@ async fn session_tail(id: &str) -> Result<()> {
         }),
     )
     .await?;
-    let _ack = read_frame(&mut stream).await?;
+    let _ack: IpcMessage = read_frame(&mut stream).await?;
 
     write_frame(&mut stream, &IpcMessage::Subscribe(Subscribe { since: 0 })).await?;
 
@@ -378,7 +378,7 @@ async fn run_agent(name: &str, input_source: &str) -> Result<()> {
         }),
     )
     .await?;
-    read_frame(&mut stream)
+    let _ack: IpcMessage = read_frame(&mut stream)
         .await
         .map_err(|e| anyhow::anyhow!("handshake failed: {e}"))?;
 

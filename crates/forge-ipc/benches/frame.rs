@@ -247,7 +247,7 @@ fn report_alloc_reduction(rt: &Runtime) {
             let n_before = alloc_count();
             let b_before = alloc_bytes();
             for _ in 0..N {
-                let _ = read_frame(&mut srv).await.expect("read_frame");
+                let _: IpcMessage = read_frame(&mut srv).await.expect("read_frame");
             }
             let n_after = alloc_count();
             let b_after = alloc_bytes();
@@ -269,7 +269,7 @@ fn report_alloc_reduction(rt: &Runtime) {
             let n_before = alloc_count();
             let b_before = alloc_bytes();
             for _ in 0..N {
-                let _ = read_frame_into(&mut srv, &mut buf)
+                let _: IpcMessage = read_frame_into(&mut srv, &mut buf)
                     .await
                     .expect("read_frame_into");
             }
@@ -337,7 +337,7 @@ fn bench_read_paths(c: &mut Criterion) {
                         });
                         let before = alloc_count();
                         for _ in 0..n {
-                            let frame = read_frame(&mut srv).await.expect("read_frame");
+                            let frame: IpcMessage = read_frame(&mut srv).await.expect("read_frame");
                             black_box(frame);
                         }
                         let allocs = alloc_count() - before;
@@ -366,7 +366,7 @@ fn bench_read_paths(c: &mut Criterion) {
                         let mut buf: Vec<u8> = Vec::with_capacity(4096);
                         let before = alloc_count();
                         for _ in 0..n {
-                            let frame = read_frame_into(&mut srv, &mut buf)
+                            let frame: IpcMessage = read_frame_into(&mut srv, &mut buf)
                                 .await
                                 .expect("read_frame_into");
                             black_box(frame);

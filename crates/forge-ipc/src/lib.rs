@@ -5,9 +5,15 @@ pub use forge_core::RerunVariant;
 // IPC import path.
 pub use forge_core::{McpStateEvent, ServerState};
 pub use forge_mcp::McpServerInfo;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+
+// F-608: sibling tagged-union for the daemon ↔ `forged-agent` wire. Lives
+// alongside `IpcMessage` (different shape, same framing) per
+// `docs/architecture/agent-sidecar.md` §2.
+pub mod sidecar;
 
 pub const PROTO_VERSION: u32 = 1;
 pub const SCHEMA_VERSION: u32 = 1;
@@ -274,10 +280,19 @@ pub struct HelloAck {
     pub schema_version: u32,
 }
 
-pub async fn write_frame<W: AsyncWrite + Unpin>(
-    writer: &mut W,
-    msg: &IpcMessage,
-) -> anyhow::Result<()> {
+/// Write one length-prefixed JSON frame.
+///
+/// F-608: generic over `T: Serialize` so this helper services both the
+/// daemon ↔ shell wire ([`IpcMessage`]) and the daemon ↔ sidecar wire
+/// ([`sidecar::SidecarMessage`]). Body shape, length-prefix encoding,
+/// and the 4 MiB frame cap are unchanged from the pre-F-608
+/// `&IpcMessage`-typed signature; existing callers compile without
+/// modification because `T` is inferred from the call site.
+pub async fn write_frame<W, T>(writer: &mut W, msg: &T) -> anyhow::Result<()>
+where
+    W: AsyncWrite + Unpin,
+    T: Serialize + ?Sized,
+{
     let body = serde_json::to_vec(msg)?;
     if body.len() > MAX_FRAME_SIZE {
         bail!("frame too large: {} bytes", body.len());
@@ -294,7 +309,16 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(
 /// negligible. Hot pumping loops (assistant-token streaming) should
 /// hoist a `Vec<u8>` outside the loop and call [`read_frame_into`]
 /// directly to amortize the allocation across frames (F-565).
-pub async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> anyhow::Result<IpcMessage> {
+///
+/// F-608: generic over the decoded message type — the call site picks
+/// the type via turbofish (`read_frame::<IpcMessage>(&mut r)`) or via
+/// the surrounding bind annotation. Same JSON-decoded body, same
+/// length-prefix shape.
+pub async fn read_frame<R, T>(reader: &mut R) -> anyhow::Result<T>
+where
+    R: AsyncRead + Unpin,
+    T: DeserializeOwned,
+{
     let mut buf = Vec::new();
     read_frame_into(reader, &mut buf).await
 }
@@ -302,15 +326,20 @@ pub async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> anyhow::Result<
 /// F-565: read a single IPC frame into the caller-owned `buf`, reusing
 /// its capacity across calls. The buffer is resized (without zero-fill
 /// of already-allocated capacity) to the frame body length, then filled
-/// with `read_exact`. Decoded `IpcMessage` borrows nothing from `buf`,
-/// so the caller may immediately reuse it for the next frame.
+/// with `read_exact`. The decoded message borrows nothing from `buf`
+/// (because of the `DeserializeOwned` bound), so the caller may
+/// immediately reuse it for the next frame.
 ///
 /// Replaces a `vec![0u8; len]` per call — at streaming-token rates that
 /// is one heap alloc + one zero-fill per token, both removed here.
-pub async fn read_frame_into<R: AsyncRead + Unpin>(
-    reader: &mut R,
-    buf: &mut Vec<u8>,
-) -> anyhow::Result<IpcMessage> {
+///
+/// F-608: generic so the framing helpers serve both `IpcMessage` and
+/// the new [`sidecar::SidecarMessage`] without duplicating the body.
+pub async fn read_frame_into<R, T>(reader: &mut R, buf: &mut Vec<u8>) -> anyhow::Result<T>
+where
+    R: AsyncRead + Unpin,
+    T: DeserializeOwned,
+{
     let len = reader.read_u32().await? as usize;
     if len > MAX_FRAME_SIZE {
         bail!("frame too large: {} bytes", len);
@@ -333,22 +362,29 @@ pub async fn read_frame_into<R: AsyncRead + Unpin>(
 /// prefix or the frame body is fully read. The underlying reader is
 /// left in an indeterminate state; callers should drop the connection
 /// on error rather than retrying.
-pub async fn read_frame_with_deadline<R: AsyncRead + Unpin>(
-    reader: &mut R,
-    deadline: Duration,
-) -> anyhow::Result<IpcMessage> {
+///
+/// F-608: generic over the decoded message type — see [`read_frame`].
+pub async fn read_frame_with_deadline<R, T>(reader: &mut R, deadline: Duration) -> anyhow::Result<T>
+where
+    R: AsyncRead + Unpin,
+    T: DeserializeOwned,
+{
     let mut buf = Vec::new();
     read_frame_into_with_deadline(reader, &mut buf, deadline).await
 }
 
 /// F-565: deadline-bounded variant of [`read_frame_into`]. See
 /// [`read_frame_with_deadline`] for the deadline semantics.
-pub async fn read_frame_into_with_deadline<R: AsyncRead + Unpin>(
+pub async fn read_frame_into_with_deadline<R, T>(
     reader: &mut R,
     buf: &mut Vec<u8>,
     deadline: Duration,
-) -> anyhow::Result<IpcMessage> {
-    match tokio::time::timeout(deadline, read_frame_into(reader, buf)).await {
+) -> anyhow::Result<T>
+where
+    R: AsyncRead + Unpin,
+    T: DeserializeOwned,
+{
+    match tokio::time::timeout(deadline, read_frame_into::<R, T>(reader, buf)).await {
         Ok(inner) => inner,
         Err(_) => bail!("ipc read timed out after {:?}", deadline),
     }
@@ -386,7 +422,7 @@ mod tests {
 
         let sent = hello_msg();
         write_frame(&mut a, &sent).await.unwrap();
-        let got = read_frame(&mut b).await.unwrap();
+        let got: IpcMessage = read_frame(&mut b).await.unwrap();
 
         let sent_json = serde_json::to_string(&sent).unwrap();
         let got_json = serde_json::to_string(&got).unwrap();
@@ -399,7 +435,7 @@ mod tests {
 
         let sent = hello_ack_msg();
         write_frame(&mut a, &sent).await.unwrap();
-        let got = read_frame(&mut b).await.unwrap();
+        let got: IpcMessage = read_frame(&mut b).await.unwrap();
 
         let sent_json = serde_json::to_string(&sent).unwrap();
         let got_json = serde_json::to_string(&got).unwrap();
@@ -415,7 +451,9 @@ mod tests {
         let mut reader = a;
 
         let started = std::time::Instant::now();
-        let result = read_frame_with_deadline(&mut reader, Duration::from_millis(100)).await;
+        let result =
+            read_frame_with_deadline::<_, IpcMessage>(&mut reader, Duration::from_millis(100))
+                .await;
         let elapsed = started.elapsed();
 
         assert!(result.is_err(), "expected deadline error, got {:?}", result);
@@ -436,7 +474,7 @@ mod tests {
             write_frame(&mut a, &sent).await.unwrap();
         });
 
-        let got = read_frame_with_deadline(&mut b, Duration::from_secs(5))
+        let got: IpcMessage = read_frame_with_deadline(&mut b, Duration::from_secs(5))
             .await
             .expect("frame should arrive before deadline");
         matches!(got, IpcMessage::Hello(_));
