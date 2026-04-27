@@ -5,6 +5,7 @@ members = [
     "crates/forge-providers",
     "crates/forge-mcp",
     "crates/forge-agents",
+    "crates/forge-agent-host",
     "crates/forge-session",
     "crates/forge-oci",
     "crates/forge-fs",

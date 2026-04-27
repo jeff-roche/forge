@@ -1,0 +1,46 @@
+[package]
+name = "forge-agent-host"
+version = "0.3.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+# F-608 step 2: ships the `forged-agent` binary — the per-instance
+# sidecar process the daemon spawns. The crate is intentionally thin:
+# only the IPC plumbing skeleton (handshake, heartbeat, panic hook,
+# message dispatch) lives here. The `run_turn` body lands in step 3 by
+# refactoring `forge-session` to take a transport-agnostic event sink;
+# at that point this crate gains a thin adapter that pumps frames out
+# the UDS instead of into a local `Session`.
+#
+# Crate placement rationale: keeping this out of `forge-session`
+# avoids pulling persistence, the IPC server, and MCP into the
+# sidecar's compile graph — the architecture doc Open Questions §1
+# calls this out as the "recommended default" for exactly this reason.
+
+[lib]
+name = "forge_agent_host"
+path = "src/lib.rs"
+
+[[bin]]
+name = "forged-agent"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+forge-core = { path = "../forge-core" }
+forge-ipc = { path = "../forge-ipc" }
+serde_json = "1"
+tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "sync", "time", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "json", "env-filter"] }
+
+[dev-dependencies]
+forge-ipc = { path = "../forge-ipc" }
+serde_json = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "io-util", "process"] }
+
+[[test]]
+name = "forged_agent_lifecycle"
+path = "tests/forged_agent_lifecycle.rs"
