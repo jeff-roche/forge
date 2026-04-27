@@ -1634,6 +1634,15 @@ async fn handle_connection<P: Provider + 'static>(
                         // pathological provider that never reaches a
                         // chunk boundary; the deadline is generous
                         // for realistic streams.
+                        //
+                        // Drain any stale capture from a previous
+                        // interrupt cycle BEFORE setting the flag —
+                        // a deadline-expired prior request can leave
+                        // a capture in the slot that the orchestrator
+                        // populated late, and `await_interrupt_capture`
+                        // would otherwise return that stale value
+                        // through its fast path.
+                        let _drained_stale = session.take_interrupt_capture().await;
                         let _was_fresh = session.request_interrupt();
                         let timeout = std::time::Duration::from_secs(5);
                         let handoff = match session.await_interrupt_capture(timeout).await {
