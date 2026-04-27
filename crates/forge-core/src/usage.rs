@@ -129,6 +129,67 @@ pub struct UsageSummary {
 }
 
 // ---------------------------------------------------------------------------
+// Live per-session totals (F-605)
+// ---------------------------------------------------------------------------
+
+/// Running token + cost totals for a single live session.
+///
+/// F-605: emitted alongside the new `session_id` tag on
+/// [`crate::Event::UsageTick`] so the AgentMonitor §9.2 toolbar can render
+/// "tokens consumed in session X right now" without forcing a flush of the
+/// monthly aggregate. Computed by walking the session's `events.jsonl`
+/// (see `forge-session`'s `usage_flush::live_session_totals`) — the
+/// on-disk monthly aggregate stays untouched.
+///
+/// `cost` is `Option<Money>` to match [`UsageBreakdown`] / [`UsageBucket`]
+/// semantics — once any contributing tick lacks a price-table row, the
+/// session-wide cost surfaces as `null` rather than silently dropping the
+/// missing increment to zero.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+pub struct SessionUsage {
+    pub tokens_in: u64,
+    pub tokens_out: u64,
+    pub cost: Option<Money>,
+}
+
+impl Default for SessionUsage {
+    fn default() -> Self {
+        Self::zero()
+    }
+}
+
+impl SessionUsage {
+    /// All-zero starting point; cost is `Some(0 USD)` until a tick without a
+    /// priced row arrives.
+    pub fn zero() -> Self {
+        Self {
+            tokens_in: 0,
+            tokens_out: 0,
+            cost: Some(Money::usd(0.0)),
+        }
+    }
+
+    /// Fold one priced [`crate::Event::UsageTick`] payload into this total.
+    ///
+    /// `cost` of `None` is *sticky*: once observed, every subsequent
+    /// increment leaves the session cost `None`. Mirrors
+    /// [`MonthlyAggregate::record`]'s missing-price policy so live and
+    /// flushed totals report a missing price the same way.
+    pub fn fold(&mut self, tokens_in: u64, tokens_out: u64, cost: Option<Money>) {
+        self.tokens_in = self.tokens_in.saturating_add(tokens_in);
+        self.tokens_out = self.tokens_out.saturating_add(tokens_out);
+        self.cost = match (self.cost.take(), cost) {
+            (Some(prev), Some(now)) if prev.currency == now.currency => Some(Money {
+                amount: prev.amount + now.amount,
+                currency: prev.currency,
+            }),
+            _ => None,
+        };
+    }
+}
+
+// ---------------------------------------------------------------------------
 // On-disk monthly aggregate
 // ---------------------------------------------------------------------------
 

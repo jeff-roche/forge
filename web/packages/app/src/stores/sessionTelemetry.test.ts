@@ -108,6 +108,42 @@ describe('sessionTelemetry store (F-395)', () => {
       expect(t.costUsd).toBeCloseTo(0.042);
     });
 
+    it('routes usage_tick whose session_id matches the window', () => {
+      // F-605: ticks tagged with this window's session id flow through.
+      routeTelemetryEvent(SID, {
+        type: 'usage_tick',
+        session_id: SID,
+        provider: 'anthropic',
+        model: 'claude-opus-4-7',
+        tokens_in: 100,
+        tokens_out: 200,
+        cost_usd: 0.01,
+        scope: { type: 'SessionWide' },
+      });
+      const t = getSessionTelemetry(SID);
+      expect(t.tokensIn).toBe(100);
+      expect(t.tokensOut).toBe(200);
+    });
+
+    it('drops usage_tick whose session_id is for a different session', () => {
+      // F-605: a tick from another session must not credit this window's
+      // running totals.
+      routeTelemetryEvent(SID, {
+        type: 'usage_tick',
+        session_id: 'c0ffeec0ffeec0ff',
+        provider: 'anthropic',
+        model: 'claude-opus-4-7',
+        tokens_in: 9999,
+        tokens_out: 9999,
+        cost_usd: 9.99,
+        scope: { type: 'SessionWide' },
+      });
+      const t = getSessionTelemetry(SID);
+      expect(t.tokensIn).toBeNull();
+      expect(t.tokensOut).toBeNull();
+      expect(t.costUsd).toBeNull();
+    });
+
     it('is a no-op for unrelated wire events', () => {
       routeTelemetryEvent(SID, {
         type: 'user_message',
