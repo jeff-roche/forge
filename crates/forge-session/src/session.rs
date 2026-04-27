@@ -2,7 +2,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
-use forge_core::{Event, EventLog};
+use async_trait::async_trait;
+use forge_core::{Event, EventLog, EventSink};
 use tokio::sync::{broadcast, Mutex, Notify};
 
 use crate::error::SessionError;
@@ -324,6 +325,18 @@ impl Session {
 
     pub async fn current_seq(&self) -> u64 {
         *self.seq.lock().await
+    }
+}
+
+/// F-608 step 3: route the in-process orchestrator's event emissions
+/// through the [`EventSink`] trait. Delegates to the existing
+/// [`Session::emit`] body and re-wraps the typed [`SessionError`] into
+/// `anyhow::Error` at the trait boundary so the orchestrator's
+/// `anyhow::Result<()>` propagation shape is preserved.
+#[async_trait]
+impl EventSink for Session {
+    async fn emit(&self, event: Event) -> anyhow::Result<()> {
+        Session::emit(self, event).await.map_err(Into::into)
     }
 }
 

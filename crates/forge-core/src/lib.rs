@@ -4,6 +4,7 @@ pub mod credentials;
 mod error;
 mod event;
 mod event_log;
+mod event_sink;
 pub mod ids;
 pub mod mcp_state;
 pub mod meta;
@@ -25,6 +26,7 @@ pub use credentials::{Credentials, EnvFallbackStore, LayeredStore, MemoryStore};
 pub use error::{ForgeError, Result};
 pub use event::{ApprovalPreview, ApprovalSource, ContextRef, EndReason, Event};
 pub use event_log::{read_since, EventLog, MAX_LINE_BYTES};
+pub use event_sink::EventSink;
 pub use ids::{
     AgentId, AgentInstanceId, MessageId, ProviderId, SessionId, StepId, TerminalId, ToolCallId,
     WorkspaceId,

@@ -8,7 +8,8 @@ use forge_core::{
     apply_superseded,
     credentials::Credentials,
     ids::{MessageId, ProviderId, StepId, ToolCallId},
-    read_since, ApprovalScope, ApprovalSource, Event, RerunVariant, StepKind, StepOutcome,
+    read_since, ApprovalScope, ApprovalSource, Event, EventSink, RerunVariant, StepKind,
+    StepOutcome,
 };
 use forge_providers::{ChatBlock, ChatChunk, ChatMessage, ChatRequest, ChatRole, Provider};
 use futures::StreamExt;
@@ -164,6 +165,16 @@ fn panic_message(panic: Box<dyn std::any::Any + Send>) -> String {
 #[allow(clippy::too_many_arguments)]
 pub async fn run_turn<P: Provider>(
     session: Arc<Session>,
+    // F-608 step 3: transport-agnostic event emission. Session-side
+    // operations (pause/interrupt flags, parallel-group counter, byte
+    // budget, compaction guard) still flow through `Arc<Session>`
+    // above, but every `Event` this turn produces is routed through
+    // `events.emit(...)` so the same body runs unchanged in the
+    // sidecar (where `events` is an `IpcEventSink` writing
+    // `SidecarMessage::Event` frames). In-process callers pass
+    // `session.as_ref()` here — `Session: EventSink` delegates to
+    // its existing durable-log + broadcast emit.
+    events: &dyn EventSink,
     provider: Arc<P>,
     text: String,
     pending_approvals: PendingApprovals,
@@ -246,7 +257,7 @@ pub async fn run_turn<P: Provider>(
 
     let msg_id = MessageId::new();
 
-    session
+    events
         .emit(Event::UserMessage {
             id: msg_id.clone(),
             at: Utc::now(),
@@ -327,6 +338,7 @@ pub async fn run_turn<P: Provider>(
 
     run_request_loop(
         session,
+        events,
         provider,
         initial_req,
         msg_id,
@@ -398,6 +410,14 @@ async fn build_legacy_dispatcher(mcp: Option<&Arc<McpManager>>) -> ToolDispatche
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_request_loop<P: Provider>(
     session: Arc<Session>,
+    // F-608 step 3: every event emitted from inside the request loop
+    // routes through this sink. Session-state primitives (pause flag,
+    // interrupt flag + capture publish, parallel-group allocator) still
+    // come off `session` because they're inherently coupled to the
+    // in-process daemon — the sidecar variant of the loop will receive
+    // these as IPC frames in step 5 (BackgroundAgentRegistry wiring) so
+    // we deliberately do NOT widen `EventSink` to include them here.
+    events: &dyn EventSink,
     provider: Arc<P>,
     mut req: ChatRequest,
     msg_id: MessageId,
@@ -452,7 +472,7 @@ pub(crate) async fn run_request_loop<P: Provider>(
         let model_step_id = StepId::new();
         let model_step_started = Instant::now();
         step_index += 1;
-        session
+        events
             .emit(Event::StepStarted {
                 step_id: model_step_id.clone(),
                 instance_id: instance_id.clone(),
@@ -465,7 +485,7 @@ pub(crate) async fn run_request_loop<P: Provider>(
 
         // Emit AssistantMessage(open) before any chunks arrive — ensures the
         // event is present even when the first chunk is a tool call (not text).
-        session
+        events
             .emit(Event::AssistantMessage {
                 id: msg_id.clone(),
                 provider: provider_id.clone(),
@@ -505,7 +525,7 @@ pub(crate) async fn run_request_loop<P: Provider>(
             match chunk {
                 ChatChunk::TextDelta(delta) => {
                     assistant_text.push_str(&delta);
-                    session
+                    events
                         .emit(Event::AssistantDelta {
                             id: msg_id.clone(),
                             at: Utc::now(),
@@ -541,7 +561,7 @@ pub(crate) async fn run_request_loop<P: Provider>(
                     // Drop any buffered tool calls — they never reached
                     // the dispatcher and emitting partial Tool* events
                     // would leave a half-bracketed step window.
-                    session
+                    events
                         .emit(Event::AssistantMessage {
                             id: msg_id.clone(),
                             provider: provider_id.clone(),
@@ -557,7 +577,7 @@ pub(crate) async fn run_request_loop<P: Provider>(
                     // F-139: close the Model step with an Error outcome
                     // so late-joining subscribers see a well-formed
                     // step window even on provider abort.
-                    session
+                    events
                         .emit(Event::StepFinished {
                             step_id: model_step_id.clone(),
                             outcome: StepOutcome::Error {
@@ -619,7 +639,7 @@ pub(crate) async fn run_request_loop<P: Provider>(
         // stays alive, the next `SendUserMessage` continues normally.
         if interrupted {
             let partial_arc: Arc<str> = Arc::from(assistant_text.as_str());
-            session
+            events
                 .emit(Event::AssistantMessage {
                     id: msg_id.clone(),
                     provider: provider_id.clone(),
@@ -631,7 +651,7 @@ pub(crate) async fn run_request_loop<P: Provider>(
                     branch_variant_index,
                 })
                 .await?;
-            session
+            events
                 .emit(Event::SessionInterrupted {
                     at: Utc::now(),
                     partial_text: Arc::clone(&partial_arc),
@@ -639,7 +659,7 @@ pub(crate) async fn run_request_loop<P: Provider>(
                     captured_at_msg_id: msg_id.clone(),
                 })
                 .await?;
-            session
+            events
                 .emit(Event::StepFinished {
                     step_id: model_step_id.clone(),
                     outcome: StepOutcome::Error {
@@ -670,6 +690,7 @@ pub(crate) async fn run_request_loop<P: Provider>(
             rejected,
         } = dispatch_tool_calls(
             &session,
+            events,
             std::mem::take(&mut pending_calls),
             &msg_id,
             &instance_id,
@@ -687,7 +708,7 @@ pub(crate) async fn run_request_loop<P: Provider>(
         // exit shape the pre-F-599 code did so the LIFO step invariant
         // holds for embedders that pin on it.
         if rejected {
-            session
+            events
                 .emit(Event::AssistantMessage {
                     id: msg_id.clone(),
                     provider: provider_id.clone(),
@@ -699,7 +720,7 @@ pub(crate) async fn run_request_loop<P: Provider>(
                     branch_variant_index,
                 })
                 .await?;
-            session
+            events
                 .emit(Event::StepFinished {
                     step_id: model_step_id.clone(),
                     outcome: StepOutcome::Ok,
@@ -712,7 +733,7 @@ pub(crate) async fn run_request_loop<P: Provider>(
 
         // Always finalise the assistant message — whether or not tool
         // calls fired this turn.
-        session
+        events
             .emit(Event::AssistantMessage {
                 id: msg_id.clone(),
                 provider: provider_id.clone(),
@@ -724,7 +745,7 @@ pub(crate) async fn run_request_loop<P: Provider>(
                 branch_variant_index,
             })
             .await?;
-        session
+        events
             .emit(Event::StepFinished {
                 step_id: model_step_id.clone(),
                 outcome: StepOutcome::Ok,
@@ -859,6 +880,12 @@ fn group_tool_calls(read_only_flags: &[Option<bool>]) -> Vec<ToolBatch> {
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_tool_calls(
     session: &Arc<Session>,
+    // F-608 step 3: route every Tool* / Step* event through the
+    // injected sink. `session` is still kept on hand for the
+    // session-state primitive `next_parallel_group()` (which the
+    // sidecar will receive as an IPC frame in step 5, so we hold the
+    // line on what `EventSink` carries).
+    events: &dyn EventSink,
     pending: Vec<PendingToolCall>,
     msg_id: &MessageId,
     instance_id: &Option<forge_core::ids::AgentInstanceId>,
@@ -916,7 +943,7 @@ async fn dispatch_tool_calls(
                 let started = Instant::now();
                 tool_steps[idx] = Some((tool_step_id.clone(), started));
                 *step_index += 1;
-                session
+                events
                     .emit(Event::StepStarted {
                         step_id: tool_step_id.clone(),
                         instance_id: instance_id.clone(),
@@ -926,7 +953,7 @@ async fn dispatch_tool_calls(
                         total: None,
                     })
                     .await?;
-                session
+                events
                     .emit(Event::ToolCallStarted {
                         id: pc.call_id.clone(),
                         msg: msg_id.clone(),
@@ -945,7 +972,7 @@ async fn dispatch_tool_calls(
             // here: read-only tools never raise a user prompt today.
             for &idx in &batch.indices {
                 let pc = &pending[idx];
-                session
+                events
                     .emit(Event::ToolCallApproved {
                         id: pc.call_id.clone(),
                         by: ApprovalSource::Auto,
@@ -961,7 +988,7 @@ async fn dispatch_tool_calls(
             for &idx in &batch.indices {
                 let pc = &pending[idx];
                 let (tool_step_id, _) = tool_steps[idx].as_ref().expect("tool step opened");
-                session
+                events
                     .emit(Event::ToolInvoked {
                         step_id: tool_step_id.clone(),
                         tool_call_id: pc.call_id.clone(),
@@ -1061,7 +1088,7 @@ async fn dispatch_tool_calls(
                 let result_ok = result.get("error").is_none();
                 let duration_ms = started.elapsed().as_millis() as u64;
 
-                session
+                events
                     .emit(Event::ToolReturned {
                         step_id: tool_step_id.clone(),
                         tool_call_id: pc.call_id.clone(),
@@ -1069,7 +1096,7 @@ async fn dispatch_tool_calls(
                         bytes_out: result_bytes,
                     })
                     .await?;
-                session
+                events
                     .emit(Event::ToolCallCompleted {
                         id: pc.call_id.clone(),
                         result: result.clone(),
@@ -1077,7 +1104,7 @@ async fn dispatch_tool_calls(
                         at: Utc::now(),
                     })
                     .await?;
-                session
+                events
                     .emit(Event::StepFinished {
                         step_id: tool_step_id.clone(),
                         outcome: if result_ok {
@@ -1116,7 +1143,7 @@ async fn dispatch_tool_calls(
                 let tool_step_id = StepId::new();
                 let tool_step_started = Instant::now();
                 *step_index += 1;
-                session
+                events
                     .emit(Event::StepStarted {
                         step_id: tool_step_id.clone(),
                         instance_id: instance_id.clone(),
@@ -1126,7 +1153,7 @@ async fn dispatch_tool_calls(
                         total: None,
                     })
                     .await?;
-                session
+                events
                     .emit(Event::ToolCallStarted {
                         id: pc.call_id.clone(),
                         msg: msg_id.clone(),
@@ -1143,7 +1170,7 @@ async fn dispatch_tool_calls(
                 let result = match tool_lookup {
                     Ok(tool) => {
                         if auto_approve || tool.read_only() {
-                            session
+                            events
                                 .emit(Event::ToolCallApproved {
                                     id: pc.call_id.clone(),
                                     by: ApprovalSource::Auto,
@@ -1157,7 +1184,7 @@ async fn dispatch_tool_calls(
                                 .lock()
                                 .await
                                 .insert(pc.call_id.to_string(), tx);
-                            session
+                            events
                                 .emit(Event::ToolCallApprovalRequested {
                                     id: pc.call_id.clone(),
                                     preview: tool.approval_preview(&pc.args),
@@ -1167,13 +1194,13 @@ async fn dispatch_tool_calls(
                             let scope = match decision {
                                 ApprovalDecision::Approved(scope) => scope,
                                 ApprovalDecision::Rejected => {
-                                    session
+                                    events
                                         .emit(Event::ToolCallRejected {
                                             id: pc.call_id.clone(),
                                             reason: Some("rejected by client".to_string()),
                                         })
                                         .await?;
-                                    session
+                                    events
                                         .emit(Event::StepFinished {
                                             step_id: tool_step_id.clone(),
                                             outcome: StepOutcome::Error {
@@ -1191,7 +1218,7 @@ async fn dispatch_tool_calls(
                                     });
                                 }
                             };
-                            session
+                            events
                                 .emit(Event::ToolCallApproved {
                                     id: pc.call_id.clone(),
                                     by: ApprovalSource::User,
@@ -1201,7 +1228,7 @@ async fn dispatch_tool_calls(
                                 .await?;
                         }
 
-                        session
+                        events
                             .emit(Event::ToolInvoked {
                                 step_id: tool_step_id.clone(),
                                 tool_call_id: pc.call_id.clone(),
@@ -1218,7 +1245,7 @@ async fn dispatch_tool_calls(
                         crate::tools::invoke_with_budget(tool, &pc.args, ctx).await
                     }
                     Err(ToolError::UnknownTool(n)) => {
-                        session
+                        events
                             .emit(Event::ToolInvoked {
                                 step_id: tool_step_id.clone(),
                                 tool_call_id: pc.call_id.clone(),
@@ -1229,7 +1256,7 @@ async fn dispatch_tool_calls(
                         serde_json::json!({ "error": format!("unknown tool '{n}'") })
                     }
                     Err(e) => {
-                        session
+                        events
                             .emit(Event::ToolInvoked {
                                 step_id: tool_step_id.clone(),
                                 tool_call_id: pc.call_id.clone(),
@@ -1246,7 +1273,7 @@ async fn dispatch_tool_calls(
                     .map(|s| s.len() as u64)
                     .unwrap_or(0);
                 let result_ok = result.get("error").is_none();
-                session
+                events
                     .emit(Event::ToolReturned {
                         step_id: tool_step_id.clone(),
                         tool_call_id: pc.call_id.clone(),
@@ -1254,7 +1281,7 @@ async fn dispatch_tool_calls(
                         bytes_out: result_bytes,
                     })
                     .await?;
-                session
+                events
                     .emit(Event::ToolCallCompleted {
                         id: pc.call_id.clone(),
                         result: result.clone(),
@@ -1262,7 +1289,7 @@ async fn dispatch_tool_calls(
                         at: Utc::now(),
                     })
                     .await?;
-                session
+                events
                     .emit(Event::StepFinished {
                         step_id: tool_step_id.clone(),
                         outcome: if result_ok {
@@ -1497,8 +1524,13 @@ impl Orchestrator {
             mcp: None,
         };
 
+        // F-608 step 3: rerun is in-process — `Session` IS the
+        // `EventSink`, so we pass the same `Arc<Session>` for both
+        // session-state ops and event emission.
+        let events: &dyn EventSink = session.as_ref();
         run_request_loop(
             Arc::clone(&session),
+            events,
             provider,
             req,
             new_id.clone(),
@@ -1624,8 +1656,11 @@ impl Orchestrator {
             mcp: None,
         };
 
+        // F-608 step 3: see `rerun_replace` — Session is the sink.
+        let events: &dyn EventSink = session.as_ref();
         run_request_loop(
             Arc::clone(&session),
+            events,
             provider,
             req,
             new_id.clone(),
@@ -1734,8 +1769,11 @@ impl Orchestrator {
             mcp: None,
         };
 
+        // F-608 step 3: see `rerun_replace` — Session is the sink.
+        let events: &dyn EventSink = session.as_ref();
         run_request_loop(
             Arc::clone(&session),
+            events,
             provider,
             req,
             new_id.clone(),
@@ -2130,6 +2168,7 @@ mod tests {
 
         run_turn(
             Arc::clone(&session),
+            session.as_ref(),
             Arc::clone(&provider),
             "first turn".to_string(),
             Arc::clone(&pending),
@@ -2155,6 +2194,7 @@ mod tests {
 
         run_turn(
             Arc::clone(&session),
+            session.as_ref(),
             Arc::clone(&provider),
             "second turn".to_string(),
             pending,
@@ -2215,8 +2255,10 @@ mod tests {
                 .expect("construct mock"),
         );
 
+        let events_session = Arc::clone(&session);
         run_turn(
             session,
+            events_session.as_ref(),
             Arc::clone(&provider),
             "hello".to_string(),
             Arc::new(Mutex::new(HashMap::new())),
@@ -2416,6 +2458,7 @@ mod tests {
 
         run_turn(
             Arc::clone(&session),
+            session.as_ref(),
             Arc::clone(&provider),
             "fresh prompt".to_string(),
             pending,
@@ -2480,6 +2523,7 @@ mod tests {
 
         run_turn(
             Arc::clone(&session),
+            session.as_ref(),
             Arc::clone(&provider),
             "below threshold".to_string(),
             pending,
@@ -2692,6 +2736,7 @@ mod tests {
             let started = std::time::Instant::now();
             run_request_loop(
                 Arc::clone(&session),
+                session.as_ref(),
                 Arc::clone(&provider),
                 req,
                 MessageId::new(),
@@ -2786,6 +2831,7 @@ mod tests {
 
         run_request_loop(
             Arc::clone(&session),
+            session.as_ref(),
             Arc::clone(&provider),
             req,
             MessageId::new(),
@@ -2894,6 +2940,7 @@ mod tests {
 
         run_request_loop(
             Arc::clone(&session),
+            session.as_ref(),
             Arc::clone(&provider),
             ChatRequest {
                 system: None,
@@ -2975,6 +3022,7 @@ mod tests {
 
         run_request_loop(
             Arc::clone(&session),
+            session.as_ref(),
             Arc::clone(&provider),
             ChatRequest {
                 system: None,
@@ -3074,6 +3122,7 @@ mod tests {
 
         run_request_loop(
             Arc::clone(&session),
+            session.as_ref(),
             Arc::clone(&provider),
             ChatRequest {
                 system: None,
@@ -3192,6 +3241,7 @@ mod tests {
 
         run_request_loop(
             Arc::clone(&session),
+            session.as_ref(),
             Arc::clone(&provider),
             ChatRequest {
                 system: None,
@@ -3228,6 +3278,7 @@ mod tests {
         let mut rx = session.event_tx.subscribe();
         run_request_loop(
             Arc::clone(&session),
+            session.as_ref(),
             Arc::clone(&provider),
             ChatRequest {
                 system: None,
@@ -3341,6 +3392,7 @@ mod tests {
 
         run_request_loop(
             Arc::clone(&session),
+            session.as_ref(),
             Arc::clone(&provider),
             ChatRequest {
                 system: None,

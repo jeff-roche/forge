@@ -1403,6 +1403,7 @@ name = "forge-agent-host"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "forge-core",
  "forge-ipc",
