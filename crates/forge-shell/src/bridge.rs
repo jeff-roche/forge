@@ -27,9 +27,10 @@ use anyhow::{anyhow, Context, Result};
 use forge_core::{ApprovalScope, RerunVariant};
 use forge_ipc::{
     read_frame, read_frame_into, write_frame, ClientInfo, CompactTranscript, DeleteBranch, Hello,
-    HelloAck, ImportMcpConfig, IpcMessage, ListMcpServers, McpImportResult, McpServersList,
-    McpToggleResult, PauseSession, RerunMessage, ResumeSession, SelectBranch, SendUserMessage,
-    Subscribe, ToggleMcpServer, ToolCallApproved, ToolCallRejected, PROTO_VERSION,
+    HelloAck, ImportMcpConfig, InterruptSession, IpcMessage, ListMcpServers, McpImportResult,
+    McpServersList, McpToggleResult, PauseSession, RefineHandoff, RerunMessage, ResumeSession,
+    SelectBranch, SendUserMessage, Subscribe, ToggleMcpServer, ToolCallApproved, ToolCallRejected,
+    PROTO_VERSION,
 };
 use serde::Serialize;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -76,10 +77,10 @@ struct Connection {
 }
 
 /// Per-kind reply slot queues used by `pump_events` to correlate
-/// daemon→client MCP response frames with the Tauri commands that
-/// issued them.
+/// daemon→client request-response frames (today: MCP responses + the
+/// F-604 refine handoff) with the Tauri commands that issued them.
 ///
-/// Each MCP command flow is: acquire the per-kind lock, register a
+/// Each command flow is: acquire the per-kind lock, register a
 /// one-shot receiver, send the request frame, await the receiver. The
 /// pump pops the oldest waiter from the queue when it observes a
 /// matching response frame. Serialising by kind (rather than by any
@@ -90,6 +91,8 @@ pub(crate) struct McpReplySlots {
     list: Mutex<std::collections::VecDeque<tokio::sync::oneshot::Sender<McpServersList>>>,
     toggle: Mutex<std::collections::VecDeque<tokio::sync::oneshot::Sender<McpToggleResult>>>,
     import: Mutex<std::collections::VecDeque<tokio::sync::oneshot::Sender<McpImportResult>>>,
+    /// F-604: refine-handoff response from `IpcMessage::InterruptSession`.
+    interrupt: Mutex<std::collections::VecDeque<tokio::sync::oneshot::Sender<RefineHandoff>>>,
 }
 
 /// Session-id keyed registry of active bridge connections.
@@ -487,6 +490,39 @@ impl SessionBridge {
         write_frame(&mut *writer, &frame).await
     }
 
+    /// F-604: interrupt the in-flight assistant turn and fetch the
+    /// refine handoff. Distinct from [`Self::pause_session`] (resumable
+    /// — same turn keeps going) and from `session_cancel` (terminal —
+    /// ends the session). The daemon captures the partial assistant
+    /// text at the next chunk boundary, emits
+    /// `Event::SessionInterrupted` on the event stream, and replies
+    /// with the same payload via [`IpcMessage::RefineHandoff`] which
+    /// `pump_events` routes back here through the per-kind reply slot.
+    /// An interrupt with no in-flight turn replies with an empty
+    /// handoff (`partial_text: ""`, `captured_at_*: ""`) — a legal
+    /// shape that the calling Tauri command surfaces to the webview as
+    /// "nothing was in flight to refine."
+    pub async fn interrupt_session(&self, session_id: &str) -> Result<RefineHandoff> {
+        let (writer, mcp_replies) = self.mcp_handles_for(session_id).await?;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        mcp_replies.interrupt.lock().await.push_back(tx);
+
+        let frame = IpcMessage::InterruptSession(InterruptSession::default());
+        let send_result = {
+            let mut guard = writer.lock().await;
+            write_frame(&mut *guard, &frame).await
+        };
+        if let Err(e) = send_result {
+            // Drop the registered slot so a future call doesn't consume
+            // a stale reply. Pop the front matches the slot we just
+            // pushed (FIFO across pipelined callers).
+            let _ = mcp_replies.interrupt.lock().await.pop_front();
+            return Err(e);
+        }
+        rx.await
+            .map_err(|_| anyhow!("interrupt_session: reply channel closed"))
+    }
+
     /// F-155: list the session daemon's MCP servers. The daemon returns
     /// its authoritative `McpManager::list()` snapshot — the shell no
     /// longer maintains its own manager.
@@ -670,8 +706,17 @@ async fn pump_events(
                     let _ = slot.send(res);
                 }
             }
+            // F-604: route the refine-handoff response into the
+            // matching reply slot. Same drop-on-no-waiter semantics as
+            // the MCP arms — a cancelled command leaves no slot, the
+            // reply lands without a receiver, and we silently discard.
+            Ok(IpcMessage::RefineHandoff(handoff)) => {
+                if let Some(slot) = mcp_replies.interrupt.lock().await.pop_front() {
+                    let _ = slot.send(handoff);
+                }
+            }
             Ok(_) => {
-                // Non-event, non-MCP-response frames (e.g. late HelloAck)
+                // Non-event, non-response frames (e.g. late HelloAck)
                 // are ignored; only session events flow to the webview.
             }
             Err(_) => {

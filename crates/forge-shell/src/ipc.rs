@@ -523,6 +523,8 @@ pub fn build_invoke_handler<R: Runtime>() -> Box<dyn Fn(tauri::ipc::Invoke<R>) -
         // F-603: AgentMonitor Pause/Resume buttons.
         session_pause,
         session_resume,
+        // F-604: Composer interrupt-and-refine target.
+        session_interrupt_and_refine,
         session_approve_tool,
         session_reject_tool,
         rerun_message,
@@ -2879,6 +2881,41 @@ pub async fn session_resume<R: Runtime>(
     state
         .bridge
         .resume_session(&session_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// F-604: interrupt the in-flight assistant turn and return a refine
+/// handoff containing the captured partial text.
+///
+/// Distinct from `session_cancel` (terminal — ends the session) and
+/// from [`session_pause`] (resumable — same turn keeps going on
+/// resume). Interrupt cuts the current turn cleanly: the orchestrator
+/// breaks out of its stream loop at the next chunk boundary, captures
+/// the partial assistant text, emits `Event::SessionInterrupted` (so
+/// any subscribed webview can react), and parks the session in a
+/// quiescent state where the next user message continues normally.
+///
+/// The returned [`forge_ipc::RefineHandoff`] mirrors the event payload
+/// — UI code can drive the refine composer either by awaiting this
+/// return value or by handling the event stream. Interrupt issued with
+/// no in-flight assistant turn replies with an empty handoff
+/// (`partial_text: ""`, both anchors empty) — a legal shape the UI
+/// surfaces as "nothing to refine."
+#[tauri::command]
+pub async fn session_interrupt_and_refine<R: Runtime>(
+    session_id: String,
+    webview: Webview<R>,
+    state: State<'_, BridgeState>,
+) -> Result<forge_ipc::RefineHandoff, String> {
+    require_window_label(
+        &webview,
+        &format!("session-{session_id}"),
+        "session_interrupt_and_refine",
+    )?;
+    state
+        .bridge
+        .interrupt_session(&session_id)
         .await
         .map_err(|e| e.to_string())
 }

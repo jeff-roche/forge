@@ -490,6 +490,17 @@ pub(crate) async fn run_request_loop<P: Provider>(
         // events are deferred.
         let mut pending_calls: Vec<PendingToolCall> = vec![];
 
+        // F-604: set when the stream loop observed an interrupt request
+        // and broke out at a chunk boundary. The post-loop tail is
+        // skipped — we emit a dedicated interrupt finalisation
+        // (`SessionInterrupted` + `AssistantMessage(final)` +
+        // `StepFinished(Error: "interrupted")`) and return cleanly so
+        // the session stays alive for the next user message. Tool
+        // calls buffered in `pending_calls` are dropped without
+        // emitting partial Tool* events — same drop semantics as the
+        // `ChatChunk::Error` arm.
+        let mut interrupted = false;
+
         while let Some(chunk) = stream.next().await {
             match chunk {
                 ChatChunk::TextDelta(delta) => {
@@ -561,6 +572,91 @@ pub(crate) async fn run_request_loop<P: Provider>(
                     ));
                 }
             }
+
+            // F-604: yield to the runtime before the interrupt check
+            // so the daemon's IPC reader task gets a fair scheduling
+            // slot to process an `InterruptSession` frame that arrived
+            // while we were emitting the previous chunk's events.
+            // Without this yield, a synchronous provider stream (e.g.
+            // `MockProvider` backed by `futures::stream::iter`) drains
+            // every chunk before the IPC reader gets a chance to flip
+            // the flag, and the interrupt boundary check below never
+            // observes a true. Real SSE-backed providers yield
+            // naturally on socket reads; this `yield_now` gives the
+            // mock provider — and any pathological zero-latency
+            // provider — the same scheduling fairness. Cost is a
+            // single tokio scheduler trip per chunk, negligible
+            // against the per-token IPC cost.
+            tokio::task::yield_now().await;
+
+            // F-604: interrupt checkpoint — checked after each chunk so
+            // a mid-stream request takes effect at the next clean
+            // chunk boundary (where `assistant_text` reflects every
+            // delta we already emitted via `AssistantDelta`). Distinct
+            // from the F-603 pause checkpoint: pause parks at the
+            // *between-step* boundary and keeps the turn alive;
+            // interrupt cuts the current turn and hands the partial
+            // back as a refine handoff. Set the flag and break — the
+            // post-loop tail (below) sees `interrupted = true` and
+            // takes the dedicated finalisation path.
+            if session.is_interrupt_requested() {
+                interrupted = true;
+                break;
+            }
+        }
+
+        // F-604: dedicated interrupt finalisation. Emit
+        // `SessionInterrupted` carrying the captured partial text and
+        // the step / message anchors, then close the model step with
+        // an Error outcome (mirroring the `ChatChunk::Error` arm) so
+        // late-joining replay consumers see a well-formed step window.
+        // Drop any buffered tool calls — they never reached the
+        // dispatcher and emitting partial Tool* events would leave a
+        // half-bracketed step window. Publish the capture on the
+        // session so the IPC handler awaiting
+        // `await_interrupt_capture` unblocks with the same data the
+        // event carries. Return `Ok(())` — the turn ends, the session
+        // stays alive, the next `SendUserMessage` continues normally.
+        if interrupted {
+            let partial_arc: Arc<str> = Arc::from(assistant_text.as_str());
+            session
+                .emit(Event::AssistantMessage {
+                    id: msg_id.clone(),
+                    provider: provider_id.clone(),
+                    model: model.clone(),
+                    at: Utc::now(),
+                    stream_finalised: true,
+                    text: Arc::clone(&partial_arc),
+                    branch_parent: branch_parent.clone(),
+                    branch_variant_index,
+                })
+                .await?;
+            session
+                .emit(Event::SessionInterrupted {
+                    at: Utc::now(),
+                    partial_text: Arc::clone(&partial_arc),
+                    captured_at_step_id: model_step_id.clone(),
+                    captured_at_msg_id: msg_id.clone(),
+                })
+                .await?;
+            session
+                .emit(Event::StepFinished {
+                    step_id: model_step_id.clone(),
+                    outcome: StepOutcome::Error {
+                        reason: "interrupted".to_string(),
+                    },
+                    duration_ms: model_step_started.elapsed().as_millis() as u64,
+                    token_usage: None,
+                })
+                .await?;
+            session
+                .publish_interrupt_capture(crate::session::InterruptCapture {
+                    partial_text: assistant_text,
+                    captured_at_msg_id: msg_id.to_string(),
+                    captured_at_step_id: model_step_id.to_string(),
+                })
+                .await;
+            return Ok(());
         }
 
         // F-599: stream closed (Done or end-of-stream). Dispatch any

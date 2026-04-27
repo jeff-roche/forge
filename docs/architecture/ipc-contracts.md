@@ -376,6 +376,7 @@ RevokeWhitelist { scope },
 StartBackgroundAgent { agent, initial_message },
 PauseSession,                          // F-603: AgentMonitor Pause
 ResumeSession,                         // F-603: AgentMonitor Resume
+InterruptSession,                      // F-604: Composer interrupt + refine
 ReadFile { path, range? },
 WriteFile { path, content },
 ListTree { path, depth },
@@ -388,6 +389,7 @@ HelloAck, Event { seq, event },       // `event` is a Core::Event from §3.1
 StateChanged { state },
 FileContent { path, content, sha },
 Tree { path, node },
+RefineHandoff { partial_text, captured_at_step_id, captured_at_msg_id },  // F-604
 Error { code, message, corr? },
 Ack { corr }                           // correlation id echo
 ```
@@ -423,3 +425,15 @@ The orchestrator carries a `Running | Paused` state that AgentMonitor's Pause/Re
 - **Idempotency.** `PauseSession` while paused and `ResumeSession` while running are no-ops: the daemon logs `debug!` and emits no event. They never error.
 - **Persistence.** State is in-memory only. A daemon restart returns to `Running`.
 - **Tool-in-flight semantics.** Pause does *not* abort an in-flight tool call. The approval / dispatch path keeps flowing while the pause flag is set; only the *next* model step waits.
+
+### 5.8 Interrupt + Refine (F-604)
+
+A third turn-control primitive sits beside cancel and pause. Where cancel is terminal (ends the session) and pause is resumable (keeps the same turn), **interrupt** cuts the in-flight assistant turn cleanly and hands the captured partial text back as a refine handoff. The Composer's interrupt button drives this over the UDS as a request-response exchange:
+
+- **Frames.** Client → session sends `InterruptSession`. The daemon replies on the same connection with `RefineHandoff { partial_text, captured_at_step_id, captured_at_msg_id }`. The shell's `SessionBridge::interrupt_session` routes the response to the awaiting Tauri command via the per-kind reply slot pattern (same machinery as `ListMcpServers` → `McpServersList`). The `session_interrupt_and_refine(session_id) -> RefineHandoff` Tauri command surfaces the handoff to the webview.
+- **Event.** The orchestrator also emits `Event::SessionInterrupted { partial_text, captured_at_step_id, captured_at_msg_id, at }` on the session event stream, so any subscriber (a separate webview, a `forge session tail`) sees the same payload through the normal event pipeline.
+- **Checkpoint.** Interrupt takes effect at the *next chunk boundary* of the in-flight provider stream in `forge_session::orchestrator::run_request_loop`. The orchestrator polls `Session::is_interrupt_requested` after every `ChatChunk` and breaks out at the next clean point — `assistant_text` reflects every `AssistantDelta` already on the wire. Distinct from the F-603 pause checkpoint (between-step, keeps the turn alive) — interrupt is mid-stream and ends the current turn.
+- **Finalisation.** On the interrupt branch, the orchestrator emits `AssistantMessage(stream_finalised: true, text: <partial>)` followed by `SessionInterrupted` and `StepFinished(outcome: Error { reason: "interrupted" })`. Tool calls buffered in the stream are dropped without emitting partial Tool* events (same drop semantics as the `ChatChunk::Error` arm).
+- **Quiescent state.** After interrupt, the session stays alive; the next `SendUserMessage` opens a fresh turn normally. The interrupt-request flag is cleared by `Session::publish_interrupt_capture` so it does not carry into the next turn.
+- **No-op shape.** An interrupt with no in-flight assistant turn replies with an empty handoff (`partial_text: ""`, both anchors empty) and emits no `SessionInterrupted` event. The daemon's IPC handler clears the flag via `clear_interrupt_request` after a 5s deadline so a stray request cannot short-circuit a future turn.
+- **Persistence.** State is in-memory only. A daemon restart returns to `Running`.
