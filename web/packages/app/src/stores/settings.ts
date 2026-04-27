@@ -25,6 +25,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   providers: { custom_openai: {} },
   catalog: { enabled: {} },
   dashboard: { container_banner_dismissed: false },
+  memory: { enabled: {} },
 };
 
 /** Deep clone the defaults so in-place store writes never mutate the

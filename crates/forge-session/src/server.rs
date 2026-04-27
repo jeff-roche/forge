@@ -144,6 +144,22 @@ async fn build_agent_runtime(workspace_path: Option<&Path>) -> Option<AgentRunti
     })
 }
 
+/// F-601 / F-602: compute the effective `memory_enabled` flag for an agent.
+///
+/// Selection rules (in order of precedence):
+///
+/// 1. The user's `[memory.enabled.<agent>]` setting takes precedence when
+///    present (F-602). The Dashboard Memory toggle writes this scalar.
+/// 2. Otherwise the agent def's frontmatter `memory_enabled` flag governs
+///    (F-601 default).
+///
+/// Pure / settings-input is the merged view from
+/// [`forge_core::settings::load_merged_in`]. The caller resolves it once at
+/// session start so per-turn cost stays unchanged.
+pub(crate) fn effective_memory_enabled(def_enabled: bool, settings_override: Option<bool>) -> bool {
+    settings_override.unwrap_or(def_enabled)
+}
+
 /// F-601: resolve the active agent's cross-session memory.
 ///
 /// Returns `(memory_body, memory_binding)`:
@@ -162,8 +178,9 @@ async fn build_agent_runtime(workspace_path: Option<&Path>) -> Option<AgentRunti
 ///    as before F-601.
 /// 2. If the named agent is not found among loaded defs, memory stays off
 ///    and we log at WARN.
-/// 3. If the agent def has `memory_enabled: false`, memory stays off — the
-///    per-agent flag defaults OFF as documented.
+/// 3. F-602: the user's `[memory.enabled.<agent>]` setting overrides the
+///    def-level frontmatter flag when present. Absent → fall back to the
+///    def's `memory_enabled`.
 /// 4. Otherwise, build a [`MemoryStore`] anchored at the platform config
 ///    dir and try to load the existing file. A missing file yields an
 ///    empty body but the binding is still produced so `memory.write` can
@@ -175,6 +192,7 @@ async fn build_agent_runtime(workspace_path: Option<&Path>) -> Option<AgentRunti
 async fn resolve_session_memory(
     runtime: Option<&AgentRuntime>,
     active_agent: Option<&str>,
+    settings_override: Option<bool>,
 ) -> (
     Option<String>,
     Option<crate::dispatcher_cache::MemoryWriteBinding>,
@@ -193,7 +211,7 @@ async fn resolve_session_memory(
         );
         return (None, None);
     };
-    if !def.memory_enabled {
+    if !effective_memory_enabled(def.memory_enabled, settings_override) {
         return (None, None);
     }
     let Some(store) = forge_agents::MemoryStore::from_home() else {
@@ -242,6 +260,32 @@ async fn resolve_session_memory_with(
         agent_id: active_agent.to_string(),
     };
     (body, Some(binding))
+}
+
+/// F-602: load the merged settings and look up the user's per-agent
+/// `memory.enabled.<agent>` override. Returns `None` when no workspace is
+/// known, when the active-agent param is empty, or when the setting is
+/// absent for that agent. Best-effort: a settings-load IO error logs at
+/// WARN and yields `None` — the session falls back to the def's
+/// frontmatter flag.
+async fn load_memory_setting_override(
+    workspace: Option<&Path>,
+    active_agent: Option<&str>,
+) -> Option<bool> {
+    let workspace = workspace?;
+    let agent = active_agent.map(str::trim).filter(|s| !s.is_empty())?;
+    let user_dir = dirs::config_dir();
+    match forge_core::settings::load_merged_in(user_dir.as_deref(), workspace).await {
+        Ok(settings) => settings.memory.enabled.get(agent).copied(),
+        Err(e) => {
+            tracing::warn!(
+                target: "forge_session::server",
+                error = %e,
+                "failed to load merged settings for memory override; falling back to def-level flag",
+            );
+            None
+        }
+    }
 }
 
 /// Static name for an `IpcMessage` discriminant — used for diagnostic logging
@@ -859,15 +903,28 @@ pub async fn serve_with_session<P: Provider + 'static>(
     // and whether the memory body is appended to the system prompt.
     let agent_runtime: Option<AgentRuntime> = build_agent_runtime(workspace_path.as_deref()).await;
 
+    // F-602: consult the user's `[memory.enabled.<agent>]` settings entry
+    // before deciding whether memory is on. The Dashboard's Memory toggle
+    // writes this scalar; when present it overrides the def's
+    // frontmatter flag. Absent → fall through to the F-601 def-level
+    // semantic. Read once at session start so per-turn cost is unchanged.
+    let memory_setting_override: Option<bool> =
+        load_memory_setting_override(workspace_path.as_deref(), active_agent.as_deref()).await;
+
     // F-601: resolve the active agent + load its memory once per session.
     //
     // The active agent is selected via the `active_agent` parameter. When
-    // set and matching a loaded def, the def's `memory_enabled` flag
-    // controls both memory injection and `memory.write` registration.
-    // When `None`, unmatched, or set against a `memory_enabled: false`
-    // def, memory is off — the session behaves exactly as before F-601.
-    let (memory_body, memory_binding) =
-        resolve_session_memory(agent_runtime.as_ref(), active_agent.as_deref()).await;
+    // set and matching a loaded def, the F-602 settings override (if
+    // present) or the def's `memory_enabled` flag controls both memory
+    // injection and `memory.write` registration. When `None`, unmatched,
+    // or resolved-disabled, memory is off — the session behaves exactly
+    // as before F-601.
+    let (memory_body, memory_binding) = resolve_session_memory(
+        agent_runtime.as_ref(),
+        active_agent.as_deref(),
+        memory_setting_override,
+    )
+    .await;
 
     // F-601: assemble the final per-turn system prompt by appending the
     // optional memory body under a `## Memory` heading after AGENTS.md.
@@ -1774,6 +1831,103 @@ mod tests {
             b_binding.expect("beta binding").agent_id,
             "beta",
             "binding agent_id must reflect the typed parameter, not shared state"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // F-602: settings override the def-level memory_enabled flag
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn effective_memory_enabled_falls_through_to_def_when_override_absent() {
+        assert!(effective_memory_enabled(true, None));
+        assert!(!effective_memory_enabled(false, None));
+    }
+
+    #[test]
+    fn effective_memory_enabled_settings_true_overrides_def_false() {
+        // F-602: opting INTO memory via settings even when the def did not
+        // declare `memory: true` in frontmatter.
+        assert!(effective_memory_enabled(false, Some(true)));
+    }
+
+    #[test]
+    fn effective_memory_enabled_settings_false_overrides_def_true() {
+        // F-602: opting OUT of memory via settings even when the def has
+        // `memory: true`. The user toggle must be able to disable a
+        // memory-on-by-default agent.
+        assert!(!effective_memory_enabled(true, Some(false)));
+    }
+
+    #[tokio::test]
+    async fn load_memory_setting_override_returns_none_when_workspace_missing() {
+        let result = load_memory_setting_override(None, Some("scribe")).await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn load_memory_setting_override_returns_none_when_active_agent_blank() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(load_memory_setting_override(Some(dir.path()), None)
+            .await
+            .is_none());
+        assert!(load_memory_setting_override(Some(dir.path()), Some(""))
+            .await
+            .is_none());
+        assert!(load_memory_setting_override(Some(dir.path()), Some("   "))
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn load_memory_setting_override_returns_none_when_no_settings_file() {
+        // No `.forge/settings.toml` — should fall through to None so the
+        // session uses the def-level flag.
+        let dir = tempfile::tempdir().unwrap();
+        let result = load_memory_setting_override(Some(dir.path()), Some("scribe")).await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn load_memory_setting_override_reads_workspace_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::create_dir_all(dir.path().join(".forge"))
+            .await
+            .unwrap();
+        tokio::fs::write(
+            dir.path().join(".forge").join("settings.toml"),
+            "[memory.enabled]\nscribe = true\n",
+        )
+        .await
+        .unwrap();
+        let result = load_memory_setting_override(Some(dir.path()), Some("scribe")).await;
+        assert_eq!(result, Some(true));
+    }
+
+    #[tokio::test]
+    async fn load_memory_setting_override_distinguishes_per_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::create_dir_all(dir.path().join(".forge"))
+            .await
+            .unwrap();
+        tokio::fs::write(
+            dir.path().join(".forge").join("settings.toml"),
+            "[memory.enabled]\nscribe = true\nresearcher = false\n",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            load_memory_setting_override(Some(dir.path()), Some("scribe")).await,
+            Some(true)
+        );
+        assert_eq!(
+            load_memory_setting_override(Some(dir.path()), Some("researcher")).await,
+            Some(false)
+        );
+        assert_eq!(
+            load_memory_setting_override(Some(dir.path()), Some("unknown")).await,
+            None,
+            "unknown agents fall through to the def-level flag"
         );
     }
 }

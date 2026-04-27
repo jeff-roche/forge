@@ -39,6 +39,7 @@ describe('settings store (F-151)', () => {
         providers: { custom_openai: {} },
         catalog: { enabled: {} },
         dashboard: { container_banner_dismissed: false },
+        memory: { enabled: {} },
       });
       expect(settings.notifications.bg_agents).toBe('both');
       expect(settings.windows.session_mode).toBe('split');
@@ -51,6 +52,7 @@ describe('settings store (F-151)', () => {
         providers: { custom_openai: {} },
         catalog: { enabled: {} },
         dashboard: { container_banner_dismissed: false },
+        memory: { enabled: {} },
       });
       seedSettings({
         notifications: { bg_agents: 'os' },
@@ -58,6 +60,7 @@ describe('settings store (F-151)', () => {
         providers: { custom_openai: {} },
         catalog: { enabled: {} },
         dashboard: { container_banner_dismissed: false },
+        memory: { enabled: {} },
       });
       expect(settings.notifications.bg_agents).toBe('os');
       expect(settings.windows.session_mode).toBe('single');

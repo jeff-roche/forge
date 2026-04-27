@@ -11,6 +11,7 @@ import {
   ContainerRuntimeBanner,
   ContainersSection,
 } from '../components/dashboard/ContainersSection';
+import { MemorySection } from '../components/dashboard/MemorySection';
 import { hasCredential } from '../ipc/credentials';
 import {
   CONTAINER_BANNER_DISMISSED_KEY,
@@ -18,6 +19,7 @@ import {
   type RuntimeStatus,
 } from '../ipc/containers';
 import { getSettings, setSetting } from '../ipc/session';
+import { activeWorkspaceRoot } from '../stores/session';
 import './Dashboard.css';
 
 /**
@@ -140,6 +142,9 @@ export const Dashboard: Component = () => {
       <ProvidersSection />
       <CredentialsSection />
       <ContainersSection />
+      <Show when={activeWorkspaceRoot()}>
+        {(root) => <MemorySection workspaceRoot={root()} />}
+      </Show>
       <SessionsPanel />
     </main>
   );
