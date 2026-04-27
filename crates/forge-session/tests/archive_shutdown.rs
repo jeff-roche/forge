@@ -85,7 +85,7 @@ async fn ephemeral_shutdown_removes_session_dir_and_socket() {
     .await
     .unwrap();
 
-    let _ack = forge_ipc::read_frame(&mut stream).await.unwrap();
+    let _ack: IpcMessage = forge_ipc::read_frame(&mut stream).await.unwrap();
 
     forge_ipc::write_frame(&mut stream, &IpcMessage::Subscribe(Subscribe { since: 0 }))
         .await
@@ -192,7 +192,7 @@ async fn persistent_sigterm_archives_session_dir_and_meta() {
     )
     .await
     .unwrap();
-    let _ack = forge_ipc::read_frame(&mut stream).await.unwrap();
+    let _ack: IpcMessage = forge_ipc::read_frame(&mut stream).await.unwrap();
     forge_ipc::write_frame(&mut stream, &IpcMessage::Subscribe(Subscribe { since: 0 }))
         .await
         .unwrap();

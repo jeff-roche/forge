@@ -67,7 +67,7 @@ async fn handshake(sock: &std::path::Path) {
     )
     .await
     .unwrap();
-    let _ack = forge_ipc::read_frame(&mut stream).await.unwrap();
+    let _ack: IpcMessage = forge_ipc::read_frame(&mut stream).await.unwrap();
     forge_ipc::write_frame(&mut stream, &IpcMessage::Subscribe(Subscribe { since: 0 }))
         .await
         .unwrap();
