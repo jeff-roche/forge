@@ -63,6 +63,17 @@ pub enum IpcMessage {
     ImportMcpConfig(ImportMcpConfig),
     /// F-155: daemon → client response for a [`IpcMessage::ImportMcpConfig`].
     McpImportResult(McpImportResult),
+    /// F-603: client → session request to pause the orchestrator at the
+    /// next inter-step checkpoint. The daemon completes any in-flight
+    /// step (tool call, model stream) before the pause takes effect, then
+    /// emits `Event::SessionPaused`. Pausing an already-paused session is
+    /// a no-op and emits no second event.
+    PauseSession(PauseSession),
+    /// F-603: client → session request to resume a paused orchestrator.
+    /// The daemon emits `Event::SessionResumed` and the next
+    /// `StepStarted` opens. Resuming an already-running session is a
+    /// no-op and emits no second event.
+    ResumeSession(ResumeSession),
 }
 
 /// Client → session: re-run the assistant message with `msg_id` using the
@@ -117,6 +128,25 @@ pub struct SendUserMessage {
 /// the daemon logs and the stream stays unchanged.
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct CompactTranscript {}
+
+/// F-603: client → session: pause the orchestrator at the next inter-step
+/// checkpoint. No fields today — the daemon resolves the session from the
+/// connection. The daemon flips an in-memory `Paused` flag; the
+/// orchestrator's request loop checks it between steps and parks the turn
+/// (in-flight tool calls run to completion first). A `SessionPaused` event
+/// fires on the `Running → Paused` transition; redundant pauses log
+/// `debug!` and emit nothing.
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct PauseSession {}
+
+/// F-603: client → session: resume a paused orchestrator. No fields today
+/// — the daemon resolves the session from the connection. The daemon
+/// clears the `Paused` flag; any orchestrator awaiting the pause
+/// checkpoint wakes and re-enters its run loop. A `SessionResumed` event
+/// fires on the `Paused → Running` transition; redundant resumes log
+/// `debug!` and emit nothing.
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct ResumeSession {}
 
 /// F-155: client → session: list the daemon's managed MCP servers.
 ///

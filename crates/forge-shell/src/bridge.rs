@@ -28,8 +28,8 @@ use forge_core::{ApprovalScope, RerunVariant};
 use forge_ipc::{
     read_frame, read_frame_into, write_frame, ClientInfo, CompactTranscript, DeleteBranch, Hello,
     HelloAck, ImportMcpConfig, IpcMessage, ListMcpServers, McpImportResult, McpServersList,
-    McpToggleResult, RerunMessage, SelectBranch, SendUserMessage, Subscribe, ToggleMcpServer,
-    ToolCallApproved, ToolCallRejected, PROTO_VERSION,
+    McpToggleResult, PauseSession, RerunMessage, ResumeSession, SelectBranch, SendUserMessage,
+    Subscribe, ToggleMcpServer, ToolCallApproved, ToolCallRejected, PROTO_VERSION,
 };
 use serde::Serialize;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -459,6 +459,31 @@ impl SessionBridge {
         let writer = self.writer_for(session_id).await?;
         let mut writer = writer.lock().await;
         let frame = IpcMessage::CompactTranscript(CompactTranscript::default());
+        write_frame(&mut *writer, &frame).await
+    }
+
+    /// F-603: forward a `pause_session` request to the session daemon. The
+    /// daemon emits `Event::SessionPaused` on the `Running → Paused`
+    /// transition; redundant pauses are silently coalesced server-side
+    /// (DoD: pause-while-paused is a no-op with a `debug!` log, not an
+    /// error). The Tauri command returns `Ok(())` once the frame is
+    /// written — the webview observes the actual transition through the
+    /// session event stream.
+    pub async fn pause_session(&self, session_id: &str) -> Result<()> {
+        let writer = self.writer_for(session_id).await?;
+        let mut writer = writer.lock().await;
+        let frame = IpcMessage::PauseSession(PauseSession::default());
+        write_frame(&mut *writer, &frame).await
+    }
+
+    /// F-603: forward a `resume_session` request to the session daemon.
+    /// Mirror of [`Self::pause_session`] — the daemon emits
+    /// `Event::SessionResumed` on the `Paused → Running` transition and
+    /// silently coalesces redundant resumes server-side.
+    pub async fn resume_session(&self, session_id: &str) -> Result<()> {
+        let writer = self.writer_for(session_id).await?;
+        let mut writer = writer.lock().await;
+        let frame = IpcMessage::ResumeSession(ResumeSession::default());
         write_frame(&mut *writer, &frame).await
     }
 

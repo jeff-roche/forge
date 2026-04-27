@@ -374,6 +374,8 @@ ApproveToolCall { id, scope },
 RejectToolCall { id, reason? },
 RevokeWhitelist { scope },
 StartBackgroundAgent { agent, initial_message },
+PauseSession,                          // F-603: AgentMonitor Pause
+ResumeSession,                         // F-603: AgentMonitor Resume
 ReadFile { path, range? },
 WriteFile { path, content },
 ListTree { path, depth },
@@ -411,3 +413,13 @@ Ack { corr }                           // correlation id echo
 - Multiple shells can attach to one session (the GUI and a `forge session tail` simultaneously)
 - Any can send commands; the session logs `ClientIdentity` alongside the resulting event
 - Conflicting commands resolve last-write-wins with a 50ms coalescing window for identical approvals
+
+### 5.7 Pause / Resume (F-603)
+
+The orchestrator carries a `Running | Paused` state that AgentMonitor's Pause/Resume buttons drive over the UDS:
+
+- **Frames.** Client → session sends `PauseSession` / `ResumeSession`. Daemon → client emits `Event::SessionPaused` / `Event::SessionResumed` exactly once per real transition.
+- **Checkpoint.** The pause takes effect at the orchestrator's *between-step* boundary in `forge_session::orchestrator::run_request_loop` — never mid-step. An in-flight provider stream and any tool call dispatched from it run to completion (their `StepFinished` lands), then the orchestrator parks at `Session::wait_if_paused` before opening the next `StepStarted(Model)`.
+- **Idempotency.** `PauseSession` while paused and `ResumeSession` while running are no-ops: the daemon logs `debug!` and emits no event. They never error.
+- **Persistence.** State is in-memory only. A daemon restart returns to `Running`.
+- **Tool-in-flight semantics.** Pause does *not* abort an in-flight tool call. The approval / dispatch path keeps flowing while the pause flag is set; only the *next* model step waits.

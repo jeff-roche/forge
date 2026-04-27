@@ -895,6 +895,34 @@ fn provider_changed_wire_shape() {
     );
 }
 
+#[test]
+fn session_paused_wire_shape() {
+    // F-603: orchestrator entered the paused state. The wire shape is the
+    // snake_case discriminator plus the canonical `at` timestamp — no
+    // other fields (the daemon resolves the session from the
+    // connection, not from the event).
+    assert_wire_eq(
+        Event::SessionPaused { at: fixed_time() },
+        json!({
+            "type": "session_paused",
+            "at": "2026-04-18T10:00:00Z",
+        }),
+    );
+}
+
+#[test]
+fn session_resumed_wire_shape() {
+    // F-603: orchestrator left the paused state. Mirror of the
+    // `SessionPaused` shape.
+    assert_wire_eq(
+        Event::SessionResumed { at: fixed_time() },
+        json!({
+            "type": "session_resumed",
+            "at": "2026-04-18T10:00:00Z",
+        }),
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Compile-time guard: adding a new `Event` variant must also add its
 // wire-shape pin above. This is enforced by an exhaustive `match` here —
@@ -935,6 +963,8 @@ fn variant_label(e: &Event) -> &'static str {
         Event::McpState(_) => "mcp_state",
         Event::ResourceSample { .. } => "resource_sample",
         Event::ProviderChanged { .. } => "provider_changed",
+        Event::SessionPaused { .. } => "session_paused",
+        Event::SessionResumed { .. } => "session_resumed",
     }
 }
 
