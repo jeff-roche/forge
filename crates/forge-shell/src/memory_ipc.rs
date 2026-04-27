@@ -84,9 +84,23 @@ pub struct AgentMemoryEntry {
     pub settings_override: Option<bool>,
 }
 
-/// Validate the inbound `agent_id` against the size cap and the empty
-/// check. Pure helper exposed for unit tests.
+/// Validate the inbound `agent_id` against the size cap and an allowlist
+/// of safe stem characters. Pure helper exposed for unit tests.
+///
+/// Agent ids land on disk as `<root>/<agent>.md`. A blocklist (rejecting
+/// only `/`, `\`, `..`) accidentally accepts surprising shapes:
+///   - `"."`     → file becomes `<root>/.md`
+///   - `".x"`    → dot-prefix files are hard to find
+///   - `"con"`/`"nul"`/`"aux"` → reserved names on Windows
+///   - whitespace, control bytes, unicode tricks, etc.
+///
+/// We mirror the catalog/credential id shape used elsewhere in the repo
+/// (e.g. [`forge_core::skill::SkillId`]) and require the id be a non-empty
+/// ASCII alphanumeric / `-` / `_` stem.
 pub fn validate_agent_id(agent_id: &str) -> Result<(), String> {
+    if agent_id.is_empty() {
+        return Err("agent_id must not be empty".to_string());
+    }
     if agent_id.len() > MAX_AGENT_ID_BYTES {
         return Err(format!(
             "agent_id too large: {} bytes exceeds cap of {} bytes",
@@ -94,15 +108,11 @@ pub fn validate_agent_id(agent_id: &str) -> Result<(), String> {
             MAX_AGENT_ID_BYTES
         ));
     }
-    if agent_id.is_empty() {
-        return Err("agent_id is empty".to_string());
-    }
-    // Reject path separators / `.` segments — agent ids are stems, not
-    // paths. The store joins `<root>/<agent>.md` so a `..` would escape the
-    // memory root and `/` would create a nested directory. Both are bugs;
-    // refuse at the boundary.
-    if agent_id.contains('/') || agent_id.contains('\\') || agent_id.contains("..") {
-        return Err("agent_id must not contain path separators".to_string());
+    if !agent_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err("agent_id must contain only [A-Za-z0-9_-]".to_string());
     }
     Ok(())
 }
@@ -332,17 +342,49 @@ mod tests {
     }
 
     #[test]
-    fn validate_agent_id_rejects_path_separators() {
-        assert!(validate_agent_id("../etc/passwd").is_err());
-        assert!(validate_agent_id("a/b").is_err());
-        assert!(validate_agent_id("a\\b").is_err());
-    }
+    fn validate_agent_id_allowlist_matrix() {
+        // Reject — path-separator / traversal shapes.
+        for bad in ["..", ".", "/", "\\", "../etc/passwd", "a/b", "a\\b"] {
+            assert!(
+                validate_agent_id(bad).is_err(),
+                "expected rejection for {bad:?}",
+            );
+        }
+        // Reject — empty.
+        assert!(validate_agent_id("").is_err());
+        // Reject — leading dot (hidden file).
+        for bad in [".hidden", ".x", ".agent"] {
+            assert!(
+                validate_agent_id(bad).is_err(),
+                "expected rejection for leading-dot {bad:?}",
+            );
+        }
+        // Reject — symbols outside the allowlist.
+        for bad in [
+            "agent.v2", "a b", "a\tb", "a\nb", "a:b", "a;b", "a$b", "a*b", "a?b", "a@b", "a!b",
+            "agent ", " agent", "ünicode", "agent.md",
+        ] {
+            assert!(
+                validate_agent_id(bad).is_err(),
+                "expected rejection for {bad:?}",
+            );
+        }
 
-    #[test]
-    fn validate_agent_id_accepts_simple_stem() {
-        assert!(validate_agent_id("scribe").is_ok());
-        assert!(validate_agent_id("background-runner").is_ok());
-        assert!(validate_agent_id("agent_1").is_ok());
+        // Accept — alphanumerics, dashes, underscores, mixed case.
+        for good in [
+            "agent",
+            "my-agent",
+            "my_agent",
+            "agent42",
+            "Agent-V2",
+            "A",
+            "ABC_def-123",
+        ] {
+            assert!(
+                validate_agent_id(good).is_ok(),
+                "expected acceptance for {good:?}",
+            );
+        }
     }
 
     #[test]
