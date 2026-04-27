@@ -6,6 +6,11 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 anyhow = "1"
+# F-608: `SidecarMessage::HelloAck.started_at` and `Heartbeat.at` carry
+# `chrono::DateTime<Utc>` so the daemon-side supervisor can stamp restart
+# windows with the same wallclock the sidecar reports. Promoted from
+# dev-deps where the bench already pinned the same version.
+chrono = { version = "0.4", features = ["serde"] }
 forge-core = { path = "../forge-core" }
 # F-155: `IpcMessage::McpServersList` and `McpState` event carry
 # `forge_mcp::McpServerInfo` / `McpStateEvent` / `ServerState` values so the

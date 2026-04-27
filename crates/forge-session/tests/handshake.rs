@@ -85,7 +85,7 @@ async fn unknown_proto_rejected() {
     });
     forge_ipc::write_frame(&mut stream, &hello).await.unwrap();
 
-    let result = forge_ipc::read_frame(&mut stream).await;
+    let result: anyhow::Result<IpcMessage> = forge_ipc::read_frame(&mut stream).await;
     assert!(
         result.is_err(),
         "expected connection to be closed for unknown proto"
@@ -276,7 +276,7 @@ async fn handshake_deadline_disconnects_half_handshaked_peer() {
         },
     });
     forge_ipc::write_frame(&mut stream, &hello).await.unwrap();
-    let _ack = forge_ipc::read_frame(&mut stream).await.unwrap();
+    let _ack: IpcMessage = forge_ipc::read_frame(&mut stream).await.unwrap();
 
     // Now stall. The daemon should close us within the Subscribe deadline.
     let started = std::time::Instant::now();
@@ -328,7 +328,7 @@ async fn post_handshake_idle_timeout_disconnects_peer() {
         },
     });
     forge_ipc::write_frame(&mut stream, &hello).await.unwrap();
-    let _ack = forge_ipc::read_frame(&mut stream).await.unwrap();
+    let _ack: IpcMessage = forge_ipc::read_frame(&mut stream).await.unwrap();
 
     let subscribe = IpcMessage::Subscribe(forge_ipc::Subscribe { since: 0 });
     forge_ipc::write_frame(&mut stream, &subscribe)
@@ -404,7 +404,7 @@ async fn garbage_frame_rejected() {
         .await
         .unwrap();
 
-    let result = forge_ipc::read_frame(&mut stream).await;
+    let result: anyhow::Result<IpcMessage> = forge_ipc::read_frame(&mut stream).await;
     assert!(
         result.is_err(),
         "expected connection to be closed for garbage frame"

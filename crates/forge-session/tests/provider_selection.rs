@@ -59,7 +59,7 @@ async fn handshake(stream: &mut UnixStream) {
     )
     .await
     .unwrap();
-    let _ack = forge_ipc::read_frame(stream).await.unwrap();
+    let _ack: IpcMessage = forge_ipc::read_frame(stream).await.unwrap();
     forge_ipc::write_frame(stream, &IpcMessage::Subscribe(Subscribe { since: 0 }))
         .await
         .unwrap();
