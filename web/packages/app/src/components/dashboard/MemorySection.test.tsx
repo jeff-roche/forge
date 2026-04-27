@@ -254,6 +254,39 @@ describe('MemorySection (F-602)', () => {
     });
   });
 
+  it('Clear surfaces error and refetches when clearAgentMemory rejects', async () => {
+    const { fn, state } = buildMemoryInvoke({
+      entries: [entry({ agent_id: 'alpha', def_enabled: true, size_bytes: 12 })],
+      bodies: { alpha: 'something' },
+    });
+    const wrapped = vi.fn(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'clear_agent_memory') {
+        throw new Error('disk on fire');
+      }
+      return fn(cmd, args);
+    });
+    setInvokeForTesting(wrapped as never);
+
+    const { findByTestId, queryByTestId } = render(() => (
+      <MemorySection workspaceRoot="/work" useTextareaForTest />
+    ));
+
+    fireEvent.click(await findByTestId('memory-clear-alpha'));
+    fireEvent.click(await findByTestId('memory-clear-confirm'));
+
+    // Error surfaces, modal closes, body untouched, list_agent_memory was
+    // re-invoked to refresh the row even though the clear rejected.
+    const err = await findByTestId('memory-section-error');
+    expect(err.textContent).toMatch(/disk on fire/);
+    await waitFor(() => expect(queryByTestId('memory-clear-modal')).toBeNull());
+    expect(state.bodies['alpha']).toBe('something');
+
+    // Initial mount triggers one list_agent_memory call; the post-clear
+    // refetch must add a second one.
+    const listCalls = wrapped.mock.calls.filter((c) => c[0] === 'list_agent_memory');
+    expect(listCalls.length).toBeGreaterThanOrEqual(2);
+  });
+
   it('Clear cancel keeps the body intact', async () => {
     const { fn, state } = buildMemoryInvoke({
       entries: [

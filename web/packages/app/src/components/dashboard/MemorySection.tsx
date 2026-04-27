@@ -101,11 +101,13 @@ export const MemorySection: Component<MemorySectionProps> = (props) => {
     setError(null);
     try {
       await clearAgentMemory(entry.agent_id);
-      await refetch();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setPendingClear(null);
+      // Refresh always — a partial-failure clear may have left the file in
+      // a state the row's stale `size_bytes` no longer reflects.
+      await refetch();
     }
   };
 
