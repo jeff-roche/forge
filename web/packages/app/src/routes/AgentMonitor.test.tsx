@@ -826,7 +826,7 @@ describe('<AgentTraceToolbar>', () => {
     expect(queryByText('↳ orchestrator')).toBeNull();
   });
 
-  it('carries an aria-live region so the elapsed cell announces tick updates', () => {
+  it('is intentionally NOT a live region (elapsed cell ticks must not spam SR queue)', () => {
     const { container } = render(() => (
       <AgentTraceToolbar
         agent={row({ startedAt: '2026-04-20T12:00:00Z' })}
@@ -838,7 +838,36 @@ describe('<AgentTraceToolbar>', () => {
       '.agent-monitor__trace-toolbar',
     ) as HTMLElement | null;
     expect(toolbar).not.toBeNull();
-    expect(toolbar!.getAttribute('aria-live')).toBe('polite');
+    // No aria-live — a polite region wrapping a 1Hz-updating elapsed cell
+    // would re-announce the entire toolbar every tick (WCAG anti-pattern).
+    expect(toolbar!.getAttribute('aria-live')).toBeNull();
+    // role="status" carries an implicit aria-live=polite, so it must be absent too.
+    expect(toolbar!.getAttribute('role')).toBeNull();
+  });
+
+  it('elapsed cell text updates as `now` advances without a live region wrapping it', () => {
+    const start = '2026-04-20T12:00:00Z';
+    const t0 = Date.parse(start);
+    const [now, setNow] = createSignal(t0 + 5_000);
+    const { container } = render(() => (
+      <AgentTraceToolbar
+        agent={row({ startedAt: start })}
+        tools={[]}
+        now={now()}
+      />
+    ));
+    const elapsedCell = container.querySelector(
+      '[data-cell="elapsed"]',
+    ) as HTMLElement | null;
+    expect(elapsedCell).not.toBeNull();
+    const before = elapsedCell!.textContent;
+    setNow(t0 + 65_000);
+    const after = elapsedCell!.textContent;
+    expect(after).not.toBe(before);
+    const toolbar = container.querySelector(
+      '.agent-monitor__trace-toolbar',
+    ) as HTMLElement | null;
+    expect(toolbar!.getAttribute('aria-live')).toBeNull();
   });
 });
 

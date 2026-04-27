@@ -710,8 +710,6 @@ export const AgentTraceToolbar: Component<{
   return (
     <div
       class="agent-monitor__trace-toolbar"
-      role="status"
-      aria-live="polite"
       aria-label="Trace toolbar"
     >
       <span

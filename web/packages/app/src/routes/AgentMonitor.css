@@ -308,8 +308,12 @@
 }
 
 /* F-449: trace-header toolbar — elapsed · model · tools · spawned-by, all
- * Fira Code 10px per agent-monitor.md §9.2. The bar is `aria-live=polite`
- * so a screen reader announces elapsed-cell ticks unobtrusively. */
+ * Fira Code 10px per agent-monitor.md §9.2. The bar is intentionally NOT
+ * an aria-live region: the elapsed cell re-renders every ~1s, and wrapping
+ * the toolbar in `aria-live=polite` (or `role=status`, which implies it)
+ * would re-announce the whole toolbar on every tick — a WCAG live-region
+ * spam anti-pattern. Cells expose values via `aria-label`s and are read
+ * on demand via focus/cursor traversal instead. */
 .agent-monitor__trace-toolbar {
   display: flex;
   align-items: center;
