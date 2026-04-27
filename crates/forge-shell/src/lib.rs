@@ -64,6 +64,11 @@ pub mod providers_ipc;
 // in-module under `#[cfg(test)]`.
 #[cfg(feature = "webview")]
 pub mod usage_ipc;
+// F-607: `export_transcript` Tauri command. Pure helpers
+// (`read_transcript_bytes`, `transcript_path`) are always compiled so
+// non-webview unit tests link without Tauri; the `#[tauri::command]` wrapper
+// is gated behind `webview`.
+pub mod transcript_ipc;
 pub mod window_spec;
 
 #[cfg(feature = "webview")]

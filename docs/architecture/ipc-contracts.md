@@ -42,6 +42,7 @@ Registered in `crates/forge-shell/src/ipc.rs::build_invoke_handler`. Every comma
 |------|-------------|---------|
 | `session-{id}` | `require_window_label(&webview, "session-{session_id}")` | Only the exact session webview that owns the `session_id` may invoke |
 | `dashboard` | `require_window_label_in(&webview, &["dashboard"], false)` | Only the dashboard window may invoke |
+| `dashboard + session-{id}` | inline check against `"dashboard"` and `"session-{session_id}"` | Dashboard **or** the *specific* session's window may invoke; other `session-*` windows are rejected |
 | `dashboard + session-*` | `require_window_label_in(&webview, &["dashboard"], true)` | Dashboard **or** any `session-*` webview may invoke |
 | `any session-*` | `require_window_label_in(&webview, &[], true)` | Any `session-*` webview may invoke; dashboard is rejected |
 
@@ -143,6 +144,14 @@ Output bytes flow back via the `terminal:bytes` Tauri event (see §4.1 events).
 | `list_providers` | `workspace_root: String, scope: RosterScope` | `Vec<ScopedRosterEntry>` | `dashboard + session-*` |
 
 `RosterScope` is a tagged union: `{ type: "SessionWide" } | { type: "Agent", id: AgentId } | { type: "Provider", id: ProviderId }`. Filter semantics: `SessionWide` returns everything; `Agent(id)` narrows to entries bound to that agent (returns empty today for skills/agents/MCP since those surface as `SessionWide` until per-agent binding lands); `Provider(id)` narrows to that provider entry. Built-in providers (`anthropic`, `openai`, `ollama`) are hardcoded; `[providers.custom_openai.<name>]` entries from merged settings surface as `custom_openai:<name>`.
+
+**Transcript export** (F-607) — thin wrapper over the daemon's on-disk `events.jsonl` so the AgentMonitor Inspector (F-449 §9.3) can pull a session transcript through IPC instead of the filesystem.
+
+| Command | Args | Response | Authz |
+|---------|------|----------|-------|
+| `export_transcript` | `session_id: String, workspace_root: String` | `Vec<u8>` (raw `events.jsonl` bytes) | `dashboard + session-{id}` |
+
+`session_id` is validated against the canonical [`SessionId`](../../crates/forge-core/src/ids.rs) wire shape (16 lowercase hex chars) before the path is built, so path-traversal / NUL / separator inputs are rejected. The path is composed via `forge_session::server::event_log_path` — the same resolver the daemon writes through. A session that has not yet written its first event returns an empty `Vec<u8>` (with a `tracing::warn`); a transcript larger than 50 MiB returns `transcript exceeds export cap: …`.
 
 ---
 
