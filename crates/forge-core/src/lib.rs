@@ -44,5 +44,5 @@ pub use types::{
 };
 pub use usage::{
     format_month, monthly_path_in, summarize, user_usage_dir, user_usage_dir_in, GroupBy, Money,
-    MonthlyAggregate, UsageBreakdown, UsageBucket, UsageRange, UsageSummary,
+    MonthlyAggregate, SessionUsage, UsageBreakdown, UsageBucket, UsageRange, UsageSummary,
 };

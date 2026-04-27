@@ -31,8 +31,10 @@
 use std::path::Path;
 
 use chrono::{DateTime, Datelike, Utc};
-use forge_core::usage::{monthly_path_in, user_usage_dir, MonthlyAggregate, UsageBucket};
-use forge_core::{read_since, Event, Result, WorkspaceId};
+use forge_core::usage::{
+    monthly_path_in, user_usage_dir, MonthlyAggregate, SessionUsage, UsageBucket,
+};
+use forge_core::{read_since, Event, Result, SessionId, WorkspaceId};
 use forge_providers::pricing::PriceTable;
 
 /// Read every [`Event::UsageTick`] in `log_path` and merge it into the
@@ -179,6 +181,56 @@ pub async fn flush_session_usage_to_user_dir(
     }
 }
 
+/// F-605: walk `log_path` and fold every [`Event::UsageTick`] tagged with
+/// `session_id` into a single [`SessionUsage`].
+///
+/// Backs the AgentMonitor §9.2 live token/cost counters: a window opening
+/// mid-session (or surviving a webview reload) calls this to backfill the
+/// totals it missed, then resumes from the live event stream. Read-only —
+/// the flush sentinel is **not** written, so this is safe to call any
+/// number of times during a session without affecting the eventual
+/// monthly-aggregate flush.
+///
+/// Cost is repriced from the embedded [`PriceTable`] rather than trusting
+/// the event's `cost_usd` field, mirroring [`flush_session_usage`]. A tick
+/// for an unknown `(provider, model)` contributes `None` to `cost`, which
+/// is sticky — a session that mixes priced and unpriced ticks reports
+/// `cost: null` to the UI, never a partial sum.
+///
+/// Ticks tagged with a *different* session id (multiplexed log, defensive
+/// against future re-use) and ticks emitted before F-605 (`session_id:
+/// None`) are skipped. Returns [`SessionUsage::zero`] when the log has no
+/// matching ticks yet — the UI renders zeros without erroring.
+pub async fn live_session_totals(log_path: &Path, session_id: &SessionId) -> Result<SessionUsage> {
+    let table = PriceTable::embedded();
+    let events = read_since(log_path, 0).await?;
+
+    let mut totals = SessionUsage::zero();
+    for (_seq, event) in events {
+        if let Event::UsageTick {
+            session_id: tick_session,
+            provider,
+            model,
+            tokens_in,
+            tokens_out,
+            ..
+        } = event
+        {
+            if tick_session.as_ref() != Some(session_id) {
+                continue;
+            }
+            let cost = table.compute_cost(
+                provider.to_string().as_str(),
+                model.as_str(),
+                tokens_in,
+                tokens_out,
+            );
+            totals.fold(tokens_in, tokens_out, cost);
+        }
+    }
+    Ok(totals)
+}
+
 fn month_key(at: DateTime<Utc>) -> String {
     format!("{:04}-{:02}", at.year(), at.month())
 }
@@ -216,7 +268,7 @@ fn merge_bucket(agg: &mut MonthlyAggregate, new: UsageBucket) {
 mod tests {
     use super::*;
     use forge_core::roster::RosterScope;
-    use forge_core::{EventLog, ProviderId};
+    use forge_core::{EventLog, ProviderId, SessionId};
     use tempfile::TempDir;
 
     fn provider(s: &str) -> ProviderId {
@@ -225,6 +277,13 @@ mod tests {
 
     fn ws(s: &str) -> WorkspaceId {
         WorkspaceId::from_string(s.to_string())
+    }
+
+    /// F-605 fixture session id. The flush aggregator deliberately ignores
+    /// it — these tests confirm `(workspace, provider, model, scope)`
+    /// remains the bucket key regardless of the originating session.
+    fn fixture_session() -> SessionId {
+        SessionId::from_string("deadbeefcafebabe".to_string())
     }
 
     async fn write_events(path: &std::path::Path, events: &[Event]) {
@@ -256,6 +315,7 @@ mod tests {
         write_events(
             &log,
             &[Event::UsageTick {
+                session_id: Some(fixture_session()),
                 provider: provider("anthropic"),
                 model: "claude-3-5-sonnet-20241022".into(),
                 tokens_in: 1000,
@@ -294,6 +354,7 @@ mod tests {
         write_events(
             &log,
             &[Event::UsageTick {
+                session_id: Some(fixture_session()),
                 provider: provider("anthropic"),
                 model: "claude-imaginary-99".into(),
                 tokens_in: 1000,
@@ -322,6 +383,7 @@ mod tests {
         let log2 = tmp.path().join("session2.jsonl");
 
         let tick = Event::UsageTick {
+            session_id: Some(fixture_session()),
             provider: provider("anthropic"),
             model: "claude-3-5-sonnet-20241022".into(),
             tokens_in: 100,
@@ -355,6 +417,7 @@ mod tests {
             &log,
             &[
                 Event::UsageTick {
+                    session_id: Some(fixture_session()),
                     provider: provider("anthropic"),
                     model: "claude-3-5-sonnet-20241022".into(),
                     tokens_in: 100,
@@ -387,6 +450,7 @@ mod tests {
         write_events(
             &log,
             &[Event::UsageTick {
+                session_id: Some(fixture_session()),
                 provider: provider("anthropic"),
                 model: "claude-3-5-sonnet-20241022".into(),
                 tokens_in: 100,
@@ -433,6 +497,7 @@ mod tests {
         write_events(
             &log,
             &[Event::UsageTick {
+                session_id: Some(fixture_session()),
                 provider: provider("anthropic"),
                 model: "claude-3-5-sonnet-20241022".into(),
                 tokens_in: 100,
@@ -458,5 +523,230 @@ mod tests {
 
         let loaded = MonthlyAggregate::load_or_default(&path).await;
         assert_eq!(loaded.buckets.len(), 1, "new payload, not partial residue");
+    }
+
+    // ---------------------------------------------------------------------
+    // F-605: live_session_totals
+    // ---------------------------------------------------------------------
+
+    fn alt_session() -> SessionId {
+        SessionId::from_string("c0ffeec0ffeec0ff".to_string())
+    }
+
+    #[tokio::test]
+    async fn live_totals_accumulate_across_multiple_turns() {
+        // F-605 DoD: tokens accumulate across multiple ticks in one session.
+        let tmp = TempDir::new().unwrap();
+        let log = tmp.path().join("events.jsonl");
+        let sid = fixture_session();
+        write_events(
+            &log,
+            &[
+                Event::UsageTick {
+                    session_id: Some(sid.clone()),
+                    provider: provider("anthropic"),
+                    model: "claude-3-5-sonnet-20241022".into(),
+                    tokens_in: 100,
+                    tokens_out: 50,
+                    cost_usd: 0.0,
+                    scope: RosterScope::SessionWide,
+                },
+                Event::UsageTick {
+                    session_id: Some(sid.clone()),
+                    provider: provider("anthropic"),
+                    model: "claude-3-5-sonnet-20241022".into(),
+                    tokens_in: 200,
+                    tokens_out: 100,
+                    cost_usd: 0.0,
+                    scope: RosterScope::SessionWide,
+                },
+            ],
+        )
+        .await;
+
+        let totals = live_session_totals(&log, &sid).await.unwrap();
+        assert_eq!(totals.tokens_in, 300);
+        assert_eq!(totals.tokens_out, 150);
+        // claude-3-5-sonnet-20241022 @ $3/MTok in + $15/MTok out:
+        //   300 * 3 / 1e6 + 150 * 15 / 1e6 = 0.0009 + 0.00225 = 0.00315
+        let cost = totals.cost.as_ref().expect("priced model");
+        assert!((cost.amount - 0.00315).abs() < 1e-9, "got {}", cost.amount);
+        assert_eq!(cost.currency, "USD");
+    }
+
+    #[tokio::test]
+    async fn live_totals_partial_million_scales_linearly() {
+        // F-605 DoD: cost reflects partial-million scaling — confirms the
+        // live walker uses the same `(rate × tokens / 1e6)` calc as the
+        // monthly flush.
+        let tmp = TempDir::new().unwrap();
+        let log = tmp.path().join("events.jsonl");
+        let sid = fixture_session();
+        write_events(
+            &log,
+            &[Event::UsageTick {
+                session_id: Some(sid.clone()),
+                provider: provider("anthropic"),
+                model: "claude-3-5-sonnet-20241022".into(),
+                tokens_in: 100_000,
+                tokens_out: 50_000,
+                cost_usd: 0.0,
+                scope: RosterScope::SessionWide,
+            }],
+        )
+        .await;
+
+        let totals = live_session_totals(&log, &sid).await.unwrap();
+        // 100k × $3/MTok = $0.30, 50k × $15/MTok = $0.75 → $1.05.
+        let cost = totals.cost.as_ref().expect("priced model");
+        assert!((cost.amount - 1.05).abs() < 1e-9, "got {}", cost.amount);
+    }
+
+    #[tokio::test]
+    async fn live_totals_missing_model_yields_null_cost() {
+        // F-605 DoD: missing-model cost surfaces as null, consistent with
+        // F-593's flush-time `MonthlyAggregate::record` policy.
+        let tmp = TempDir::new().unwrap();
+        let log = tmp.path().join("events.jsonl");
+        let sid = fixture_session();
+        write_events(
+            &log,
+            &[
+                Event::UsageTick {
+                    session_id: Some(sid.clone()),
+                    provider: provider("anthropic"),
+                    model: "claude-3-5-sonnet-20241022".into(),
+                    tokens_in: 1000,
+                    tokens_out: 500,
+                    cost_usd: 0.0,
+                    scope: RosterScope::SessionWide,
+                },
+                Event::UsageTick {
+                    session_id: Some(sid.clone()),
+                    provider: provider("anthropic"),
+                    model: "claude-imaginary-99".into(),
+                    tokens_in: 100,
+                    tokens_out: 50,
+                    cost_usd: 0.0,
+                    scope: RosterScope::SessionWide,
+                },
+            ],
+        )
+        .await;
+
+        let totals = live_session_totals(&log, &sid).await.unwrap();
+        // Tokens still accumulate even when one tick lacks pricing.
+        assert_eq!(totals.tokens_in, 1100);
+        assert_eq!(totals.tokens_out, 550);
+        assert!(
+            totals.cost.is_none(),
+            "missing-model cost is sticky-null, got {:?}",
+            totals.cost,
+        );
+    }
+
+    #[tokio::test]
+    async fn live_totals_filters_by_session_id() {
+        // F-605: a tick tagged with a different session id must not bleed
+        // into this session's running totals (defense for any future
+        // multiplexed log layout).
+        let tmp = TempDir::new().unwrap();
+        let log = tmp.path().join("events.jsonl");
+        let sid = fixture_session();
+        let other = alt_session();
+        write_events(
+            &log,
+            &[
+                Event::UsageTick {
+                    session_id: Some(sid.clone()),
+                    provider: provider("anthropic"),
+                    model: "claude-3-5-sonnet-20241022".into(),
+                    tokens_in: 100,
+                    tokens_out: 50,
+                    cost_usd: 0.0,
+                    scope: RosterScope::SessionWide,
+                },
+                Event::UsageTick {
+                    session_id: Some(other),
+                    provider: provider("anthropic"),
+                    model: "claude-3-5-sonnet-20241022".into(),
+                    tokens_in: 9_999,
+                    tokens_out: 9_999,
+                    cost_usd: 0.0,
+                    scope: RosterScope::SessionWide,
+                },
+            ],
+        )
+        .await;
+
+        let totals = live_session_totals(&log, &sid).await.unwrap();
+        assert_eq!(totals.tokens_in, 100, "other session's tick must not leak");
+        assert_eq!(totals.tokens_out, 50);
+    }
+
+    #[tokio::test]
+    async fn live_totals_skip_legacy_unattributed_ticks() {
+        // F-605: ticks written before the field landed deserialize as
+        // `session_id: None`. Live totals can't attribute them, so the
+        // walker skips — never silently mis-credits an arbitrary session.
+        let tmp = TempDir::new().unwrap();
+        let log = tmp.path().join("events.jsonl");
+        let sid = fixture_session();
+        write_events(
+            &log,
+            &[Event::UsageTick {
+                session_id: None,
+                provider: provider("anthropic"),
+                model: "claude-3-5-sonnet-20241022".into(),
+                tokens_in: 100,
+                tokens_out: 50,
+                cost_usd: 0.0,
+                scope: RosterScope::SessionWide,
+            }],
+        )
+        .await;
+
+        let totals = live_session_totals(&log, &sid).await.unwrap();
+        assert_eq!(totals.tokens_in, 0);
+        assert_eq!(totals.tokens_out, 0);
+    }
+
+    #[tokio::test]
+    async fn live_totals_does_not_force_flush() {
+        // F-605 DoD: backend can answer "session totals as of now?" without
+        // forcing a flush. Asserts the sentinel is NOT written by the live
+        // walker (so the eventual session-end flush still runs).
+        let tmp = TempDir::new().unwrap();
+        let log = tmp.path().join("events.jsonl");
+        let sid = fixture_session();
+        write_events(
+            &log,
+            &[Event::UsageTick {
+                session_id: Some(sid.clone()),
+                provider: provider("anthropic"),
+                model: "claude-3-5-sonnet-20241022".into(),
+                tokens_in: 100,
+                tokens_out: 50,
+                cost_usd: 0.0,
+                scope: RosterScope::SessionWide,
+            }],
+        )
+        .await;
+
+        let _ = live_session_totals(&log, &sid).await.unwrap();
+        let sentinel = sentinel_path(&log);
+        assert!(
+            !sentinel.exists(),
+            "live totals must not write the flush sentinel",
+        );
+    }
+
+    #[tokio::test]
+    async fn live_totals_empty_log_returns_zero() {
+        let tmp = TempDir::new().unwrap();
+        let log = tmp.path().join("events.jsonl");
+        write_events(&log, &[]).await;
+        let totals = live_session_totals(&log, &fixture_session()).await.unwrap();
+        assert_eq!(totals, SessionUsage::zero());
     }
 }
