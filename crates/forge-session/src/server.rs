@@ -313,6 +313,8 @@ fn ipc_message_kind(msg: &IpcMessage) -> &'static str {
         IpcMessage::CompactTranscript(_) => "CompactTranscript",
         IpcMessage::PauseSession(_) => "PauseSession",
         IpcMessage::ResumeSession(_) => "ResumeSession",
+        IpcMessage::InterruptSession(_) => "InterruptSession",
+        IpcMessage::RefineHandoff(_) => "RefineHandoff",
     }
 }
 
@@ -1601,6 +1603,80 @@ async fn handle_connection<P: Provider + 'static>(
                                 "ResumeSession: not paused (no-op)",
                             );
                         }
+                    }
+
+                    Some(IpcMessage::InterruptSession(_)) => {
+                        // F-604: interrupt request. Set the in-memory
+                        // flag; the orchestrator's stream loop observes
+                        // it on the next chunk boundary, breaks out,
+                        // captures the partial assistant text, emits
+                        // `Event::SessionInterrupted`, publishes the
+                        // capture on the session, and returns. We park
+                        // here on `await_interrupt_capture` (with a
+                        // bounded deadline) and reply with
+                        // `RefineHandoff` carrying the captured data.
+                        //
+                        // Two no-op shapes both reply with an empty
+                        // handoff (`partial_text: ""`,
+                        // `captured_at_*: ""`):
+                        //   1. The flag was already set (a prior
+                        //      interrupt is still racing the
+                        //      orchestrator). `request_interrupt`
+                        //      returns `false`; we still wait briefly
+                        //      so a concurrent caller's capture can
+                        //      land before our deadline.
+                        //   2. No turn is in flight — the deadline
+                        //      expires with no publish. We clear the
+                        //      flag (so it doesn't carry into the
+                        //      next turn) and return the empty shape.
+                        //
+                        // Bounded by a 5s deadline to defeat any
+                        // pathological provider that never reaches a
+                        // chunk boundary; the deadline is generous
+                        // for realistic streams.
+                        let _was_fresh = session.request_interrupt();
+                        let timeout = std::time::Duration::from_secs(5);
+                        let handoff = match session.await_interrupt_capture(timeout).await {
+                            Some(cap) => forge_ipc::RefineHandoff {
+                                partial_text: cap.partial_text,
+                                captured_at_step_id: cap.captured_at_step_id,
+                                captured_at_msg_id: cap.captured_at_msg_id,
+                            },
+                            None => {
+                                // No-op interrupt: clear the flag so a
+                                // future turn isn't short-circuited by
+                                // a stale request, and reply with an
+                                // empty handoff.
+                                session.clear_interrupt_request();
+                                tracing::debug!(
+                                    target: "forge_session::server",
+                                    session_id = %session_id,
+                                    "InterruptSession: no in-flight turn; replying with empty handoff",
+                                );
+                                forge_ipc::RefineHandoff::default()
+                            }
+                        };
+                        let frame = IpcMessage::RefineHandoff(handoff);
+                        if let Err(e) = forge_ipc::write_frame(&mut writer, &frame).await {
+                            tracing::error!(
+                                target: "forge_session::server",
+                                session_id = %session_id,
+                                error = %e,
+                                "RefineHandoff write failed",
+                            );
+                            break;
+                        }
+                    }
+
+                    Some(IpcMessage::RefineHandoff(_)) => {
+                        // F-604: response shape, never client→daemon.
+                        // Ignore — same idiom as `McpServersList`
+                        // arriving on the daemon side.
+                        tracing::warn!(
+                            target: "forge_session::server",
+                            session_id = %session_id,
+                            "ignoring stray RefineHandoff frame from client",
+                        );
                     }
 
                     Some(IpcMessage::ListMcpServers(_)) => {

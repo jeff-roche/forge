@@ -9,6 +9,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use ts_rs::TS;
 
 // F-608: sibling tagged-union for the daemon ↔ `forged-agent` wire. Lives
 // alongside `IpcMessage` (different shape, same framing) per
@@ -80,6 +81,19 @@ pub enum IpcMessage {
     /// `StepStarted` opens. Resuming an already-running session is a
     /// no-op and emits no second event.
     ResumeSession(ResumeSession),
+    /// F-604: client → session request to interrupt the in-flight
+    /// assistant turn and hand the captured partial text back as a
+    /// refine handoff. Distinct from cancel (terminal) and pause
+    /// (resumable on the same turn) — interrupt ends the current turn
+    /// cleanly and leaves the session ready to accept the next user
+    /// message. Response arrives as [`IpcMessage::RefineHandoff`].
+    InterruptSession(InterruptSession),
+    /// F-604: daemon → client response for an [`IpcMessage::InterruptSession`]
+    /// frame. Carries the partial assistant text captured at the
+    /// interrupt boundary plus the step / message id the partial was
+    /// anchored on; the UI uses these to pre-fill its refine composer
+    /// and re-attach to the transcript context.
+    RefineHandoff(RefineHandoff),
 }
 
 /// Client → session: re-run the assistant message with `msg_id` using the
@@ -153,6 +167,36 @@ pub struct PauseSession {}
 /// `debug!` and emit nothing.
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct ResumeSession {}
+
+/// F-604: client → session: interrupt the in-flight assistant turn and
+/// fetch a refine handoff. No fields today — the daemon resolves the
+/// session from the connection. The daemon flips an in-memory
+/// `interrupt_requested` flag; the orchestrator's stream loop checks the
+/// flag between provider chunks and breaks out at the next clean
+/// boundary, captures the partial assistant text, emits
+/// `Event::SessionInterrupted`, and parks the session in a quiescent
+/// state. The response [`RefineHandoff`] carries the same partial text +
+/// anchors so the calling Tauri command can return them synchronously.
+/// Interrupt with no in-flight assistant turn is a no-op and replies
+/// with an empty handoff (`partial_text: ""`).
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct InterruptSession {}
+
+/// F-604: daemon → client: refine-handoff payload. Mirrors the data
+/// carried on `Event::SessionInterrupted` so a Tauri caller awaiting the
+/// IPC response and a webview consuming the event stream see the same
+/// shape. Empty `partial_text` is a legal value — it indicates the
+/// interrupt landed before any `AssistantDelta` could accumulate (or no
+/// turn was in flight). `captured_at_msg_id` and `captured_at_step_id`
+/// are empty strings in the no-op (no in-flight turn) shape; otherwise
+/// they hold the canonical id strings.
+#[derive(Debug, Serialize, Deserialize, Default, Clone, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+pub struct RefineHandoff {
+    pub partial_text: String,
+    pub captured_at_step_id: String,
+    pub captured_at_msg_id: String,
+}
 
 /// F-155: client → session: list the daemon's managed MCP servers.
 ///

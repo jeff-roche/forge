@@ -204,6 +204,35 @@ pub enum Event {
     /// lands. Re-issuing `ResumeSession` while already running is a no-op
     /// and does **not** emit a second event.
     SessionResumed { at: DateTime<Utc> },
+    /// F-604: orchestrator interrupted mid-stream and parked the session in
+    /// a quiescent state with the partial assistant text captured for a
+    /// refine handoff.
+    ///
+    /// Emitted exactly once per real interrupt by the orchestrator when an
+    /// in-flight assistant stream is cut short. Distinct from the cancel
+    /// path (terminal — ends the session) and the pause path (resumable —
+    /// keeps the same turn). Interrupt ends the current turn cleanly and
+    /// leaves the session ready for the next user message; the captured
+    /// `partial_text` is what the refine composer pre-fills.
+    ///
+    /// `partial_text` is the assistant text accumulated up to the
+    /// interrupt point (may be empty if no `AssistantDelta` had landed
+    /// yet). `captured_at_msg_id` is the `MessageId` of the assistant
+    /// turn that owned the partial; subscribers correlate this with the
+    /// preceding `AssistantMessage(open)` to anchor the refine composer.
+    /// `captured_at_step_id` identifies the model step that was cut. An
+    /// interrupt with no in-flight assistant turn is a no-op — no event
+    /// fires. Tool calls in flight at the moment of interrupt are
+    /// dropped (their dispatcher buffer is cleared) without emitting
+    /// partial Tool* events; the step is closed with
+    /// `StepOutcome::Error { reason: "interrupted" }` so late-joining
+    /// replay consumers see a well-formed step window.
+    SessionInterrupted {
+        at: DateTime<Utc>,
+        partial_text: Arc<str>,
+        captured_at_step_id: StepId,
+        captured_at_msg_id: MessageId,
+    },
     /// F-139: fine-grained step trace — opens a step within a turn.
     ///
     /// Emitted by the session turn loop before any `AssistantMessage`,

@@ -961,6 +961,30 @@ fn session_resumed_wire_shape() {
     );
 }
 
+#[test]
+fn session_interrupted_wire_shape() {
+    // F-604: refine-handoff event. Pins the captured partial text + the
+    // step / message anchors a UI's refine composer needs to re-attach
+    // the in-progress turn. Empty `partial_text` is a legal shape (the
+    // interrupt landed before any AssistantDelta) and serializes as the
+    // empty string, not a missing key.
+    assert_wire_eq(
+        Event::SessionInterrupted {
+            at: fixed_time(),
+            partial_text: "partial answer so far".into(),
+            captured_at_step_id: step_id("step-int-1"),
+            captured_at_msg_id: msg_id("mid-int-1"),
+        },
+        json!({
+            "type": "session_interrupted",
+            "at": "2026-04-18T10:00:00Z",
+            "partial_text": "partial answer so far",
+            "captured_at_step_id": "step-int-1",
+            "captured_at_msg_id": "mid-int-1",
+        }),
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Compile-time guard: adding a new `Event` variant must also add its
 // wire-shape pin above. This is enforced by an exhaustive `match` here —
@@ -1003,6 +1027,7 @@ fn variant_label(e: &Event) -> &'static str {
         Event::ProviderChanged { .. } => "provider_changed",
         Event::SessionPaused { .. } => "session_paused",
         Event::SessionResumed { .. } => "session_resumed",
+        Event::SessionInterrupted { .. } => "session_interrupted",
     }
 }
 

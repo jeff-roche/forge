@@ -7,6 +7,29 @@ use tokio::sync::{broadcast, Mutex, Notify};
 
 use crate::error::SessionError;
 
+/// F-604: in-memory snapshot of an interrupt-driven refine handoff. The
+/// orchestrator populates this when its stream loop notices the
+/// interrupt flag and breaks out at a clean chunk boundary; the daemon
+/// IPC handler reads it back to compose the `RefineHandoff` response and
+/// the `Event::SessionInterrupted` payload.
+///
+/// Lives in `forge-session` (not `forge-ipc`) so the Session struct does
+/// not pull in IPC types — the server-side adapter at the IPC boundary
+/// translates between this snapshot and the wire shape.
+#[derive(Debug, Clone, Default)]
+pub struct InterruptCapture {
+    /// Assistant text accumulated up to the interrupt point. Empty when
+    /// the interrupt landed before any `AssistantDelta` could fire (or
+    /// when no assistant turn was in flight at all).
+    pub partial_text: String,
+    /// `MessageId` of the assistant turn that owned the partial. Empty
+    /// `String` shape when no turn was in flight (no-op interrupt).
+    pub captured_at_msg_id: String,
+    /// `StepId` of the model step that was interrupted. Empty when no
+    /// turn was in flight.
+    pub captured_at_step_id: String,
+}
+
 pub struct Session {
     pub log_path: PathBuf,
     pub event_tx: broadcast::Sender<(u64, Event)>,
@@ -45,6 +68,31 @@ pub struct Session {
     /// looping; they do **not** trust the wake itself as a state
     /// transition signal.
     resume_notify: Arc<Notify>,
+    /// F-604: orchestrator interrupt request flag (in-memory only, not
+    /// persisted). Set by `request_interrupt` on the daemon's IPC
+    /// handler thread; observed by the orchestrator's stream loop on
+    /// every chunk so a mid-stream request takes effect at the next
+    /// chunk boundary (a clean point where `assistant_text` reflects
+    /// every delta the daemon has already emitted). Differs from
+    /// `paused` in two ways: (1) consumed-on-detect — the orchestrator
+    /// clears it after handling so a subsequent turn starts in a clean
+    /// state; (2) it kills the in-flight turn rather than parking it.
+    interrupt_requested: Arc<AtomicBool>,
+    /// F-604: handoff payload populated by the orchestrator at the
+    /// interrupt boundary. The daemon IPC handler reads it back to
+    /// compose the `RefineHandoff` response and the
+    /// `Event::SessionInterrupted` payload, then calls
+    /// `Session::take_interrupt_capture` to clear the slot.
+    /// `notify_waiters` on `interrupt_done` fires when the slot is
+    /// populated so a waiting IPC handler unblocks promptly.
+    interrupt_capture: Arc<Mutex<Option<InterruptCapture>>>,
+    /// F-604: paired with `interrupt_capture`. The IPC handler awaits
+    /// this `Notify` while the orchestrator captures the partial; the
+    /// orchestrator calls `notify_waiters` after publishing the
+    /// capture. The handler re-checks the slot on each wake and the
+    /// flag on a deadline so a no-op interrupt (no in-flight turn)
+    /// resolves promptly via the deadline path rather than stalling.
+    interrupt_done: Arc<Notify>,
 }
 
 impl Session {
@@ -65,6 +113,9 @@ impl Session {
             parallel_group_seq: Arc::new(AtomicU32::new(1)),
             paused: Arc::new(AtomicBool::new(false)),
             resume_notify: Arc::new(Notify::new()),
+            interrupt_requested: Arc::new(AtomicBool::new(false)),
+            interrupt_capture: Arc::new(Mutex::new(None)),
+            interrupt_done: Arc::new(Notify::new()),
         })
     }
 
@@ -127,6 +178,90 @@ impl Session {
             }
             notified.await;
         }
+    }
+
+    /// F-604: flip the interrupt-request flag. Returns `true` if this
+    /// call performed the `clear → set` transition (i.e. there was no
+    /// outstanding interrupt request). The orchestrator's stream loop
+    /// observes the flag on every chunk and breaks out at the next
+    /// chunk boundary; if no assistant turn is in flight, the flag is
+    /// cleared by the no-op handoff path on the IPC handler side
+    /// (see `try_take_no_inflight_handoff`).
+    pub fn request_interrupt(&self) -> bool {
+        self.interrupt_requested
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    /// F-604: observe the interrupt flag without consuming it. The
+    /// orchestrator's stream loop polls this on every chunk; a `true`
+    /// return is the signal to break out of the loop and capture the
+    /// partial.
+    pub fn is_interrupt_requested(&self) -> bool {
+        self.interrupt_requested.load(Ordering::SeqCst)
+    }
+
+    /// F-604: orchestrator-side: publish the captured handoff and clear
+    /// the request flag. Wakes any IPC handler awaiting the response
+    /// via `await_interrupt_capture`.
+    pub async fn publish_interrupt_capture(&self, capture: InterruptCapture) {
+        {
+            let mut slot = self.interrupt_capture.lock().await;
+            *slot = Some(capture);
+        }
+        // Clear the request flag AFTER publishing the capture so a
+        // racing `is_interrupt_requested` poll on the orchestrator side
+        // either sees the flag still set (and breaks out — but the
+        // capture is now visible) or the flag clear (and proceeds
+        // normally — which is the post-handoff steady state).
+        self.interrupt_requested.store(false, Ordering::SeqCst);
+        self.interrupt_done.notify_waiters();
+    }
+
+    /// F-604: IPC-side: take ownership of any pending interrupt capture
+    /// the orchestrator has published, clearing the slot. Returns
+    /// `None` when the orchestrator has not yet published (the IPC
+    /// handler should park on `await_interrupt_capture` then) or when
+    /// the slot was already drained by an earlier call.
+    pub async fn take_interrupt_capture(&self) -> Option<InterruptCapture> {
+        self.interrupt_capture.lock().await.take()
+    }
+
+    /// F-604: IPC-side: park until the orchestrator publishes a capture
+    /// or `timeout` elapses. Used by the daemon's
+    /// `IpcMessage::InterruptSession` handler to bound the wait so a
+    /// no-in-flight-turn case doesn't stall the request loop. Returns
+    /// `Some(capture)` on success; `None` on timeout (caller should
+    /// then synthesize the no-op shape).
+    pub async fn await_interrupt_capture(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Option<InterruptCapture> {
+        // Fast path: capture may have been published before we arrived.
+        if let Some(cap) = self.take_interrupt_capture().await {
+            return Some(cap);
+        }
+        // Register the notify waiter BEFORE taking again so a publish
+        // racing with our second `take` cannot land between the two
+        // (otherwise we'd register after the wake fired and stall).
+        let notified = self.interrupt_done.notified();
+        tokio::pin!(notified);
+        if let Some(cap) = self.take_interrupt_capture().await {
+            return Some(cap);
+        }
+        match tokio::time::timeout(timeout, notified).await {
+            Ok(()) => self.take_interrupt_capture().await,
+            Err(_) => None,
+        }
+    }
+
+    /// F-604: clear the interrupt request flag without publishing a
+    /// capture. Used by the IPC handler's no-op shortcut when the flag
+    /// flip happened but the orchestrator has no in-flight turn to
+    /// observe it (e.g. the daemon idled between turns). Without this
+    /// the flag would persist into the next turn and short-circuit it.
+    pub fn clear_interrupt_request(&self) {
+        self.interrupt_requested.store(false, Ordering::SeqCst);
     }
 
     /// F-599: allocate a fresh `parallel_group` id for a concurrent tool
@@ -267,5 +402,98 @@ mod tests {
             .await
             .expect("waiter must wake on resume")
             .unwrap();
+    }
+
+    // ---------- F-604: interrupt / refine primitive ----------
+
+    #[tokio::test]
+    async fn request_interrupt_returns_true_only_on_clear_to_set_transition() {
+        let (_dir, session) = fresh_session().await;
+        assert!(!session.is_interrupt_requested());
+        assert!(session.request_interrupt(), "first request must transition");
+        assert!(session.is_interrupt_requested());
+        assert!(
+            !session.request_interrupt(),
+            "redundant request must not re-transition (idempotency)",
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_interrupt_capture_clears_request_and_publishes_capture() {
+        let (_dir, session) = fresh_session().await;
+        session.request_interrupt();
+        let capture = InterruptCapture {
+            partial_text: "half an answer".into(),
+            captured_at_msg_id: "mid-int".into(),
+            captured_at_step_id: "step-int".into(),
+        };
+        session.publish_interrupt_capture(capture).await;
+        assert!(
+            !session.is_interrupt_requested(),
+            "publishing must clear the request flag",
+        );
+        let taken = session
+            .take_interrupt_capture()
+            .await
+            .expect("capture must be retrievable");
+        assert_eq!(taken.partial_text, "half an answer");
+        assert_eq!(taken.captured_at_msg_id, "mid-int");
+        assert_eq!(taken.captured_at_step_id, "step-int");
+        // Second take returns None — the slot is consumed.
+        assert!(session.take_interrupt_capture().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn await_interrupt_capture_resolves_when_orchestrator_publishes() {
+        let (_dir, session) = fresh_session().await;
+        let session_clone = Arc::clone(&session);
+        let waiter = tokio::spawn(async move {
+            session_clone
+                .await_interrupt_capture(std::time::Duration::from_secs(2))
+                .await
+        });
+
+        // Yield once to let the waiter register its `notified()` slot
+        // BEFORE the publish fires — exercises the race-defending
+        // re-check path.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let capture = InterruptCapture {
+            partial_text: "raced answer".into(),
+            captured_at_msg_id: "mid-r".into(),
+            captured_at_step_id: "step-r".into(),
+        };
+        session.publish_interrupt_capture(capture).await;
+
+        let resolved = tokio::time::timeout(std::time::Duration::from_millis(500), waiter)
+            .await
+            .expect("waiter must resolve")
+            .unwrap();
+        let cap = resolved.expect("await_interrupt_capture must yield Some");
+        assert_eq!(cap.partial_text, "raced answer");
+    }
+
+    #[tokio::test]
+    async fn await_interrupt_capture_times_out_when_no_publish() {
+        let (_dir, session) = fresh_session().await;
+        // No publish; the deadline path must fire.
+        let result = session
+            .await_interrupt_capture(std::time::Duration::from_millis(100))
+            .await;
+        assert!(
+            result.is_none(),
+            "await must yield None on deadline expiry (no orchestrator publish)",
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_interrupt_request_drops_flag_without_publishing() {
+        let (_dir, session) = fresh_session().await;
+        assert!(session.request_interrupt());
+        assert!(session.is_interrupt_requested());
+        session.clear_interrupt_request();
+        assert!(!session.is_interrupt_requested());
+        // No capture was published, so take returns None.
+        assert!(session.take_interrupt_capture().await.is_none());
     }
 }
