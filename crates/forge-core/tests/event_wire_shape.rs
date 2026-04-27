@@ -26,7 +26,7 @@
 use chrono::{DateTime, Utc};
 use forge_core::{
     AgentId, AgentInstanceId, ApprovalPreview, ApprovalScope, ApprovalSource, CompactTrigger,
-    EndReason, Event, McpStateEvent, MessageId, ProviderId, RosterScope, ServerState,
+    EndReason, Event, McpStateEvent, MessageId, ProviderId, RosterScope, ServerState, SessionId,
     SessionPersistence, StepId, StepKind, StepOutcome, TokenUsage, ToolCallId,
 };
 use serde_json::{json, Value};
@@ -364,6 +364,10 @@ fn step_id(s: &str) -> StepId {
     serde_json::from_value(Value::String(s.to_string())).unwrap()
 }
 
+fn session_id(s: &str) -> SessionId {
+    serde_json::from_value(Value::String(s.to_string())).unwrap()
+}
+
 // ---------------------------------------------------------------------------
 // F-362: wire-shape pins for every remaining production-emitted `Event`
 // variant. The Phase-2 landing sweep (F-137, F-138, F-139, F-143, F-152,
@@ -560,8 +564,11 @@ fn background_agent_completed_wire_shape() {
 #[test]
 fn usage_tick_wire_shape() {
     // F-155: per-provider token / cost accounting — feeds the usage HUD.
+    // F-605: every live tick now carries the originating `session_id` so
+    // the AgentMonitor toolbar can pre-filter the shared event stream.
     assert_wire_eq(
         Event::UsageTick {
+            session_id: Some(session_id("deadbeefcafebabe")),
             provider: provider_id("mock"),
             model: "mock-1".into(),
             tokens_in: 128,
@@ -571,6 +578,7 @@ fn usage_tick_wire_shape() {
         },
         json!({
             "type": "usage_tick",
+            "session_id": "deadbeefcafebabe",
             "provider": "mock",
             "model": "mock-1",
             "tokens_in": 128,
@@ -578,6 +586,36 @@ fn usage_tick_wire_shape() {
             "cost_usd": 0.0125,
             "scope": { "type": "SessionWide" },
         }),
+    );
+}
+
+#[test]
+fn usage_tick_legacy_log_replays_without_session_id() {
+    // F-605 backward-compat: logs written before this field landed must
+    // still replay cleanly. `session_id` deserializes to `None` when the
+    // key is absent, and re-serializing skips it (per
+    // `skip_serializing_if = "Option::is_none"`) so a round-trip yields
+    // the legacy shape exactly.
+    let legacy = json!({
+        "type": "usage_tick",
+        "provider": "mock",
+        "model": "mock-1",
+        "tokens_in": 128,
+        "tokens_out": 256,
+        "cost_usd": 0.0125,
+        "scope": { "type": "SessionWide" },
+    });
+    let event: Event = serde_json::from_value(legacy.clone()).expect("legacy log replays");
+    match &event {
+        Event::UsageTick { session_id, .. } => {
+            assert!(session_id.is_none(), "legacy ticks deserialize as None");
+        }
+        _ => panic!("expected UsageTick"),
+    }
+    let reserialized = serde_json::to_value(&event).expect("re-serializes");
+    assert_eq!(
+        reserialized, legacy,
+        "round-trip preserves the legacy on-disk shape (no `session_id` key)",
     );
 }
 

@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::ids::{AgentId, AgentInstanceId, MessageId, ProviderId, StepId, ToolCallId};
+use crate::ids::{AgentId, AgentInstanceId, MessageId, ProviderId, SessionId, StepId, ToolCallId};
 use crate::mcp_state::McpStateEvent;
 use crate::roster::RosterScope;
 use crate::types::{
@@ -151,7 +151,24 @@ pub enum Event {
         id: AgentInstanceId,
         at: DateTime<Utc>,
     },
+    /// F-593 / F-605: per-tick token + cost accounting.
+    ///
+    /// `session_id` (F-605) tags every tick with the session that produced
+    /// it so live consumers (AgentMonitor §9.2 toolbar) can pre-filter the
+    /// shared event stream client-side without forcing a flush of the
+    /// monthly aggregate. The post-flush aggregator in `forge-session`'s
+    /// `usage_flush` module ignores the field — the on-disk monthly
+    /// bucket key is still `(workspace, provider, model, scope)`.
+    ///
+    /// Modeled as `Option<SessionId>` rather than a bare `SessionId` so
+    /// logs written before F-605 deserialize honestly as `None` (the
+    /// `SessionId` `Default` impl mints a *new* random id, which would
+    /// silently mis-attribute legacy ticks). New emissions always populate
+    /// `Some(session_id)`; replay consumers treat `None` as "legacy /
+    /// unattributed" and skip session-scoped accounting.
     UsageTick {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<SessionId>,
         provider: ProviderId,
         model: String,
         tokens_in: u64,

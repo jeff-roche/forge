@@ -135,6 +135,17 @@ export function routeTelemetryEvent(
   }
 
   if (type === 'usage_tick') {
+    // F-605: ticks now carry the originating `session_id`. When present,
+    // a tick whose id doesn't match this window's session is *another*
+    // session bleeding through a shared event stream (a future
+    // multiplexed log layout) and must not credit our totals. When
+    // absent (legacy logs written before F-605), fall back to the prior
+    // behaviour: trust the caller-supplied `sessionId` since the tick
+    // was scoped to the per-session window the event was streamed to.
+    const tickSessionId = ev['session_id'];
+    if (typeof tickSessionId === 'string' && tickSessionId !== sessionId) {
+      return;
+    }
     const tokensIn = ev['tokens_in'];
     const tokensOut = ev['tokens_out'];
     const costUsd = ev['cost_usd'];
