@@ -16,10 +16,14 @@ import {
   AgentList,
   AgentMonitor,
   AgentTrace,
+  AgentTraceToolbar,
   applyEventToState,
   filterAgents,
+  formatElapsed,
   inspectorStub,
+  promoteAgentInstance,
   sortAgents,
+  spawnedByLabel,
   StepDrawer,
   stopAgentInstance,
   type AgentInspectorData,
@@ -103,7 +107,12 @@ describe('AgentMonitor: filter + sort helpers', () => {
 // ---------------------------------------------------------------------------
 
 describe('applyEventToState', () => {
-  const empty: LiveAgentState = { subAgents: [], stepsByAgent: {}, resourcesByAgent: {} };
+  const empty: LiveAgentState = {
+    subAgents: [],
+    stepsByAgent: {},
+    resourcesByAgent: {},
+    toolsByAgent: {},
+  };
 
   it('upserts a session row the first time StepStarted arrives with an instance id', () => {
     const after = applyEventToState(empty, {
@@ -633,6 +642,419 @@ describe('<AgentInspector>', () => {
     ));
     fireEvent.click(getByText('STOP AGENT'));
     expect(onStop).toHaveBeenCalledWith('kill-me');
+  });
+
+  // F-449: PROMOTE TO PANE renders for promotable rows (background +
+  // sub-agent), idempotent click semantics, and stays hidden for the
+  // session-root row (promoting the live session pane has no meaning).
+  describe('F-449 — PROMOTE TO PANE action', () => {
+    it('renders the button for a sub-agent row when onPromote is supplied', () => {
+      const { getByText } = render(() => (
+        <AgentInspector
+          agent={row({ id: 'sub-1', category: 'sub-agent' })}
+          data={inspector()}
+          onStop={() => {}}
+          onPromote={() => {}}
+        />
+      ));
+      expect(getByText('PROMOTE TO PANE')).toBeTruthy();
+    });
+
+    it('renders the button for a background row when onPromote is supplied', () => {
+      const { getByText } = render(() => (
+        <AgentInspector
+          agent={row({ id: 'bg-1', category: 'background' })}
+          data={inspector()}
+          onStop={() => {}}
+          onPromote={() => {}}
+        />
+      ));
+      expect(getByText('PROMOTE TO PANE')).toBeTruthy();
+    });
+
+    it('hides the button for a session-root row (not promotable)', () => {
+      const { queryByText } = render(() => (
+        <AgentInspector
+          agent={row({ id: 'session-root', category: 'session' })}
+          data={inspector()}
+          onStop={() => {}}
+          onPromote={() => {}}
+        />
+      ));
+      expect(queryByText('PROMOTE TO PANE')).toBeNull();
+    });
+
+    it('hides the button when onPromote is not supplied (Phase-2 callers)', () => {
+      const { queryByText } = render(() => (
+        <AgentInspector
+          agent={row({ id: 'sub-1', category: 'sub-agent' })}
+          data={inspector()}
+          onStop={() => {}}
+        />
+      ));
+      expect(queryByText('PROMOTE TO PANE')).toBeNull();
+    });
+
+    it('invokes onPromote with the agent id', () => {
+      const onPromote = vi.fn();
+      const { getByText } = render(() => (
+        <AgentInspector
+          agent={row({ id: 'promote-me', category: 'sub-agent' })}
+          data={inspector()}
+          onStop={() => {}}
+          onPromote={onPromote}
+        />
+      ));
+      fireEvent.click(getByText('PROMOTE TO PANE'));
+      expect(onPromote).toHaveBeenCalledWith('promote-me');
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F-449 — Trace toolbar (§9.2)
+//
+// Ready-now subset: elapsed (live mm:ss), model label, tools-used summary,
+// spawned-by relationship. Token in/out, cost, and the full step-of-M
+// chip ride F-605 / F-606 prereqs and ship in a follow-up PR.
+// ---------------------------------------------------------------------------
+
+describe('formatElapsed', () => {
+  it('renders mm:ss padded with leading zeros', () => {
+    const start = '2026-04-20T12:00:00Z';
+    const now = Date.parse(start) + 5 * 60 * 1000 + 7 * 1000; // 5m 7s
+    expect(formatElapsed(start, now)).toBe('05:07');
+  });
+
+  it('renders 00:00 at the moment of start', () => {
+    const start = '2026-04-20T12:00:00Z';
+    expect(formatElapsed(start, Date.parse(start))).toBe('00:00');
+  });
+
+  it('clamps negative deltas to 00:00 (clock skew)', () => {
+    const start = '2026-04-20T12:00:00Z';
+    const now = Date.parse(start) - 1000;
+    expect(formatElapsed(start, now)).toBe('00:00');
+  });
+
+  it('caps at 99:59+ for sessions over 100 minutes', () => {
+    const start = '2026-04-20T12:00:00Z';
+    const now = Date.parse(start) + 100 * 60 * 1000;
+    expect(formatElapsed(start, now)).toBe('99:59+');
+  });
+
+  it('returns the em-dash placeholder when startedAt is missing', () => {
+    expect(formatElapsed(undefined, Date.now())).toBe('—');
+  });
+
+  it('returns the em-dash placeholder when startedAt is unparseable', () => {
+    expect(formatElapsed('not-a-date', Date.now())).toBe('—');
+  });
+});
+
+describe('spawnedByLabel', () => {
+  it('returns the parent row name when present in the rows list', () => {
+    const parent = row({ id: 'p-1', name: 'orchestrator' });
+    const child = row({ id: 'c-1', parentId: 'p-1' });
+    expect(spawnedByLabel(child.parentId, [parent, child])).toBe('orchestrator');
+  });
+
+  it('falls back to the truncated id when the parent is not in the list', () => {
+    const child = row({ id: 'c-1', parentId: 'parent12345678' });
+    expect(spawnedByLabel(child.parentId, [child])).toBe('parent12');
+  });
+
+  it('returns undefined when parentId is undefined', () => {
+    expect(spawnedByLabel(undefined, [])).toBeUndefined();
+  });
+});
+
+describe('<AgentTraceToolbar>', () => {
+  it('renders elapsed, model, and tool-count cells', () => {
+    const start = '2026-04-20T12:00:00Z';
+    const now = Date.parse(start) + 90 * 1000; // 1m 30s
+    const { container, getByText } = render(() => (
+      <AgentTraceToolbar
+        agent={row({ startedAt: start, model: 'sonnet-4.5' })}
+        tools={['fs.read', 'shell.exec']}
+        now={now}
+      />
+    ));
+    const cells = container.querySelectorAll(
+      '.agent-monitor__trace-toolbar-cell',
+    );
+    expect(cells.length).toBeGreaterThanOrEqual(3);
+    expect(getByText('01:30')).toBeTruthy();
+    expect(getByText('sonnet-4.5')).toBeTruthy();
+    expect(getByText('tools 2')).toBeTruthy();
+  });
+
+  it('renders em-dash placeholders when fields are missing', () => {
+    // The base `row` helper does not set startedAt/model — pass it through
+    // unchanged so `exactOptionalPropertyTypes` doesn't trip on `undefined`.
+    const { container, getByText } = render(() => (
+      <AgentTraceToolbar agent={row()} tools={[]} now={Date.now()} />
+    ));
+    const elapsed = container.querySelector(
+      '.agent-monitor__trace-toolbar-cell[data-cell="elapsed"]',
+    );
+    expect(elapsed?.textContent).toBe('—');
+    const model = container.querySelector(
+      '.agent-monitor__trace-toolbar-cell[data-cell="model"]',
+    );
+    expect(model?.textContent).toBe('—');
+    // tools 0 always renders to keep the toolbar's mono rhythm stable.
+    expect(getByText('tools 0')).toBeTruthy();
+  });
+
+  it('renders the spawned-by cell only when supplied', () => {
+    const { getByText, queryByText, unmount } = render(() => (
+      <AgentTraceToolbar
+        agent={row({ category: 'sub-agent' })}
+        tools={[]}
+        spawnedBy="orchestrator"
+        now={Date.now()}
+      />
+    ));
+    expect(getByText('↳ orchestrator')).toBeTruthy();
+    unmount();
+
+    const { queryByText: q2 } = render(() => (
+      <AgentTraceToolbar agent={row()} tools={[]} now={Date.now()} />
+    ));
+    expect(q2('↳ orchestrator')).toBeNull();
+    expect(queryByText('↳ orchestrator')).toBeNull();
+  });
+
+  it('carries an aria-live region so the elapsed cell announces tick updates', () => {
+    const { container } = render(() => (
+      <AgentTraceToolbar
+        agent={row({ startedAt: '2026-04-20T12:00:00Z' })}
+        tools={[]}
+        now={Date.now()}
+      />
+    ));
+    const toolbar = container.querySelector(
+      '.agent-monitor__trace-toolbar',
+    ) as HTMLElement | null;
+    expect(toolbar).not.toBeNull();
+    expect(toolbar!.getAttribute('aria-live')).toBe('polite');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F-449 — applyEventToState additions
+//
+// session_started → stamps startedAt on the session-root row.
+// assistant_message → updates session-root model.
+// tool_call_started → folds unique tool names into toolsByAgent['session-root'].
+// sub_agent_spawned → preserves the optional `model` field on the new row.
+// ---------------------------------------------------------------------------
+
+describe('applyEventToState (F-449 chrome)', () => {
+  const empty: LiveAgentState = {
+    subAgents: [],
+    stepsByAgent: {},
+    resourcesByAgent: {},
+    toolsByAgent: {},
+  };
+
+  it('upserts a session-root row from session_started.at', () => {
+    const after = applyEventToState(empty, {
+      event: {
+        type: 'session_started',
+        at: '2026-04-20T12:00:00Z',
+        workspace: '/workspace',
+        agent: null,
+        persistence: 'on',
+      },
+    });
+    expect(after.subAgents).toHaveLength(1);
+    const root = after.subAgents[0]!;
+    expect(root.id).toBe('session-root');
+    expect(root.category).toBe('session');
+    expect(root.startedAt).toBe('2026-04-20T12:00:00Z');
+  });
+
+  it('updates the existing session-root startedAt when session_started arrives later', () => {
+    // step_started arrives first; it sets startedAt to "now". When the
+    // SessionStarted event lands a moment later it must overwrite with the
+    // wire-truth timestamp so the elapsed clock reads accurately.
+    const stepFirst = applyEventToState(empty, {
+      event: {
+        type: 'step_started',
+        step_id: 'step-1',
+        kind: 'model',
+        instance_id: 'session-root',
+      },
+    });
+    expect(stepFirst.subAgents[0]?.startedAt).not.toBe('2026-04-20T12:00:00Z');
+    const after = applyEventToState(stepFirst, {
+      event: {
+        type: 'session_started',
+        at: '2026-04-20T12:00:00Z',
+        workspace: '/workspace',
+        agent: null,
+        persistence: 'on',
+      },
+    });
+    expect(after.subAgents[0]?.startedAt).toBe('2026-04-20T12:00:00Z');
+  });
+
+  it('updates the session-root model on assistant_message', () => {
+    const seed = applyEventToState(empty, {
+      event: {
+        type: 'session_started',
+        at: '2026-04-20T12:00:00Z',
+        workspace: '/workspace',
+        agent: null,
+        persistence: 'on',
+      },
+    });
+    const after = applyEventToState(seed, {
+      event: {
+        type: 'assistant_message',
+        id: 'm-1',
+        provider: 'anthropic',
+        model: 'sonnet-4.5',
+        at: '2026-04-20T12:00:01Z',
+        stream_finalised: true,
+        text: 'hello',
+        branch_parent: null,
+        branch_variant_index: 0,
+      },
+    });
+    const root = after.subAgents.find((r) => r.id === 'session-root');
+    expect(root?.model).toBe('sonnet-4.5');
+  });
+
+  it('is a no-op for assistant_message when there is no session-root row', () => {
+    const after = applyEventToState(empty, {
+      event: {
+        type: 'assistant_message',
+        id: 'm-1',
+        provider: 'anthropic',
+        model: 'sonnet-4.5',
+        at: '2026-04-20T12:00:01Z',
+        stream_finalised: true,
+        text: 'hello',
+        branch_parent: null,
+        branch_variant_index: 0,
+      },
+    });
+    expect(after).toBe(empty);
+  });
+
+  it('aggregates unique tool names from tool_call_started', () => {
+    const a = applyEventToState(empty, {
+      event: {
+        type: 'tool_call_started',
+        id: 'tc-1',
+        msg: 'm-1',
+        tool: 'fs.read',
+        args: {},
+        at: '2026-04-20T12:00:01Z',
+        parallel_group: null,
+      },
+    });
+    const b = applyEventToState(a, {
+      event: {
+        type: 'tool_call_started',
+        id: 'tc-2',
+        msg: 'm-1',
+        tool: 'shell.exec',
+        args: {},
+        at: '2026-04-20T12:00:02Z',
+        parallel_group: null,
+      },
+    });
+    expect(b.toolsByAgent['session-root']).toEqual(['fs.read', 'shell.exec']);
+  });
+
+  it('does not duplicate a tool name already aggregated', () => {
+    const a = applyEventToState(empty, {
+      event: {
+        type: 'tool_call_started',
+        id: 'tc-1',
+        msg: 'm-1',
+        tool: 'fs.read',
+        args: {},
+        at: '2026-04-20T12:00:01Z',
+        parallel_group: null,
+      },
+    });
+    const b = applyEventToState(a, {
+      event: {
+        type: 'tool_call_started',
+        id: 'tc-2',
+        msg: 'm-1',
+        tool: 'fs.read',
+        args: {},
+        at: '2026-04-20T12:00:02Z',
+        parallel_group: null,
+      },
+    });
+    expect(b).toBe(a);
+  });
+
+  it('preserves the optional model field from sub_agent_spawned on the new row', () => {
+    const after = applyEventToState(empty, {
+      event: {
+        type: 'sub_agent_spawned',
+        parent: 'p',
+        child: 'c',
+        from_msg: 'm',
+        model: 'haiku-4.5',
+      },
+    });
+    const sub = after.subAgents.find((r) => r.id === 'c');
+    expect(sub?.model).toBe('haiku-4.5');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// promoteAgentInstance wiring (F-449)
+//
+// Mirrors stopAgentInstance — exercises the promote_background_agent IPC
+// boundary without mounting the route. Pins idempotency: rejection from the
+// command (likely "already promoted, race") collapses to `failed` rather
+// than throwing into the click handler.
+// ---------------------------------------------------------------------------
+
+describe('promoteAgentInstance wiring', () => {
+  it('invokes promoteBackgroundAgent with the session + instance ids', async () => {
+    const promoteBackgroundAgent = vi.fn().mockResolvedValue(undefined);
+    const result = await promoteAgentInstance(
+      { promoteBackgroundAgent },
+      'sess-a',
+      'promote-me',
+    );
+    expect(promoteBackgroundAgent).toHaveBeenCalledWith('sess-a', 'promote-me');
+    expect(result).toBe('ok');
+  });
+
+  it('is a no-op when no session id is active', async () => {
+    const promoteBackgroundAgent = vi.fn();
+    const result = await promoteAgentInstance(
+      { promoteBackgroundAgent },
+      null,
+      'whatever',
+    );
+    expect(promoteBackgroundAgent).not.toHaveBeenCalled();
+    expect(result).toBe('skipped');
+  });
+
+  it('swallows promoteBackgroundAgent rejections so the click stays idempotent', async () => {
+    const promoteBackgroundAgent = vi
+      .fn()
+      .mockRejectedValue(new Error('already promoted'));
+    const result = await promoteAgentInstance(
+      { promoteBackgroundAgent },
+      'sess-a',
+      'promote-me',
+    );
+    expect(promoteBackgroundAgent).toHaveBeenCalledTimes(1);
+    expect(result).toBe('failed');
   });
 });
 
