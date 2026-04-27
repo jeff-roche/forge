@@ -198,6 +198,30 @@ pub enum Event {
         /// pin on this field name; the divergence is documented in
         /// `docs/architecture/event-conventions.md` as a pinned exception.
         started_at: DateTime<Utc>,
+        /// F-606: 1-based step index within the enclosing turn.
+        ///
+        /// Counts every `StepStarted` emitted by the orchestrator for this
+        /// turn (Model and Tool steps included), in emission order. The UI
+        /// renders this as the `N` in the AgentMonitor §9.2 chip
+        /// `running · step N` (or `step N of M` when `total` is populated).
+        ///
+        /// `#[serde(default)]` lets event logs written before F-606
+        /// deserialize cleanly — older entries land with `index: 0`. New
+        /// emissions always start at `1`, so `0` on the wire is the
+        /// "legacy / unknown" marker.
+        #[serde(default)]
+        index: u32,
+        /// F-606: total step count for this turn, when known.
+        ///
+        /// `None` while the orchestrator is still streaming steps (today's
+        /// common case — the model decides what to call turn-by-turn so
+        /// the total is unknown until completion). A follow-up may emit a
+        /// retroactive companion event once the turn ends. UI falls back
+        /// to `step N` (no `of M`) when this is `None`.
+        ///
+        /// `#[serde(default)]` keeps old logs replayable.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        total: Option<u32>,
     },
     /// F-139: fine-grained step trace — closes a step.
     ///

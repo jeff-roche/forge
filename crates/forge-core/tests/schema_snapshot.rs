@@ -57,6 +57,8 @@ fn step_started_model_top_level_turn_snapshot() {
             instance_id: None,
             kind: StepKind::Model,
             started_at: fixed_time(),
+            index: 1,
+            total: None,
         },
         json!({
             "type": "step_started",
@@ -64,6 +66,7 @@ fn step_started_model_top_level_turn_snapshot() {
             "instance_id": null,
             "kind": "model",
             "started_at": "2026-04-20T12:00:00Z",
+            "index": 1,
         }),
     );
 }
@@ -76,6 +79,8 @@ fn step_started_tool_under_instance_snapshot() {
             instance_id: Some(agent_instance_id("inst-1")),
             kind: StepKind::Tool,
             started_at: fixed_time(),
+            index: 2,
+            total: None,
         },
         json!({
             "type": "step_started",
@@ -83,6 +88,7 @@ fn step_started_tool_under_instance_snapshot() {
             "instance_id": "inst-1",
             "kind": "tool",
             "started_at": "2026-04-20T12:00:00Z",
+            "index": 2,
         }),
     );
 }
@@ -104,6 +110,8 @@ fn step_kind_wire_labels_are_snake_case() {
             instance_id: None,
             kind,
             started_at: fixed_time(),
+            index: 1,
+            total: None,
         };
         let v = serde_json::to_value(&ev).unwrap();
         assert_eq!(v["kind"], Value::String(expected.to_string()));
