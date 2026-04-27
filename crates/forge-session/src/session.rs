@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
 use forge_core::{Event, EventLog};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, Mutex, Notify};
 
 use crate::error::SessionError;
 
@@ -25,6 +25,26 @@ pub struct Session {
     /// `dispatch_tool_calls` call, so any UI consumer that keys on
     /// `(session_id, parallel_group)` saw collisions across passes.
     parallel_group_seq: Arc<AtomicU32>,
+    /// F-603: orchestrator pause state (in-memory only, not persisted).
+    ///
+    /// Set by `try_pause` on the daemon's IPC handler thread; observed by
+    /// `wait_if_paused` between steps in the orchestrator's request loop.
+    /// `try_resume` clears the flag and notifies any waiter so the next
+    /// step opens immediately — `Notify::notify_waiters` only fires on a
+    /// real `Paused → Running` transition (the IPC handler suppresses
+    /// redundant calls), so a parked orchestrator reliably wakes exactly
+    /// once per resume. Tool-in-flight semantics: the checkpoint sits
+    /// **between** steps, so a paused orchestrator never aborts an
+    /// in-flight model stream or tool call mid-flight; it parks at the
+    /// next clean step boundary.
+    paused: Arc<AtomicBool>,
+    /// F-603: paired with `paused`. The orchestrator's pause checkpoint
+    /// awaits this `Notify` while the flag is set; `try_resume` calls
+    /// `notify_waiters` to wake it. `Notify` is sufficient (no payload)
+    /// — the wakers re-check the flag and decide whether to keep
+    /// looping; they do **not** trust the wake itself as a state
+    /// transition signal.
+    resume_notify: Arc<Notify>,
 }
 
 impl Session {
@@ -43,7 +63,70 @@ impl Session {
             seq: Arc::new(Mutex::new(0)),
             compacting: Arc::new(AtomicBool::new(false)),
             parallel_group_seq: Arc::new(AtomicU32::new(1)),
+            paused: Arc::new(AtomicBool::new(false)),
+            resume_notify: Arc::new(Notify::new()),
         })
+    }
+
+    /// F-603: flip the pause flag. Returns `true` if this call performed
+    /// the `Running → Paused` transition (caller should emit
+    /// `Event::SessionPaused`); `false` if the session was already paused
+    /// (caller logs `debug!` and emits no event — idempotency contract).
+    pub fn try_pause(&self) -> bool {
+        self.paused
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    /// F-603: clear the pause flag and wake any orchestrator parked at the
+    /// pause checkpoint. Returns `true` if this call performed the
+    /// `Paused → Running` transition (caller should emit
+    /// `Event::SessionResumed`); `false` if the session was already
+    /// running (caller logs `debug!` and emits no event — idempotency
+    /// contract). `notify_waiters` only fires on a real transition, so a
+    /// no-op resume does not spuriously wake the orchestrator.
+    pub fn try_resume(&self) -> bool {
+        let transitioned = self
+            .paused
+            .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok();
+        if transitioned {
+            self.resume_notify.notify_waiters();
+        }
+        transitioned
+    }
+
+    /// F-603: observe the pause flag without mutating it. Used in tests
+    /// and (potentially) introspection IPC — the orchestrator checkpoint
+    /// uses [`Self::wait_if_paused`] instead because it also needs to
+    /// park.
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::SeqCst)
+    }
+
+    /// F-603: orchestrator's between-step checkpoint. Returns immediately
+    /// when the session is running; parks on `resume_notify` when the
+    /// session is paused, re-checking the flag on each wake to defend
+    /// against spurious notifications. Cancellation-safe — dropping the
+    /// returned future leaves both the flag and the notify in a
+    /// consistent state because `Notify::notified()` does not consume a
+    /// permit until polled to readiness.
+    pub async fn wait_if_paused(&self) {
+        while self.paused.load(Ordering::SeqCst) {
+            // Register interest BEFORE re-checking the flag to defeat the
+            // pause/notify/wait race: if `try_resume` flips the flag and
+            // calls `notify_waiters` between our load above and the
+            // `notified().await` below, registering first guarantees the
+            // notification is delivered to us rather than dropped.
+            let notified = self.resume_notify.notified();
+            tokio::pin!(notified);
+            // Re-check after registration; resume may have landed in
+            // between the outer `load` and the registration above.
+            if !self.paused.load(Ordering::SeqCst) {
+                break;
+            }
+            notified.await;
+        }
     }
 
     /// F-599: allocate a fresh `parallel_group` id for a concurrent tool
@@ -106,5 +189,83 @@ impl Session {
 
     pub async fn current_seq(&self) -> u64 {
         *self.seq.lock().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! F-603: unit coverage for the pause/resume primitives on `Session`.
+    //! End-to-end pause-mid-stream coverage lives in
+    //! `tests/pause_resume.rs`.
+    use super::*;
+    use tempfile::TempDir;
+
+    async fn fresh_session() -> (TempDir, Arc<Session>) {
+        let dir = TempDir::new().unwrap();
+        let log = dir.path().join("events.jsonl");
+        let session = Arc::new(Session::create(log).await.unwrap());
+        (dir, session)
+    }
+
+    #[tokio::test]
+    async fn try_pause_returns_true_only_on_running_to_paused_transition() {
+        let (_dir, session) = fresh_session().await;
+        assert!(!session.is_paused());
+        assert!(session.try_pause(), "first pause must transition");
+        assert!(session.is_paused());
+        assert!(
+            !session.try_pause(),
+            "redundant pause must not re-transition (idempotency)",
+        );
+        assert!(session.is_paused());
+    }
+
+    #[tokio::test]
+    async fn try_resume_returns_true_only_on_paused_to_running_transition() {
+        let (_dir, session) = fresh_session().await;
+        assert!(
+            !session.try_resume(),
+            "resume on a running session must be a no-op",
+        );
+        assert!(!session.is_paused());
+        assert!(session.try_pause());
+        assert!(session.try_resume(), "first resume must transition");
+        assert!(!session.is_paused());
+        assert!(
+            !session.try_resume(),
+            "redundant resume must not re-transition",
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_if_paused_returns_immediately_when_running() {
+        let (_dir, session) = fresh_session().await;
+        // Without a pause, the future should resolve right away.
+        tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            session.wait_if_paused(),
+        )
+        .await
+        .expect("wait_if_paused must return immediately when running");
+    }
+
+    #[tokio::test]
+    async fn wait_if_paused_blocks_until_resume() {
+        let (_dir, session) = fresh_session().await;
+        session.try_pause();
+
+        let session_clone = Arc::clone(&session);
+        let waiter = tokio::spawn(async move { session_clone.wait_if_paused().await });
+
+        // Confirm the waiter has not yet resolved.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!waiter.is_finished(), "waiter must park while paused");
+
+        // Resume; the waiter should now complete.
+        session.try_resume();
+        tokio::time::timeout(std::time::Duration::from_millis(500), waiter)
+            .await
+            .expect("waiter must wake on resume")
+            .unwrap();
     }
 }

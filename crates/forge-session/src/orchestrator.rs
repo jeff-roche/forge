@@ -427,6 +427,18 @@ pub(crate) async fn run_request_loop<P: Provider>(
     let mut step_index: u32 = 0;
 
     loop {
+        // F-603: between-step pause checkpoint. Sits *before* the next
+        // `StepStarted(Model)` emission so a pause request takes effect on
+        // a clean step boundary — any in-flight tool call from the
+        // previous iteration has already returned and `StepFinished`
+        // landed before we arrived here. Returns immediately when the
+        // session is running; parks on `resume_notify` while paused and
+        // wakes on the `Paused → Running` transition. Tool-in-flight
+        // invariant: the checkpoint never sits inside the stream loop
+        // or the dispatcher, so a mid-stream pause request waits one
+        // step before taking effect.
+        session.wait_if_paused().await;
+
         // F-139: open a `Model` step around each provider pass. The step
         // envelopes every event this iteration emits (AssistantMessage*,
         // AssistantDelta, Tool*) — downstream consumers (Agent Monitor,

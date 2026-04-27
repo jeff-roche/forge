@@ -520,6 +520,9 @@ pub fn build_invoke_handler<R: Runtime>() -> Box<dyn Fn(tauri::ipc::Invoke<R>) -
         session_send_message,
         // F-391: Composer Stop / Esc cancel target.
         session_cancel,
+        // F-603: AgentMonitor Pause/Resume buttons.
+        session_pause,
+        session_resume,
         session_approve_tool,
         session_reject_tool,
         rerun_message,
@@ -2835,6 +2838,47 @@ pub async fn compact_transcript<R: Runtime>(
     state
         .bridge
         .compact_transcript(&session_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// F-603: pause the orchestrator at the next inter-step checkpoint.
+///
+/// Wired to AgentMonitor's Pause button. The authz check mirrors the
+/// other session commands (only the session's own webview may pause it).
+/// The daemon coalesces redundant pauses server-side (idempotent — see
+/// `Session::try_pause`), so the frontend can fire this command on every
+/// click without filtering. The actual `Running → Paused` transition
+/// arrives through the session event stream as `Event::SessionPaused`.
+#[tauri::command]
+pub async fn session_pause<R: Runtime>(
+    session_id: String,
+    webview: Webview<R>,
+    state: State<'_, BridgeState>,
+) -> Result<(), String> {
+    require_window_label(&webview, &format!("session-{session_id}"), "session_pause")?;
+    state
+        .bridge
+        .pause_session(&session_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// F-603: resume a paused orchestrator.
+///
+/// Wired to AgentMonitor's Resume button. Same shape as
+/// [`session_pause`] — authz, idempotency, and event-stream observation
+/// of the `Paused → Running` transition (`Event::SessionResumed`).
+#[tauri::command]
+pub async fn session_resume<R: Runtime>(
+    session_id: String,
+    webview: Webview<R>,
+    state: State<'_, BridgeState>,
+) -> Result<(), String> {
+    require_window_label(&webview, &format!("session-{session_id}"), "session_resume")?;
+    state
+        .bridge
+        .resume_session(&session_id)
         .await
         .map_err(|e| e.to_string())
 }

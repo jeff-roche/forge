@@ -187,6 +187,23 @@ pub enum Event {
         reason: EndReason,
         archived: bool,
     },
+    /// F-603: orchestrator entered the paused state.
+    ///
+    /// Emitted exactly once per `Running → Paused` transition by the daemon
+    /// in response to a client `PauseSession` IPC frame. The orchestrator
+    /// drains to a clean checkpoint between steps before subscribers see
+    /// this event — any in-flight tool call completes first. Re-issuing
+    /// `PauseSession` while already paused is a no-op and does **not**
+    /// emit a second event.
+    SessionPaused { at: DateTime<Utc> },
+    /// F-603: orchestrator left the paused state.
+    ///
+    /// Emitted exactly once per `Paused → Running` transition by the daemon
+    /// in response to a client `ResumeSession` IPC frame. The next
+    /// `StepStarted` for any in-flight turn fires only after this event
+    /// lands. Re-issuing `ResumeSession` while already running is a no-op
+    /// and does **not** emit a second event.
+    SessionResumed { at: DateTime<Utc> },
     /// F-139: fine-grained step trace — opens a step within a turn.
     ///
     /// Emitted by the session turn loop before any `AssistantMessage`,
