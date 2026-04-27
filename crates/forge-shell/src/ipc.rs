@@ -601,6 +601,10 @@ pub fn build_invoke_handler<R: Runtime>() -> Box<dyn Fn(tauri::ipc::Invoke<R>) -
         crate::memory_ipc::read_agent_memory,
         crate::memory_ipc::save_agent_memory,
         crate::memory_ipc::clear_agent_memory,
+        // F-607: transcript export. Callable from the dashboard window
+        // (Inspector "Export transcript" button) or the matching
+        // `session-{id}` window; other session windows are rejected.
+        crate::transcript_ipc::export_transcript,
     ])
 }
 

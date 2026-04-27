@@ -266,9 +266,10 @@ pub fn default_workspaces_toml() -> PathBuf {
 #[cfg_attr(not(feature = "webview"), allow(dead_code))]
 pub(crate) const INVALID_SESSION_ID_ERROR: &str = "invalid session id";
 
-/// Strict gate over the `id` argument to `open_session`. Matches exactly
-/// the output of `forge_core::SessionId::new()` — 16 lowercase hex chars,
-/// no separators — and rejects everything else.
+/// Strict gate over the `id` argument to `open_session` (and reused by
+/// F-607's `export_transcript`). Matches exactly the output of
+/// `forge_core::SessionId::new()` — 16 lowercase hex chars, no separators —
+/// and rejects everything else.
 ///
 /// F-063 (M11 / T5): the window label `session-{id}` is consumed by
 /// Tauri's capability matcher (`session-*` glob in
@@ -284,7 +285,7 @@ pub(crate) const INVALID_SESSION_ID_ERROR: &str = "invalid session id";
 /// warning without hiding real unused-code regressions under
 /// `--features webview`.
 #[cfg_attr(not(feature = "webview"), allow(dead_code))]
-fn is_valid_session_id(id: &str) -> bool {
+pub(crate) fn is_valid_session_id(id: &str) -> bool {
     id.len() == 16 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
