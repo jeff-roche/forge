@@ -31,9 +31,9 @@ running · 3m · $0.09              sonnet-4.5        ← meta row
 
 ### 9.2 Trace (middle)
 
-**Header (Phase 2).** Agent name big, id small, live state chip (`running · step N` when running; otherwise the bare state). The chip uses an ember accent while running and the neutral surface chip for `queued` / `done` / `error`.
+**Header (Phase 2).** Agent name big, id small, live state chip (`running · step N` when running; otherwise the bare state). The chip uses an ember accent while running and the neutral surface chip for `queued` / `done` / `error`. `N` reads from `StepStarted.index` (1-based, [F-606](https://github.com/forge-ide/forge/issues/652)).
 
-**Header (Phase 3 — deferred to [F-449](https://github.com/forge-ide/forge/issues/504)).** Expand the live chip to `running · step N of M` once the backend broadcasts a total-step count, and add the `Pause` / `Kill` buttons plus a `Promote to pane` button for background agents. Phase-2 surfaces `Stop agent` via the Inspector only (§9.3).
+**Header (Phase 3 — `Pause` / `Kill` / `Promote` deferred to [F-449](https://github.com/forge-ide/forge/issues/504)).** The chip's `step N of M` form is gated on `StepStarted.total` being populated. Today the orchestrator streams steps turn-by-turn so `total` rides as `None` and the UI shows the bare `step N` form; rendering `of M` lights up automatically once the orchestrator pre-plans (or emits a retroactive total). The `Pause` / `Kill` buttons plus `Promote to pane` for background agents remain blocked on F-449. Phase-2 surfaces `Stop agent` via the Inspector only (§9.3).
 
 **Toolbar (Phase 3 — deferred to [F-449](https://github.com/forge-ide/forge/issues/504)).** Elapsed, token in/out, cost, model, tools-used, spawned-by relationship — all in Fira Code 10px separated by `·`. Blocked on backend plumbing for cost/token/tool-use aggregation.
 

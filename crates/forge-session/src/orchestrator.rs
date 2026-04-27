@@ -418,6 +418,14 @@ pub(crate) async fn run_request_loop<P: Provider>(
     let provider_id = ProviderId::new();
     let model = "mock".to_string();
 
+    // F-606: 1-based step counter for this turn. Incremented before every
+    // `StepStarted` emission (Model + Tool) so the AgentMonitor §9.2 chip
+    // can render `step N`. The total is unknown in advance — the model
+    // streams steps turn-by-turn — so `total` rides as `None` for now;
+    // the UI displays `step N` and a follow-up may emit a retroactive
+    // companion event when the turn ends.
+    let mut step_index: u32 = 0;
+
     loop {
         // F-139: open a `Model` step around each provider pass. The step
         // envelopes every event this iteration emits (AssistantMessage*,
@@ -431,12 +439,15 @@ pub(crate) async fn run_request_loop<P: Provider>(
         // Agent Monitor groups a session's trace under the stable id here.
         let model_step_id = StepId::new();
         let model_step_started = Instant::now();
+        step_index += 1;
         session
             .emit(Event::StepStarted {
                 step_id: model_step_id.clone(),
                 instance_id: instance_id.clone(),
                 kind: StepKind::Model,
                 started_at: Utc::now(),
+                index: step_index,
+                total: None,
             })
             .await?;
 
@@ -558,6 +569,7 @@ pub(crate) async fn run_request_loop<P: Provider>(
             dispatcher,
             ctx,
             auto_approve,
+            &mut step_index,
         )
         .await?;
 
@@ -746,6 +758,11 @@ async fn dispatch_tool_calls(
     dispatcher: &ToolDispatcher,
     ctx: &ToolCtx,
     auto_approve: bool,
+    // F-606: turn-scoped step counter. Each `StepStarted(Tool)` emission in
+    // this dispatch increments the counter; the `index` field carries the
+    // updated value so the AgentMonitor chip renders `step N` consistently
+    // across Model and Tool steps within the same turn.
+    step_index: &mut u32,
 ) -> Result<DispatchOutcome> {
     if pending.is_empty() {
         return Ok(DispatchOutcome {
@@ -790,12 +807,15 @@ async fn dispatch_tool_calls(
                 let tool_step_id = StepId::new();
                 let started = Instant::now();
                 tool_steps[idx] = Some((tool_step_id.clone(), started));
+                *step_index += 1;
                 session
                     .emit(Event::StepStarted {
                         step_id: tool_step_id.clone(),
                         instance_id: instance_id.clone(),
                         kind: StepKind::Tool,
                         started_at: Utc::now(),
+                        index: *step_index,
+                        total: None,
                     })
                     .await?;
                 session
@@ -987,12 +1007,15 @@ async fn dispatch_tool_calls(
                 let pc = &pending[idx];
                 let tool_step_id = StepId::new();
                 let tool_step_started = Instant::now();
+                *step_index += 1;
                 session
                     .emit(Event::StepStarted {
                         step_id: tool_step_id.clone(),
                         instance_id: instance_id.clone(),
                         kind: StepKind::Tool,
                         started_at: Utc::now(),
+                        index: *step_index,
+                        total: None,
                     })
                     .await?;
                 session
