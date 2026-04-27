@@ -35,7 +35,7 @@ async fn oversized_length_prefix_rejected_before_allocation() {
     // 4 MiB+1 buffer, the test would hang instead of erroring.
     client.shutdown().await.unwrap();
 
-    let err = read_frame(&mut server)
+    let err = read_frame::<_, IpcMessage>(&mut server)
         .await
         .expect_err("read_frame must reject oversized length prefix");
     let msg = format!("{err}");
@@ -58,7 +58,7 @@ async fn malformed_body_returns_decode_error_not_panic() {
     client.write_all(garbage).await.unwrap();
     client.shutdown().await.unwrap();
 
-    let err = read_frame(&mut server)
+    let err = read_frame::<_, IpcMessage>(&mut server)
         .await
         .expect_err("read_frame must surface a decode error for malformed JSON");
     // `serde_json::Error`'s `Display` starts with its error category; it
@@ -113,7 +113,7 @@ async fn exactly_at_cap_round_trips() {
             .expect("write_frame must accept a body of exactly MAX_FRAME_SIZE")
     });
 
-    let got = read_frame(&mut server)
+    let got: IpcMessage = read_frame(&mut server)
         .await
         .expect("read_frame must accept a body of exactly MAX_FRAME_SIZE");
     writer.await.unwrap();
