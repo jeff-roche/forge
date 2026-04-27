@@ -49,6 +49,8 @@ jobs:
 
       - name: Install just
         uses: extractions/setup-just@v2
+        with:
+          just-version: 1.50.0
 
       - name: Install web workspace deps
         working-directory: web
@@ -159,6 +161,8 @@ jobs:
 
       - name: Install just
         uses: extractions/setup-just@v2
+        with:
+          just-version: 1.50.0
 
       - name: Install web workspace deps
         working-directory: web
@@ -227,6 +231,8 @@ jobs:
 
       - name: Install just
         uses: extractions/setup-just@v2
+        with:
+          just-version: 1.50.0
 
       - name: Get pnpm store directory
         id: pnpm-cache
