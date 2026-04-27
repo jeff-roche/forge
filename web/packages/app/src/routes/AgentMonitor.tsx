@@ -23,7 +23,7 @@ import {
   type JSX,
 } from 'solid-js';
 import { createMountedSubscription } from '../ipc/useEventListener';
-import { useParams, useSearchParams } from '@solidjs/router';
+import { useNavigate, useParams, useSearchParams } from '@solidjs/router';
 import { Button, IconButton, Tab } from '@forge/design';
 import { useFocusTrap } from '../lib/useFocusTrap';
 import type { BgAgentSummary } from '@forge/ipc';
@@ -31,6 +31,7 @@ import {
   onSessionEvent,
   type SessionEventPayload,
   listBackgroundAgents,
+  promoteBackgroundAgent,
   stopBackgroundAgent,
 } from '../ipc/session';
 import './AgentMonitor.css';
@@ -168,6 +169,14 @@ export interface LiveAgentState {
    * render as `—` pills in the Inspector. A completion event clears the
    * entry so the pills reset automatically. */
   resourcesByAgent: Record<string, ResourceSnapshot>;
+  /**
+   * F-449: client-side aggregation of unique tool names observed via
+   * `ToolCallStarted` per instance id. Drives the trace-toolbar's
+   * `tools-used` summary. Insertion order is preserved (first-seen first)
+   * so the toolbar renders deterministically. Cleared on terminal
+   * transition alongside `resourcesByAgent`.
+   */
+  toolsByAgent: Record<string, string[]>;
 }
 
 /**
@@ -189,6 +198,7 @@ export function applyEventToState(
     const parent = ev['parent'];
     const child = ev['child'];
     if (typeof parent !== 'string' || typeof child !== 'string') return prev;
+    const model = typeof ev['model'] === 'string' ? (ev['model'] as string) : undefined;
     const next: AgentRow = {
       id: child,
       name: `sub-agent ${child.slice(0, 8)}`,
@@ -197,10 +207,72 @@ export function applyEventToState(
       parentId: parent,
       progress: 0.3,
       startedAt: new Date().toISOString(),
+      ...(model ? { model } : {}),
     };
     return {
       ...prev,
       subAgents: [...prev.subAgents.filter((r) => r.id !== child), next],
+    };
+  }
+
+  if (type === 'session_started') {
+    // F-449: stamp the session-root's `startedAt` from `SessionStarted.at` so
+    // the trace-toolbar's elapsed clock derives from a real wall-clock anchor
+    // instead of the first `step_started`'s arrival time. Upserts a session
+    // row when none exists; preserves a row already created by an earlier
+    // `step_started` event (the timestamps disagree by at most a few ms).
+    const at = ev['at'];
+    if (typeof at !== 'string') return prev;
+    const idx = prev.subAgents.findIndex((r) => r.id === 'session-root');
+    if (idx === -1) {
+      const next: AgentRow = {
+        id: 'session-root',
+        name: 'session',
+        category: 'session',
+        state: 'running',
+        progress: 0.3,
+        startedAt: at,
+      };
+      return { ...prev, subAgents: [...prev.subAgents, next] };
+    }
+    const existing = prev.subAgents[idx]!;
+    if (existing.startedAt === at) return prev;
+    const updated: AgentRow = { ...existing, startedAt: at };
+    const nextSubAgents = prev.subAgents.slice();
+    nextSubAgents[idx] = updated;
+    return { ...prev, subAgents: nextSubAgents };
+  }
+
+  if (type === 'assistant_message') {
+    // F-449: capture the model label per `AssistantMessage.model` so the
+    // trace-toolbar surfaces what produced the most-recent assistant turn.
+    // The event has no `instance_id`, so it attributes to the session-root —
+    // sub-agents publish their own model via `SubAgentSpawned.model`.
+    const model = ev['model'];
+    if (typeof model !== 'string') return prev;
+    const idx = prev.subAgents.findIndex((r) => r.id === 'session-root');
+    if (idx === -1) return prev;
+    const existing = prev.subAgents[idx]!;
+    if (existing.model === model) return prev;
+    const updated: AgentRow = { ...existing, model };
+    const nextSubAgents = prev.subAgents.slice();
+    nextSubAgents[idx] = updated;
+    return { ...prev, subAgents: nextSubAgents };
+  }
+
+  if (type === 'tool_call_started') {
+    // F-449: client-side aggregation of unique tool names. The wire event
+    // has no `instance_id`, so aggregation attributes to the session-root —
+    // the only scope where we can prove the tool ran. Sub-agent toolbars
+    // surface their own `tool_count` from `SubAgentSpawned` instead.
+    const tool = ev['tool'];
+    if (typeof tool !== 'string') return prev;
+    const key = 'session-root';
+    const existing = prev.toolsByAgent[key] ?? [];
+    if (existing.includes(tool)) return prev;
+    return {
+      ...prev,
+      toolsByAgent: { ...prev.toolsByAgent, [key]: [...existing, tool] },
     };
   }
 
@@ -318,16 +390,26 @@ export function applyEventToState(
     // terminates" — the inspector reads from this map and an absent key
     // resolves to undefined → dash.
     const hadResources = id in prev.resourcesByAgent;
-    if (!changed && !hadResources) return prev;
+    // F-449: same contract for the tools-used aggregation — drop it on
+    // terminal transition so a fresh run for the same id (after promote +
+    // re-spawn) starts from zero rather than carrying stale tool names.
+    const hadTools = id in prev.toolsByAgent;
+    if (!changed && !hadResources && !hadTools) return prev;
     let nextResources = prev.resourcesByAgent;
     if (hadResources) {
       const { [id]: _cleared, ...rest } = prev.resourcesByAgent;
       nextResources = rest;
     }
+    let nextTools = prev.toolsByAgent;
+    if (hadTools) {
+      const { [id]: _cleared, ...rest } = prev.toolsByAgent;
+      nextTools = rest;
+    }
     return {
       ...prev,
       subAgents: changed ? nextSubAgents : prev.subAgents,
       resourcesByAgent: nextResources,
+      toolsByAgent: nextTools,
     };
   }
 
@@ -559,6 +641,115 @@ const AgentListRow: Component<{
 };
 
 // ---------------------------------------------------------------------------
+// F-449: trace-header toolbar — elapsed / model / tools-used / spawned-by.
+//
+// The toolbar lives directly under the live-state chip and renders every
+// cell in Fira Code 10px separated by `·` per `agent-monitor.md §9.2`.
+// Cells with no data render the `—` placeholder (vs. omitting) so the
+// toolbar's visual rhythm stays stable while the backend prereqs (token
+// counters, cost, total-step count) land in F-605/F-606.
+// ---------------------------------------------------------------------------
+
+/**
+ * Format `mm:ss` elapsed since `startedAt` against `nowMs`. Returns the
+ * placeholder dash when `startedAt` is missing or the parse fails so the
+ * toolbar cell renders as `—` instead of `NaN:NaN`. Negative deltas (clock
+ * skew between the daemon's `SessionStarted.at` and the webview's wall
+ * clock) clamp to `00:00`.
+ *
+ * Hours past 99:59 wrap to `99:59+` so the cell width stays bounded — agent
+ * monitor sessions that long are vanishingly rare and the toolbar's job is a
+ * glance, not an audit log.
+ */
+export function formatElapsed(
+  startedAt: string | undefined,
+  nowMs: number,
+): string {
+  if (!startedAt) return '—';
+  const start = Date.parse(startedAt);
+  if (Number.isNaN(start)) return '—';
+  const delta = Math.max(0, nowMs - start);
+  const totalSeconds = Math.floor(delta / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes > 99) return '99:59+';
+  const mm = String(minutes).padStart(2, '0');
+  const ss = String(seconds).padStart(2, '0');
+  return `${mm}:${ss}`;
+}
+
+/** Lookup label for a parent row id, falling back to the truncated id when
+ * the parent is not present in the rows list (cross-session, race, etc.).
+ */
+export function spawnedByLabel(
+  parentId: string | undefined,
+  rows: AgentRow[],
+): string | undefined {
+  if (!parentId) return undefined;
+  const parent = rows.find((r) => r.id === parentId);
+  if (parent) return parent.name;
+  return parentId.slice(0, 8);
+}
+
+/**
+ * Trace-header toolbar component. Renders the four ready-now cells —
+ * elapsed, model, tools-used, spawned-by — in a single mono-text row. The
+ * deferred cells (tokens, cost, step-of-total) are owned by F-449's
+ * follow-up PR once F-603 / F-605 / F-606 land.
+ */
+export const AgentTraceToolbar: Component<{
+  agent: AgentRow;
+  /** Unique tool names the selected agent has issued so far. */
+  tools: string[];
+  /** Resolved spawned-by label (parent-name or id8); `undefined` for non-sub-agents. */
+  spawnedBy?: string | undefined;
+  /** Live wall-clock; injected by tests to pin the elapsed cell. */
+  now: number;
+}> = (props) => {
+  const elapsed = (): string => formatElapsed(props.agent.startedAt, props.now);
+  return (
+    <div
+      class="agent-monitor__trace-toolbar"
+      aria-label="Trace toolbar"
+    >
+      <span
+        class="agent-monitor__trace-toolbar-cell"
+        data-cell="elapsed"
+        aria-label={`elapsed ${elapsed()}`}
+      >
+        {elapsed()}
+      </span>
+      <span class="agent-monitor__trace-toolbar-sep" aria-hidden="true">·</span>
+      <span
+        class="agent-monitor__trace-toolbar-cell"
+        data-cell="model"
+        aria-label={`model ${props.agent.model ?? 'unknown'}`}
+      >
+        {props.agent.model ?? '—'}
+      </span>
+      <span class="agent-monitor__trace-toolbar-sep" aria-hidden="true">·</span>
+      <span
+        class="agent-monitor__trace-toolbar-cell"
+        data-cell="tools"
+        aria-label={`tools used ${props.tools.length}`}
+      >
+        {props.tools.length > 0 ? `tools ${props.tools.length}` : 'tools 0'}
+      </span>
+      <Show when={props.spawnedBy}>
+        <span class="agent-monitor__trace-toolbar-sep" aria-hidden="true">·</span>
+        <span
+          class="agent-monitor__trace-toolbar-cell"
+          data-cell="spawned-by"
+          aria-label={`spawned by ${props.spawnedBy}`}
+        >
+          {`↳ ${props.spawnedBy}`}
+        </span>
+      </Show>
+    </div>
+  );
+};
+
+// ---------------------------------------------------------------------------
 // Middle column — trace timeline
 // ---------------------------------------------------------------------------
 
@@ -566,6 +757,12 @@ export const AgentTrace: Component<{
   agent: AgentRow | null;
   steps: AgentStep[];
   onStepClick: (step: AgentStep) => void;
+  /** F-449: unique tool names observed for the selected agent. */
+  tools?: string[] | undefined;
+  /** F-449: resolved spawned-by label (parent name or id8). */
+  spawnedBy?: string | undefined;
+  /** F-449: live wall-clock for the elapsed cell. Tests inject a fixed value. */
+  now?: number | undefined;
 }> = (props) => {
   return (
     <section class="agent-monitor__trace" aria-label="Trace">
@@ -595,6 +792,15 @@ export const AgentTrace: Component<{
                   : agent().state}
               </span>
             </header>
+            {/* F-449: ready-now subset of the §9.2 toolbar — elapsed / model
+                / tools-used / spawned-by. Tokens, cost, and full step-of-M
+                ride F-605 / F-606 and ship in a follow-up PR. */}
+            <AgentTraceToolbar
+              agent={agent()}
+              tools={props.tools ?? []}
+              spawnedBy={props.spawnedBy}
+              now={props.now ?? Date.now()}
+            />
             <Show
               when={props.steps.length > 0}
               fallback={<p class="agent-monitor__empty">// no steps yet</p>}
@@ -655,7 +861,21 @@ export const AgentInspector: Component<{
   agent: AgentRow | null;
   data: AgentInspectorData | null;
   onStop: (id: string) => void;
+  /**
+   * F-449: optional promote-to-pane handler. When supplied AND the selected
+   * row is a background agent or sub-agent (i.e. promotable), an additional
+   * `PROMOTE TO PANE` action renders alongside `STOP AGENT`. The button is
+   * idempotent — clicking on an already-promoted row resolves silently
+   * because the backend's `promote_background_agent` is a no-op on unknown
+   * ids (`forge-session::bg_agents::promote`).
+   */
+  onPromote?: (id: string) => void;
 }> = (props) => {
+  const isPromotable = (): boolean => {
+    const row = props.agent;
+    if (!row) return false;
+    return row.category === 'background' || row.category === 'sub-agent';
+  };
   return (
     <aside class="agent-monitor__inspector" aria-label="Inspector">
       <Show
@@ -719,7 +939,7 @@ export const AgentInspector: Component<{
             </li>
           </ul>
         </section>
-        <section>
+        <section class="agent-monitor__actions">
           <Button
             variant="danger"
             class="agent-monitor__stop"
@@ -727,6 +947,15 @@ export const AgentInspector: Component<{
           >
             STOP AGENT
           </Button>
+          <Show when={props.onPromote && isPromotable()}>
+            <Button
+              variant="ghost"
+              class="agent-monitor__promote"
+              onClick={() => props.onPromote!(props.agent!.id)}
+            >
+              PROMOTE TO PANE
+            </Button>
+          </Show>
         </section>
       </Show>
     </aside>
@@ -815,6 +1044,35 @@ async function fetchBgAgents(sessionId: string | null): Promise<BgAgentSummary[]
 }
 
 /**
+ * F-449: promote a background or sub-agent into the session's active chat
+ * pane. Wraps the existing `promote_background_agent` Tauri command (which
+ * just removes the id from the tracked set on the backend) so the
+ * Inspector's PROMOTE TO PANE button stays idempotent on stale ids.
+ *
+ * The orchestrator instance keeps running under the same `AgentInstanceId`
+ * — promotion is a UX re-attribution. The webview side responds by
+ * navigating to the session window so the promoted agent's transcript is
+ * back in front of the user, as called for in §9.3 ("Promote to pane —
+ * background-agent only; hoists into a dedicated pane").
+ */
+export async function promoteAgentInstance(
+  deps: { promoteBackgroundAgent: typeof promoteBackgroundAgent },
+  sessionId: string | null,
+  instanceId: string,
+): Promise<'ok' | 'skipped' | 'failed'> {
+  if (!sessionId) return 'skipped';
+  try {
+    await deps.promoteBackgroundAgent(
+      sessionId as import('@forge/ipc').SessionId,
+      instanceId,
+    );
+    return 'ok';
+  } catch {
+    return 'failed';
+  }
+}
+
+/**
  * Stop a running agent instance by calling the `stop_background_agent`
  * Tauri command (F-138). Exported so the component test can exercise the
  * wiring without mounting the full `AgentMonitor` route shell (which needs
@@ -888,10 +1146,17 @@ export const AgentMonitor: Component = () => {
   // monitor pre-selects the clicked row instead of the default first row.
   // Param absence falls through to the auto-select-first effect below.
   const [searchParams] = useSearchParams<{ instance?: string }>();
+  const navigate = useNavigate();
 
   const [filter, setFilter] = createSignal<AgentFilter>('all');
   const [selectedId, setSelectedId] = createSignal<string | null>(null);
   const [openStep, setOpenStep] = createSignal<AgentStep | null>(null);
+  // F-449: live wall-clock for the trace-toolbar's elapsed cell. Ticks
+  // every second; cleaned up on unmount so the route doesn't leak the
+  // interval across navigations.
+  const [now, setNow] = createSignal<number>(Date.now());
+  const tick = setInterval(() => setNow(Date.now()), 1000);
+  onCleanup(() => clearInterval(tick));
 
   // Background agents — refetched when the session id changes. F-401: no
   // `initialValue` here so the resource reports `loading` while the first
@@ -910,6 +1175,9 @@ export const AgentMonitor: Component = () => {
   const [resourcesByAgent, setResourcesByAgent] = createSignal<
     Record<string, ResourceSnapshot>
   >({});
+  // F-449: per-instance unique tool names folded from `tool_call_started`
+  // events. Drives the trace-toolbar's tools-used summary.
+  const [toolsByAgent, setToolsByAgent] = createSignal<Record<string, string[]>>({});
 
   const rows = createMemo<AgentRow[]>(() => {
     // F-401: reading `bgAgents()` while the resource is in its `errored`
@@ -951,6 +1219,7 @@ export const AgentMonitor: Component = () => {
       subAgents: subAgents(),
       stepsByAgent: stepsByAgent(),
       resourcesByAgent: resourcesByAgent(),
+      toolsByAgent: toolsByAgent(),
     };
     const next = applyEventToState(snapshot, payload);
     if (next === snapshot) return;
@@ -958,6 +1227,9 @@ export const AgentMonitor: Component = () => {
     if (next.stepsByAgent !== snapshot.stepsByAgent) setStepsByAgent(next.stepsByAgent);
     if (next.resourcesByAgent !== snapshot.resourcesByAgent) {
       setResourcesByAgent(next.resourcesByAgent);
+    }
+    if (next.toolsByAgent !== snapshot.toolsByAgent) {
+      setToolsByAgent(next.toolsByAgent);
     }
   }
 
@@ -989,6 +1261,17 @@ export const AgentMonitor: Component = () => {
     if (!id) return [];
     return stepsByAgent()[id] ?? [];
   });
+  // F-449: tools-used + spawned-by source for the trace toolbar.
+  const selectedTools = createMemo<string[]>(() => {
+    const id = selectedId();
+    if (!id) return [];
+    return toolsByAgent()[id] ?? [];
+  });
+  const selectedSpawnedBy = createMemo<string | undefined>(() => {
+    const row = selected();
+    if (!row || !row.parentId) return undefined;
+    return spawnedByLabel(row.parentId, rows());
+  });
   const inspector = createMemo<AgentInspectorData | null>(() => {
     const row = selected();
     if (!row) return null;
@@ -1014,6 +1297,32 @@ export const AgentMonitor: Component = () => {
     await stopAgentInstance({ stopBackgroundAgent }, sessionId(), id);
   };
 
+  // F-449: PROMOTE TO PANE wires the existing `promote_background_agent`
+  // IPC + navigates back to the session window so the promoted agent's
+  // transcript is in front of the user. The IPC is itself idempotent on
+  // unknown ids (`forge-session::bg_agents::promote`) — clicking on an
+  // already-promoted row resolves silently. After the call returns we
+  // refetch the bg-agent list so the row drops out of the
+  // `background`-filtered view; sub-agent rows live in `subAgents()` and
+  // stay so their trace history remains inspectable.
+  const onPromote = async (id: string) => {
+    const sid = sessionId();
+    const result = await promoteAgentInstance(
+      { promoteBackgroundAgent },
+      sid,
+      id,
+    );
+    if (result === 'ok' || result === 'failed') {
+      // Refetch even on failure: the most likely failure path is "already
+      // promoted on the backend, race in flight" — the bg list is now the
+      // source of truth, so re-syncing avoids a stale row staying visible.
+      void refetch();
+    }
+    if (result === 'ok' && sid) {
+      navigate(`/sessions/${sid}?promoted=${id}`);
+    }
+  };
+
   return (
     <main class="agent-monitor">
       <AgentList
@@ -1028,8 +1337,16 @@ export const AgentMonitor: Component = () => {
         agent={selected()}
         steps={selectedSteps()}
         onStepClick={setOpenStep}
+        tools={selectedTools()}
+        spawnedBy={selectedSpawnedBy()}
+        now={now()}
       />
-      <AgentInspector agent={selected()} data={inspector()} onStop={onStop} />
+      <AgentInspector
+        agent={selected()}
+        data={inspector()}
+        onStop={onStop}
+        onPromote={onPromote}
+      />
       <StepDrawer step={openStep()} onClose={() => setOpenStep(null)} />
     </main>
   );

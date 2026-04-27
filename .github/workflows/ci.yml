@@ -48,7 +48,9 @@ jobs:
           corepack prepare pnpm@9.12.0 --activate
 
       - name: Install just
-        uses: extractions/setup-just@v2
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just@1.50.0
 
       - name: Install web workspace deps
         working-directory: web
@@ -158,7 +160,9 @@ jobs:
           corepack prepare pnpm@9.12.0 --activate
 
       - name: Install just
-        uses: extractions/setup-just@v2
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just@1.50.0
 
       - name: Install web workspace deps
         working-directory: web
@@ -226,7 +230,9 @@ jobs:
           corepack prepare pnpm@9.12.0 --activate
 
       - name: Install just
-        uses: extractions/setup-just@v2
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just@1.50.0
 
       - name: Get pnpm store directory
         id: pnpm-cache
