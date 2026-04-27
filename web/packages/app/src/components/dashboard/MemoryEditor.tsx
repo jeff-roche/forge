@@ -93,12 +93,17 @@ export const MemoryEditor: Component<MemoryEditorProps> = (props) => {
     const win = iframeRef?.contentWindow;
     if (!win) return;
     try {
+      // Always pin postMessage to a concrete target origin so the message
+      // body can never leak to an unintended document if the iframe
+      // navigates. Refuse the wildcard / opaque-origin shapes for the same
+      // reason: they would defeat the origin check entirely.
       const targetOrigin = new URL(props.src ?? DEFAULT_MONACO_HOST_SRC, window.location.href)
         .origin;
       if (targetOrigin === '*' || targetOrigin === 'null') return;
       win.postMessage(msg, targetOrigin);
     } catch {
-      // Bad URL — silently no-op; production resolves a real origin.
+      // URL parse failed — refuse to send rather than fall back to a
+      // permissive origin. Production resolves a real origin.
     }
   };
 
