@@ -8,6 +8,7 @@ import {
 } from 'solid-js';
 import { useParams } from '@solidjs/router';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { LayoutTree, ProviderId, SessionId } from '@forge/ipc';
 import {
   getPersistentApprovals,
@@ -15,6 +16,7 @@ import {
   onSessionEvent,
   sessionHello,
   sessionSubscribe,
+  sessionSwitchProvider,
 } from '../../ipc/session';
 import {
   activeWorkspaceRoot,
@@ -85,6 +87,10 @@ export const SessionWindow: Component = () => {
   const sessionId = () => params.id as SessionId;
 
   let unlisten: (() => void) | null = null;
+  // F-640: per-mount unlisten for the dashboard's `provider:changed`
+  // Tauri event. Detached on cleanup so a remounted route never
+  // double-subscribes.
+  let unlistenProviderChanged: UnlistenFn | null = null;
   let mounted = true;
 
   // F-126: layout store is lazily instantiated once the session's workspace
@@ -143,6 +149,35 @@ export const SessionWindow: Component = () => {
       } catch (err) {
         console.error('session_hello/subscribe failed', err);
       }
+      // F-640: subscribe to the dashboard's `provider:changed` event
+      // and forward each as `IpcMessage::SwitchProvider` over this
+      // session's UDS. The daemon's arm in `handle_connection` resolves
+      // `provider_id` and calls `SwappableProvider::swap` so the next
+      // `run_turn` invocation dispatches to the new provider — the
+      // in-flight turn (if any) finishes on the old one. Failure to
+      // forward is logged and swallowed: a transient bridge error must
+      // not crash the session window.
+      try {
+        unlistenProviderChanged = await listen<{
+          type: 'provider_changed';
+          provider_id: string;
+        }>('provider:changed', (event) => {
+          const providerId = event.payload?.provider_id;
+          if (typeof providerId !== 'string' || providerId.length === 0) {
+            return;
+          }
+          void sessionSwitchProvider(id, providerId).catch((err) => {
+            console.error('session_switch_provider failed', err);
+          });
+        });
+        if (!mounted && unlistenProviderChanged) {
+          unlistenProviderChanged();
+          unlistenProviderChanged = null;
+        }
+      } catch (err) {
+        console.error('provider:changed listen failed', err);
+      }
+
       const listener = await onSessionEvent((payload) => {
         if (payload.session_id !== id) return;
         setSessionEvents(payload.session_id, {
@@ -176,6 +211,10 @@ export const SessionWindow: Component = () => {
     if (unlisten) {
       unlisten();
       unlisten = null;
+    }
+    if (unlistenProviderChanged) {
+      unlistenProviderChanged();
+      unlistenProviderChanged = null;
     }
     // Flush any pending layout-store write before we drop the reference so
     // a rapid "open file then navigate away" doesn't lose the active_file

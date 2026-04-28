@@ -94,6 +94,23 @@ pub enum IpcMessage {
     /// anchored on; the UI uses these to pre-fill its refine composer
     /// and re-attach to the transcript context.
     RefineHandoff(RefineHandoff),
+    /// F-640: client → session request to swap the active provider on the
+    /// in-process `SwappableProvider`. Emitted by every session window's
+    /// listener for the dashboard's `provider:changed` Tauri event so the
+    /// next `run_turn` invocation dispatches to the new provider. The
+    /// daemon resolves `provider_id` against its build helper; unknown
+    /// or currently-unsupported ids are logged and ignored (no swap).
+    /// In-flight turns finish on the previous provider — see
+    /// `SwappableProvider::swap` for the exact semantic.
+    SwitchProvider(SwitchProvider),
+}
+
+/// F-640: client → session: swap the in-process `SwappableProvider`'s
+/// inner. `provider_id` matches the dashboard's `[providers.active]`
+/// shape (`"ollama"`, `"anthropic"`, `"openai"`, `"custom_openai:<name>"`).
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct SwitchProvider {
+    pub provider_id: String,
 }
 
 /// Client → session: re-run the assistant message with `msg_id` using the
@@ -506,6 +523,34 @@ mod tests {
             "deadline did not fire promptly: {:?}",
             elapsed
         );
+    }
+
+    /// F-640: pin the wire shape of `SwitchProvider`. The dashboard's
+    /// `provider:changed` payload is `{ "provider_id": "<slug>" }`;
+    /// the IPC frame wraps it under the tagged-union `t = "SwitchProvider"`
+    /// envelope. A drift here breaks the dashboard → session listener
+    /// → daemon swap chain silently.
+    #[test]
+    fn switch_provider_serializes_to_pinned_shape() {
+        let msg = IpcMessage::SwitchProvider(SwitchProvider {
+            provider_id: "ollama".to_string(),
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(json, r#"{"t":"SwitchProvider","provider_id":"ollama"}"#);
+    }
+
+    #[tokio::test]
+    async fn switch_provider_round_trips_over_unix_stream() {
+        let (mut a, mut b) = UnixStream::pair().unwrap();
+        let sent = IpcMessage::SwitchProvider(SwitchProvider {
+            provider_id: "custom_openai:vllm".to_string(),
+        });
+        write_frame(&mut a, &sent).await.unwrap();
+        let got: IpcMessage = read_frame(&mut b).await.unwrap();
+        match got {
+            IpcMessage::SwitchProvider(s) => assert_eq!(s.provider_id, "custom_openai:vllm"),
+            other => panic!("expected SwitchProvider, got {other:?}"),
+        }
     }
 
     /// F-354: the deadline wrapper must succeed when the peer writes a

@@ -29,8 +29,8 @@ use forge_ipc::{
     read_frame, read_frame_into, write_frame, ClientInfo, CompactTranscript, DeleteBranch, Hello,
     HelloAck, ImportMcpConfig, InterruptSession, IpcMessage, ListMcpServers, McpImportResult,
     McpServersList, McpToggleResult, PauseSession, RefineHandoff, RerunMessage, ResumeSession,
-    SelectBranch, SendUserMessage, Subscribe, ToggleMcpServer, ToolCallApproved, ToolCallRejected,
-    PROTO_VERSION,
+    SelectBranch, SendUserMessage, Subscribe, SwitchProvider, ToggleMcpServer, ToolCallApproved,
+    ToolCallRejected, PROTO_VERSION,
 };
 use serde::Serialize;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -487,6 +487,23 @@ impl SessionBridge {
         let writer = self.writer_for(session_id).await?;
         let mut writer = writer.lock().await;
         let frame = IpcMessage::ResumeSession(ResumeSession::default());
+        write_frame(&mut *writer, &frame).await
+    }
+
+    /// F-640: forward a `provider:changed` event onto the per-session
+    /// UDS as `IpcMessage::SwitchProvider`. The daemon's
+    /// `handle_connection` arm calls `SwappableProvider::swap` so the
+    /// next turn dispatches to the new inner. In-flight turns finish on
+    /// the previous provider — see `SwappableProvider::swap`.
+    ///
+    /// `provider_id` matches the dashboard's `[providers.active]` shape
+    /// (`"ollama"`, `"anthropic"`, `"openai"`, `"custom_openai:<name>"`).
+    /// Unknown / unsupported ids are logged daemon-side and skipped; the
+    /// bridge call still resolves `Ok(())` once the frame is written.
+    pub async fn switch_provider(&self, session_id: &str, provider_id: String) -> Result<()> {
+        let writer = self.writer_for(session_id).await?;
+        let mut writer = writer.lock().await;
+        let frame = IpcMessage::SwitchProvider(SwitchProvider { provider_id });
         write_frame(&mut *writer, &frame).await
     }
 
