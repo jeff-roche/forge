@@ -24,6 +24,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **AgentMonitor Phase-3 chrome completion (F-449).** Inspector now exposes
+  Pause / Resume (F-603 `session_pause` / `session_resume`),
+  Interrupt + refine (F-604 `session_interrupt_and_refine` returning
+  `RefineHandoff`), Export transcript (F-607 `export_transcript` with
+  Blob-based webview download), and Promote-to-pane actions for the
+  session-root and promotable agent rows. Trace-header chip switches to
+  `running · step N of M` when F-606's `index` + `total` are populated,
+  with graceful fallback to `step N` and bare `running` for legacy events.
+  Toolbar's tools-used cell now reads from `SubAgentSpawned.tool_count`
+  for sub-agents in addition to the live `ToolCallStarted` aggregation
+  for the session-root. New `RefineComposer` modal seeds from the
+  captured partial assistant text and copies the refined message to the
+  clipboard for paste into the session window's chat composer. The
+  `docs/ui-specs/agent-monitor.md` §9.2 / §9.3 deferral footnotes are
+  removed.
+
 - **Agent sidecar architecture (F-608).** Background agents and sub-agents now
   run in a per-instance `forged-agent` child process supervised by the daemon
   over a per-instance Unix domain socket, replacing the in-process tokio-task

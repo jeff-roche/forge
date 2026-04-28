@@ -7,6 +7,7 @@ import type {
   ApprovalScope,
   BgAgentSummary,
   PersistentApprovalEntry,
+  RefineHandoff,
   RerunVariant,
   SessionId,
   ToolCallId,
@@ -167,6 +168,60 @@ export async function stopBackgroundAgent(
 /** Cancel the in-flight turn for the session (F-391). */
 export async function sessionCancel(sessionId: SessionId): Promise<void> {
   await invoke('session_cancel', { sessionId });
+}
+
+/**
+ * F-603: pause the session orchestrator at the next inter-step checkpoint.
+ * Idempotent backend; the `Running → Paused` transition arrives via
+ * `Event::SessionPaused` on the session event stream.
+ */
+export async function sessionPause(sessionId: SessionId): Promise<void> {
+  await invoke('session_pause', { sessionId });
+}
+
+/**
+ * F-603: resume a paused session orchestrator. Idempotent — resuming a
+ * session that is already running is a no-op and emits no event.
+ */
+export async function sessionResume(sessionId: SessionId): Promise<void> {
+  await invoke('session_resume', { sessionId });
+}
+
+/**
+ * F-604: interrupt the in-flight assistant turn and return the partial
+ * text + capture anchors as a [`RefineHandoff`]. The webview drives the
+ * refine composer from the returned value (or by handling
+ * `Event::SessionInterrupted` on the stream — both shapes are equivalent).
+ *
+ * Calling this with no in-flight turn replies with an empty handoff
+ * (`partial_text: ""`, both anchors empty); callers surface this as
+ * "nothing to refine" rather than an error.
+ */
+export async function sessionInterruptAndRefine(
+  sessionId: SessionId,
+): Promise<RefineHandoff> {
+  return invoke<RefineHandoff>('session_interrupt_and_refine', { sessionId });
+}
+
+/**
+ * F-607: export the raw `events.jsonl` bytes for `sessionId`. The shell
+ * accepts an empty `workspaceRoot` for session-window callers (server
+ * resolves the cached workspace from `session_hello`); dashboard callers
+ * pass the explicit workspace root they want to read.
+ *
+ * Returns the file bytes as a `Uint8Array` so the caller can hand them
+ * directly to a `Blob` for download (or to `Tauri`'s save dialog if a
+ * native picker becomes available later).
+ */
+export async function exportTranscript(
+  sessionId: SessionId,
+  workspaceRoot = '',
+): Promise<Uint8Array> {
+  const raw = await invoke<number[] | Uint8Array>('export_transcript', {
+    sessionId,
+    workspaceRoot,
+  });
+  return raw instanceof Uint8Array ? raw : new Uint8Array(raw);
 }
 
 /**

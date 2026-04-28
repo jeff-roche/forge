@@ -18,19 +18,25 @@ import {
   AgentTrace,
   AgentTraceToolbar,
   applyEventToState,
+  exportTranscriptDownload,
   filterAgents,
   formatElapsed,
   inspectorStub,
+  interruptSession,
+  pauseSession,
   promoteAgentInstance,
+  RefineComposer,
   sortAgents,
   spawnedByLabel,
   StepDrawer,
+  stepLabel,
   stopAgentInstance,
   type AgentInspectorData,
   type AgentRow,
   type AgentStep,
   type LiveAgentState,
 } from './AgentMonitor';
+import type { RefineHandoff } from '@forge/ipc';
 import { setInvokeForTesting } from '../lib/tauri';
 import { afterEach } from 'vitest';
 
@@ -112,6 +118,7 @@ describe('applyEventToState', () => {
     stepsByAgent: {},
     resourcesByAgent: {},
     toolsByAgent: {},
+    paused: false,
   };
 
   it('upserts a session row the first time StepStarted arrives with an instance id', () => {
@@ -886,6 +893,7 @@ describe('applyEventToState (F-449 chrome)', () => {
     stepsByAgent: {},
     resourcesByAgent: {},
     toolsByAgent: {},
+    paused: false,
   };
 
   it('upserts a session-root row from session_started.at', () => {
@@ -1275,5 +1283,551 @@ describe('AgentMonitor — instance query-param pre-selection (F-153)', () => {
       ) as HTMLElement | null;
       expect(traceHead?.textContent).toBe('writer');
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F-449 — F-606 step chip (`running · step N of M`) + sub-agent tool count
+// ---------------------------------------------------------------------------
+
+describe('stepLabel', () => {
+  it('renders `step N of M` when both index and total are populated', () => {
+    expect(stepLabel(row({ stepIndex: 3, stepTotal: 5 }), 0)).toBe('step 3 of 5');
+  });
+
+  it('renders `step N` when only index is populated', () => {
+    expect(stepLabel(row({ stepIndex: 2 }), 0)).toBe('step 2');
+  });
+
+  it('falls back to the observed-step count when index is unknown', () => {
+    expect(stepLabel(row(), 7)).toBe('step 7');
+  });
+
+  it('treats index=0 as legacy/unknown and falls back to observed', () => {
+    expect(stepLabel(row({ stepIndex: 0, stepTotal: 5 }), 9)).toBe('step 9');
+  });
+});
+
+describe('<AgentTrace> chip — F-606 index/total', () => {
+  it('renders `running · step N of M` when both are known', () => {
+    const { container } = render(() => (
+      <AgentTrace
+        agent={row({ state: 'running', stepIndex: 2, stepTotal: 5 })}
+        steps={[step(), step({ id: 's2' })]}
+        onStepClick={() => {}}
+      />
+    ));
+    const chip = container.querySelector('.agent-monitor__trace-chip');
+    expect(chip?.textContent).toContain('step 2 of 5');
+  });
+
+  it('renders `running · step N` when only index is known', () => {
+    const { container } = render(() => (
+      <AgentTrace
+        agent={row({ state: 'running', stepIndex: 4 })}
+        steps={[step()]}
+        onStepClick={() => {}}
+      />
+    ));
+    const chip = container.querySelector('.agent-monitor__trace-chip');
+    expect(chip?.textContent).toContain('step 4');
+    expect(chip?.textContent).not.toContain('of');
+  });
+
+  it('falls back to observed-step count when index is missing (legacy daemon)', () => {
+    const { container } = render(() => (
+      <AgentTrace
+        agent={row({ state: 'running' })}
+        steps={[step(), step({ id: 's2' }), step({ id: 's3' })]}
+        onStepClick={() => {}}
+      />
+    ));
+    const chip = container.querySelector('.agent-monitor__trace-chip');
+    expect(chip?.textContent).toContain('step 3');
+  });
+});
+
+describe('applyEventToState — F-606 step_started index/total', () => {
+  const empty: LiveAgentState = {
+    subAgents: [],
+    stepsByAgent: {},
+    resourcesByAgent: {},
+    toolsByAgent: {},
+    paused: false,
+  };
+
+  it('captures index + total on the first StepStarted', () => {
+    const after = applyEventToState(empty, {
+      event: {
+        type: 'step_started',
+        step_id: 's',
+        kind: 'model',
+        instance_id: 'inst',
+        index: 1,
+        total: 4,
+      },
+    });
+    const row = after.subAgents.find((r) => r.id === 'inst');
+    expect(row?.stepIndex).toBe(1);
+    expect(row?.stepTotal).toBe(4);
+  });
+
+  it('updates index when subsequent StepStarted advances the count', () => {
+    const a = applyEventToState(empty, {
+      event: {
+        type: 'step_started',
+        step_id: 's1',
+        kind: 'model',
+        instance_id: 'inst',
+        index: 1,
+      },
+    });
+    const b = applyEventToState(a, {
+      event: {
+        type: 'step_started',
+        step_id: 's2',
+        kind: 'tool',
+        instance_id: 'inst',
+        index: 2,
+      },
+    });
+    const row = b.subAgents.find((r) => r.id === 'inst');
+    expect(row?.stepIndex).toBe(2);
+  });
+
+  it('treats index=0 as unknown (legacy event) and leaves stepIndex unset', () => {
+    const after = applyEventToState(empty, {
+      event: {
+        type: 'step_started',
+        step_id: 's',
+        kind: 'model',
+        instance_id: 'inst',
+        index: 0,
+      },
+    });
+    const row = after.subAgents.find((r) => r.id === 'inst');
+    expect(row?.stepIndex).toBeUndefined();
+  });
+});
+
+describe('applyEventToState — F-449 sub_agent_spawned tool_count', () => {
+  const empty: LiveAgentState = {
+    subAgents: [],
+    stepsByAgent: {},
+    resourcesByAgent: {},
+    toolsByAgent: {},
+    paused: false,
+  };
+
+  it('captures tool_count from SubAgentSpawned onto the new row', () => {
+    const after = applyEventToState(empty, {
+      event: {
+        type: 'sub_agent_spawned',
+        parent: 'p',
+        child: 'c',
+        from_msg: 'm',
+        tool_count: 7,
+      },
+    });
+    const child = after.subAgents.find((r) => r.id === 'c');
+    expect(child?.toolCount).toBe(7);
+  });
+
+  it('omits toolCount when SubAgentSpawned does not carry it', () => {
+    const after = applyEventToState(empty, {
+      event: { type: 'sub_agent_spawned', parent: 'p', child: 'c' },
+    });
+    const child = after.subAgents.find((r) => r.id === 'c');
+    expect(child?.toolCount).toBeUndefined();
+  });
+});
+
+describe('<AgentTraceToolbar> — F-449 declared tool_count vs aggregation', () => {
+  it('prefers the row.toolCount when present (sub-agent declared count)', () => {
+    const { getByText } = render(() => (
+      <AgentTraceToolbar
+        agent={row({ toolCount: 12 })}
+        tools={['only', 'two']}
+        now={Date.now()}
+      />
+    ));
+    expect(getByText('tools 12')).toBeTruthy();
+  });
+
+  it('falls back to props.tools.length when row.toolCount is absent', () => {
+    const { getByText } = render(() => (
+      <AgentTraceToolbar
+        agent={row()}
+        tools={['fs.read', 'shell.exec', 'http.fetch']}
+        now={Date.now()}
+      />
+    ));
+    expect(getByText('tools 3')).toBeTruthy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F-449 — F-603 paused fold + Pause/Resume button
+// ---------------------------------------------------------------------------
+
+describe('applyEventToState — F-603 session pause/resume', () => {
+  const empty: LiveAgentState = {
+    subAgents: [],
+    stepsByAgent: {},
+    resourcesByAgent: {},
+    toolsByAgent: {},
+    paused: false,
+  };
+
+  it('flips paused=true on session_paused', () => {
+    const after = applyEventToState(empty, {
+      event: { type: 'session_paused', at: '2026-04-20T12:00:00Z' },
+    });
+    expect(after.paused).toBe(true);
+  });
+
+  it('is a no-op when session_paused arrives twice', () => {
+    const a = applyEventToState(empty, {
+      event: { type: 'session_paused', at: '2026-04-20T12:00:00Z' },
+    });
+    const b = applyEventToState(a, {
+      event: { type: 'session_paused', at: '2026-04-20T12:00:01Z' },
+    });
+    expect(b).toBe(a);
+  });
+
+  it('flips paused=false on session_resumed', () => {
+    const a = applyEventToState(empty, {
+      event: { type: 'session_paused', at: '2026-04-20T12:00:00Z' },
+    });
+    const b = applyEventToState(a, {
+      event: { type: 'session_resumed', at: '2026-04-20T12:00:05Z' },
+    });
+    expect(b.paused).toBe(false);
+  });
+
+  it('flips paused=false on session_interrupted (orchestrator parks quiescent)', () => {
+    const a = applyEventToState(empty, {
+      event: { type: 'session_paused', at: '2026-04-20T12:00:00Z' },
+    });
+    const b = applyEventToState(a, {
+      event: {
+        type: 'session_interrupted',
+        at: '2026-04-20T12:00:05Z',
+        partial_text: 'hi',
+        captured_at_step_id: 's',
+        captured_at_msg_id: 'm',
+      },
+    });
+    expect(b.paused).toBe(false);
+  });
+});
+
+describe('pauseSession wiring', () => {
+  it('routes to sessionPause when running', async () => {
+    const sessionPause = vi.fn().mockResolvedValue(undefined);
+    const sessionResume = vi.fn();
+    const r = await pauseSession({ sessionPause, sessionResume }, 'sess', false);
+    expect(sessionPause).toHaveBeenCalledWith('sess');
+    expect(sessionResume).not.toHaveBeenCalled();
+    expect(r).toBe('ok');
+  });
+
+  it('routes to sessionResume when paused', async () => {
+    const sessionPause = vi.fn();
+    const sessionResume = vi.fn().mockResolvedValue(undefined);
+    const r = await pauseSession({ sessionPause, sessionResume }, 'sess', true);
+    expect(sessionResume).toHaveBeenCalledWith('sess');
+    expect(sessionPause).not.toHaveBeenCalled();
+    expect(r).toBe('ok');
+  });
+
+  it('skips when no session id is active', async () => {
+    const sessionPause = vi.fn();
+    const sessionResume = vi.fn();
+    const r = await pauseSession({ sessionPause, sessionResume }, null, false);
+    expect(sessionPause).not.toHaveBeenCalled();
+    expect(sessionResume).not.toHaveBeenCalled();
+    expect(r).toBe('skipped');
+  });
+
+  it('collapses rejection to failed', async () => {
+    const sessionPause = vi.fn().mockRejectedValue(new Error('busy'));
+    const sessionResume = vi.fn();
+    const r = await pauseSession({ sessionPause, sessionResume }, 'sess', false);
+    expect(r).toBe('failed');
+  });
+});
+
+describe('<AgentInspector> — F-449 PAUSE / RESUME button', () => {
+  it('renders PAUSE for the session-root row when running', () => {
+    const { getByText } = render(() => (
+      <AgentInspector
+        agent={row({ id: 'session-root', category: 'session' })}
+        data={inspector()}
+        onStop={() => {}}
+        paused={false}
+        onPauseToggle={() => {}}
+      />
+    ));
+    expect(getByText('PAUSE')).toBeTruthy();
+  });
+
+  it('renders RESUME for the session-root row when paused', () => {
+    const { getByText } = render(() => (
+      <AgentInspector
+        agent={row({ id: 'session-root', category: 'session' })}
+        data={inspector()}
+        onStop={() => {}}
+        paused={true}
+        onPauseToggle={() => {}}
+      />
+    ));
+    expect(getByText('RESUME')).toBeTruthy();
+  });
+
+  it('hides PAUSE for sub-agent / background rows', () => {
+    const { queryByText } = render(() => (
+      <AgentInspector
+        agent={row({ id: 'sub', category: 'sub-agent' })}
+        data={inspector()}
+        onStop={() => {}}
+        onPauseToggle={() => {}}
+      />
+    ));
+    expect(queryByText('PAUSE')).toBeNull();
+    expect(queryByText('RESUME')).toBeNull();
+  });
+
+  it('invokes onPauseToggle on click', () => {
+    const onPauseToggle = vi.fn();
+    const { getByText } = render(() => (
+      <AgentInspector
+        agent={row({ id: 'session-root', category: 'session' })}
+        data={inspector()}
+        onStop={() => {}}
+        onPauseToggle={onPauseToggle}
+      />
+    ));
+    fireEvent.click(getByText('PAUSE'));
+    expect(onPauseToggle).toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F-449 — F-604 INTERRUPT + REFINE
+// ---------------------------------------------------------------------------
+
+describe('interruptSession wiring', () => {
+  it('returns the handoff on success', async () => {
+    const handoff: RefineHandoff = {
+      partial_text: 'hello world',
+      captured_at_step_id: 'step-1',
+      captured_at_msg_id: 'msg-1',
+    };
+    const sessionInterruptAndRefine = vi.fn().mockResolvedValue(handoff);
+    const out = await interruptSession({ sessionInterruptAndRefine }, 'sess');
+    expect(sessionInterruptAndRefine).toHaveBeenCalledWith('sess');
+    expect(out).toEqual(handoff);
+  });
+
+  it('returns null when no session id is active', async () => {
+    const sessionInterruptAndRefine = vi.fn();
+    const out = await interruptSession({ sessionInterruptAndRefine }, null);
+    expect(sessionInterruptAndRefine).not.toHaveBeenCalled();
+    expect(out).toBeNull();
+  });
+
+  it('returns null on rejection so the click stays idempotent', async () => {
+    const sessionInterruptAndRefine = vi
+      .fn()
+      .mockRejectedValue(new Error('not running'));
+    const out = await interruptSession({ sessionInterruptAndRefine }, 'sess');
+    expect(out).toBeNull();
+  });
+});
+
+describe('<AgentInspector> — F-449 INTERRUPT + REFINE', () => {
+  it('renders INTERRUPT + REFINE for the session-root row', () => {
+    const { getByText } = render(() => (
+      <AgentInspector
+        agent={row({ id: 'session-root', category: 'session' })}
+        data={inspector()}
+        onStop={() => {}}
+        onInterrupt={() => {}}
+      />
+    ));
+    expect(getByText('INTERRUPT + REFINE')).toBeTruthy();
+  });
+
+  it('hides INTERRUPT + REFINE for non-session rows', () => {
+    const { queryByText } = render(() => (
+      <AgentInspector
+        agent={row({ id: 'sub', category: 'sub-agent' })}
+        data={inspector()}
+        onStop={() => {}}
+        onInterrupt={() => {}}
+      />
+    ));
+    expect(queryByText('INTERRUPT + REFINE')).toBeNull();
+  });
+
+  it('invokes onInterrupt on click', () => {
+    const onInterrupt = vi.fn();
+    const { getByText } = render(() => (
+      <AgentInspector
+        agent={row({ id: 'session-root', category: 'session' })}
+        data={inspector()}
+        onStop={() => {}}
+        onInterrupt={onInterrupt}
+      />
+    ));
+    fireEvent.click(getByText('INTERRUPT + REFINE'));
+    expect(onInterrupt).toHaveBeenCalled();
+  });
+});
+
+describe('<RefineComposer>', () => {
+  it('renders nothing when handoff is null', () => {
+    const { queryByRole } = render(() => (
+      <RefineComposer handoff={null} onClose={() => {}} />
+    ));
+    expect(queryByRole('dialog')).toBeNull();
+  });
+
+  it('seeds the textarea with partial_text when handoff is present', async () => {
+    const handoff: RefineHandoff = {
+      partial_text: 'partial assistant text',
+      captured_at_step_id: 'step-1',
+      captured_at_msg_id: 'msg-1',
+    };
+    const { findByLabelText } = render(() => (
+      <RefineComposer handoff={handoff} onClose={() => {}} />
+    ));
+    const ta = (await findByLabelText('Refined message')) as HTMLTextAreaElement;
+    expect(ta.value).toBe('partial assistant text');
+  });
+
+  it('renders the empty placeholder when partial_text is empty (no in-flight turn)', () => {
+    const handoff: RefineHandoff = {
+      partial_text: '',
+      captured_at_step_id: '',
+      captured_at_msg_id: '',
+    };
+    const { getByText } = render(() => (
+      <RefineComposer handoff={handoff} onClose={() => {}} />
+    ));
+    expect(getByText(/nothing to refine/i)).toBeTruthy();
+  });
+
+  it('closes on Escape', () => {
+    const onClose = vi.fn();
+    const handoff: RefineHandoff = {
+      partial_text: 'x',
+      captured_at_step_id: 's',
+      captured_at_msg_id: 'm',
+    };
+    render(() => <RefineComposer handoff={handoff} onClose={onClose} />);
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it('closes on the X button', () => {
+    const onClose = vi.fn();
+    const handoff: RefineHandoff = {
+      partial_text: 'x',
+      captured_at_step_id: 's',
+      captured_at_msg_id: 'm',
+    };
+    const { getByLabelText } = render(() => (
+      <RefineComposer handoff={handoff} onClose={onClose} />
+    ));
+    fireEvent.click(getByLabelText(/Close refine composer/i));
+    expect(onClose).toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F-449 — F-607 EXPORT TRANSCRIPT (download trigger)
+// ---------------------------------------------------------------------------
+
+describe('exportTranscriptDownload wiring', () => {
+  it('invokes exportTranscript with the session id and triggers a download', async () => {
+    // Stub URL.createObjectURL + revokeObjectURL — jsdom does not provide
+    // them by default. The anchor.click() path produces a noop in jsdom
+    // (no navigation), which is exactly what the test wants.
+    const createObjectURL = vi.fn().mockReturnValue('blob:fake');
+    const revokeObjectURL = vi.fn();
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: createObjectURL,
+    });
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      value: revokeObjectURL,
+    });
+
+    const exportTranscript = vi
+      .fn()
+      .mockResolvedValue(new Uint8Array([0x7b, 0x7d, 0x0a])); // `{}\n`
+    const result = await exportTranscriptDownload({ exportTranscript }, 'sess-a');
+
+    expect(exportTranscript).toHaveBeenCalledWith('sess-a', '');
+    expect(createObjectURL).toHaveBeenCalledTimes(1);
+    expect(revokeObjectURL).toHaveBeenCalledTimes(1);
+    expect(result).toBe('ok');
+  });
+
+  it('skips when no session id is active', async () => {
+    const exportTranscript = vi.fn();
+    const result = await exportTranscriptDownload({ exportTranscript }, null);
+    expect(exportTranscript).not.toHaveBeenCalled();
+    expect(result).toBe('skipped');
+  });
+
+  it('collapses rejection to failed', async () => {
+    const exportTranscript = vi.fn().mockRejectedValue(new Error('cap'));
+    const result = await exportTranscriptDownload({ exportTranscript }, 'sess-a');
+    expect(result).toBe('failed');
+  });
+});
+
+describe('<AgentInspector> — F-449 EXPORT TRANSCRIPT', () => {
+  it('renders EXPORT TRANSCRIPT for the session-root row', () => {
+    const { getByText } = render(() => (
+      <AgentInspector
+        agent={row({ id: 'session-root', category: 'session' })}
+        data={inspector()}
+        onStop={() => {}}
+        onExportTranscript={() => {}}
+      />
+    ));
+    expect(getByText('EXPORT TRANSCRIPT')).toBeTruthy();
+  });
+
+  it('hides EXPORT TRANSCRIPT for non-session rows', () => {
+    const { queryByText } = render(() => (
+      <AgentInspector
+        agent={row({ id: 'bg', category: 'background' })}
+        data={inspector()}
+        onStop={() => {}}
+        onExportTranscript={() => {}}
+      />
+    ));
+    expect(queryByText('EXPORT TRANSCRIPT')).toBeNull();
+  });
+
+  it('invokes onExportTranscript on click', () => {
+    const onExportTranscript = vi.fn();
+    const { getByText } = render(() => (
+      <AgentInspector
+        agent={row({ id: 'session-root', category: 'session' })}
+        data={inspector()}
+        onStop={() => {}}
+        onExportTranscript={onExportTranscript}
+      />
+    ));
+    fireEvent.click(getByText('EXPORT TRANSCRIPT'));
+    expect(onExportTranscript).toHaveBeenCalled();
   });
 });
