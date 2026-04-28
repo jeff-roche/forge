@@ -258,6 +258,36 @@ pub struct SidecarCrashed {
     pub backtrace: Option<String>,
 }
 
+/// On-disk crash dump persisted by the sidecar's panic hook before
+/// exit. Mirrors [`SidecarCrashed`] but includes the identifiers needed
+/// for the daemon-side reader to attribute the dump to a session +
+/// instance. Persisted at
+/// `<XDG_DATA_HOME or $HOME/.local/share>/forge/crashes/<session-id>/<instance-id>-<unix-ts>.json`
+/// per `docs/architecture/agent-sidecar.md` §"Step 7".
+///
+/// Independent of the cooperative `SidecarMessage::Crashed` IPC frame:
+/// the IPC path is the cooperative case (drained on shutdown), the
+/// file-on-disk path is the defensive case — covers situations where
+/// the IPC plumbing itself failed and the supervisor never received the
+/// in-band frame.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CrashDump {
+    /// Logical instance id assigned by the daemon at spawn time.
+    pub instance_id: String,
+    /// Session the instance belonged to. Lifts the dump out of an
+    /// anonymous flat dir so a stuck session's history is grep-able.
+    pub session_id: String,
+    /// Stringified panic payload (per the `std::panic::PanicInfo`
+    /// downcast discipline used by the standard library's default
+    /// hook).
+    pub panic_message: String,
+    /// Captured backtrace if `RUST_BACKTRACE=1` was set; otherwise
+    /// `None`.
+    pub backtrace: Option<String>,
+    /// RFC 3339 UTC timestamp of the panic. Captured at hook fire time.
+    pub captured_at: DateTime<Utc>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -380,6 +410,35 @@ mod tests {
             let sent_json = serde_json::to_string(&sent).unwrap();
             let got_json = serde_json::to_string(&got).unwrap();
             assert_eq!(sent_json, got_json, "round-trip mismatch");
+        }
+    }
+
+    /// `CrashDump` is the on-disk dump shape persisted by the sidecar's
+    /// panic hook before exit. The shape is consumed by the daemon-side
+    /// crash reader, so a silent rename here would break post-mortem
+    /// triage. Pin the round-trip + canonical JSON keys.
+    #[test]
+    fn crash_dump_roundtrip_and_keys() {
+        let captured_at = Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, 5).unwrap();
+        let dump = CrashDump {
+            instance_id: "inst-1".into(),
+            session_id: "sess-1".into(),
+            panic_message: "index out of bounds".into(),
+            backtrace: Some("frame 0: foo".into()),
+            captured_at,
+        };
+        let bytes = serde_json::to_vec(&dump).expect("serialize");
+        let got: CrashDump = serde_json::from_slice(&bytes).expect("deserialize");
+        assert_eq!(got, dump);
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        for key in [
+            "instance_id",
+            "session_id",
+            "panic_message",
+            "backtrace",
+            "captured_at",
+        ] {
+            assert!(value.get(key).is_some(), "missing key {key}: {value}");
         }
     }
 
