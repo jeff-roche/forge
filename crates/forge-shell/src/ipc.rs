@@ -173,6 +173,36 @@ pub(crate) fn require_window_label<R: Runtime>(
 /// about cap values) and before any bridge call (so the allocation/wire cost
 /// never materializes). Returns `Err` with a stable marker that tests and
 /// any UI-side handling can pattern-match on.
+///
+/// # Canonical validation entry point (F-674)
+///
+/// `require_size` is the **single** validation helper for every untyped
+/// string flowing across the Tauri IPC boundary — required *and* optional.
+/// New `#[tauri::command]` bodies in any `*_ipc.rs` module MUST funnel
+/// inbound `String` / `Option<String>` arguments through this helper
+/// (directly or via a thin pure helper that wraps it) instead of inlining
+/// `if value.len() > MAX { ... }` length checks.
+///
+/// The rule exists for three reasons:
+///
+/// 1. **One error shape.** Every oversize rejection emits the
+///    [`payload_too_large`] marker, so the UI layer pattern-matches a single
+///    prefix and tests assert against one stable fragment.
+/// 2. **No drift between modules.** Cross-PR additions to the IPC surface
+///    have produced two competing patterns (idiomatic `require_size` vs
+///    inline `if .. > MAX { return Err(format!(..)) }`); the latter
+///    duplicates the cap constant in the message and silently diverges as
+///    the constant evolves. Standardizing closes that drift.
+/// 3. **Optional inputs are the easy case to forget.** `Option<String>`
+///    fields skip validation entirely if the author doesn't remember to
+///    `.as_deref()` first; centralizing the helper makes the pattern
+///    `if let Some(s) = field.as_deref() { require_size(..) }` a copy-paste
+///    template that's hard to get wrong.
+///
+/// Pure validators (`validate_optional_since`, `validate_optional_workspace_root`,
+/// etc.) that wrap `require_size` are encouraged — they keep the
+/// `#[tauri::command]` body terse and give unit tests a Tauri-runtime-free
+/// entry point.
 pub(crate) fn require_size(field: &str, value: &str, limit_bytes: usize) -> Result<(), String> {
     if value.len() <= limit_bytes {
         Ok(())

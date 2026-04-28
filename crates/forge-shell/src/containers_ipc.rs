@@ -224,6 +224,19 @@ pub fn manage_containers<R: Runtime>(app: &AppHandle<R>) {
 // Pure validation
 // ---------------------------------------------------------------------------
 
+/// F-674: pure validation helper for the optional `since` argument
+/// accepted by [`container_logs`]. Mirrors the rule documented in
+/// `crate::ipc`: optional-string params route through the canonical
+/// `require_size` helper when present, and skip the check when absent.
+/// Exposed so unit tests can assert the standardized error marker
+/// without standing up a Tauri runtime.
+pub fn validate_optional_since(since: Option<&str>) -> Result<(), String> {
+    if let Some(s) = since {
+        crate::ipc::require_size("since", s, MAX_SINCE_BYTES)?;
+    }
+    Ok(())
+}
+
 /// Validate `container_id`. Pure; exposed for unit tests.
 pub fn validate_container_id(container_id: &str) -> Result<(), String> {
     if container_id.is_empty() {
@@ -352,15 +365,7 @@ pub async fn container_logs<R: Runtime>(
 ) -> Result<Vec<LogLine>, String> {
     crate::ipc::require_window_label(&webview, CONTAINERS_OWNER_LABEL, "container_logs")?;
     validate_container_id(&container_id)?;
-    if let Some(s) = since.as_deref() {
-        if s.len() > MAX_SINCE_BYTES {
-            return Err(format!(
-                "since too large: {} bytes exceeds cap of {} bytes",
-                s.len(),
-                MAX_SINCE_BYTES
-            ));
-        }
-    }
+    validate_optional_since(since.as_deref())?;
     let tail = tail.map(|n| n.min(MAX_LOG_TAIL));
     let runtime = PodmanRuntime::new();
     let handle = ContainerHandle::new(&container_id);
@@ -400,6 +405,28 @@ pub fn make_container_info(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_optional_since_accepts_none() {
+        assert!(validate_optional_since(None).is_ok());
+    }
+
+    #[test]
+    fn validate_optional_since_accepts_within_cap() {
+        assert!(validate_optional_since(Some("2025-04-26T10:00:00Z")).is_ok());
+    }
+
+    #[test]
+    fn validate_optional_since_rejects_oversize_with_canonical_marker() {
+        // F-674: the standardized error string from `crate::ipc::require_size`
+        // begins with `"payload too large"` and names the offending field.
+        // Tests assert against that marker so the UI layer can pattern-match
+        // a single shape.
+        let huge = "a".repeat(MAX_SINCE_BYTES + 1);
+        let err = validate_optional_since(Some(&huge)).unwrap_err();
+        assert!(err.contains("payload too large"), "got: {err}");
+        assert!(err.contains("since"), "got: {err}");
+    }
 
     #[test]
     fn validate_container_id_rejects_empty() {

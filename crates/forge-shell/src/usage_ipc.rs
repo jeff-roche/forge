@@ -27,6 +27,20 @@ use forge_core::usage::{
 use forge_core::WorkspaceId;
 use tauri::{Runtime, Webview};
 
+use crate::ipc::{require_size, MAX_WORKSPACE_ROOT_BYTES};
+
+/// F-674: pure validation helper exposed for unit tests. Mirrors the
+/// optional-string check inside [`usage_summary`] without dragging in the
+/// Tauri runtime. Optional inputs follow the standardization rule
+/// documented in `crate::ipc`: when `Some`, the string is bounded via
+/// the canonical `require_size` helper; when `None`, the check is skipped.
+pub fn validate_optional_workspace_root(workspace_root: Option<&str>) -> Result<(), String> {
+    if let Some(root) = workspace_root {
+        require_size("workspace_root", root, MAX_WORKSPACE_ROOT_BYTES)?;
+    }
+    Ok(())
+}
+
 #[cfg(feature = "webview")]
 async fn read_all_monthly_files(usage_dir: &std::path::Path) -> Vec<MonthlyAggregate> {
     let mut out = Vec::new();
@@ -64,6 +78,7 @@ pub async fn usage_summary<R: Runtime>(
     workspace_root: Option<String>,
 ) -> Result<UsageSummary, String> {
     crate::ipc::require_window_label(&webview, "dashboard", "usage_summary")?;
+    validate_optional_workspace_root(workspace_root.as_deref())?;
 
     let usage_dir = match resolve_usage_dir() {
         Some(d) => d,
@@ -102,6 +117,26 @@ mod tests {
 
     fn ws(s: &str) -> WorkspaceId {
         WorkspaceId::from_string(s.to_string())
+    }
+
+    #[test]
+    fn validate_optional_workspace_root_accepts_none() {
+        assert!(validate_optional_workspace_root(None).is_ok());
+    }
+
+    #[test]
+    fn validate_optional_workspace_root_accepts_within_cap() {
+        assert!(validate_optional_workspace_root(Some("/path/to/workspace")).is_ok());
+    }
+
+    #[test]
+    fn validate_optional_workspace_root_rejects_oversize() {
+        let huge = "a".repeat(MAX_WORKSPACE_ROOT_BYTES + 1);
+        let err = validate_optional_workspace_root(Some(&huge)).unwrap_err();
+        // F-068 marker: stable across the codebase so UI handling and other
+        // tests can pattern-match on the prefix.
+        assert!(err.contains("payload too large"), "got: {err}");
+        assert!(err.contains("workspace_root"), "got: {err}");
     }
 
     #[tokio::test]
