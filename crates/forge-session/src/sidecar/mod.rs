@@ -22,6 +22,13 @@
 //! [`crate::bg_agents::BackgroundAgentRegistry`]; that integration lands
 //! in step 5 behind the `FORGE_AGENT_SIDECAR` flag.
 //!
+//! ## Sub-modules
+//!
+//! - [`crashes`] — daemon-side crash-dump reader. The sidecar binary
+//!   writes a `<XDG_DATA_HOME or ~/.local/share>/forge/crashes/<session-id>/<instance-id>-<unix-ts>.json`
+//!   from its panic hook (F-608 step 7); this submodule enumerates and
+//!   parses those dumps for the daemon-side observability path.
+//!
 //! # Layout
 //!
 //! ```text
@@ -43,6 +50,8 @@
 //!                │ forged-agent child  │  IpcEventSink → SidecarMessage::Event
 //!                └─────────────────────┘
 //! ```
+
+pub mod crashes;
 
 use std::collections::VecDeque;
 use std::io::ErrorKind;
@@ -215,6 +224,14 @@ struct ShutdownRequest {
 pub struct SidecarSupervisor {
     socket_dir: Arc<PathBuf>,
     forged_agent_path: Arc<PathBuf>,
+    /// F-608 step 7: session id forwarded to the child as
+    /// `--session-id`. The child's panic hook uses this to disambiguate
+    /// crash dumps under
+    /// `<XDG_DATA_HOME or ~/.local/share>/forge/crashes/<session-id>/`.
+    /// Default is `"default"` so step-5 callers that haven't been
+    /// updated yet still spawn — their crashes simply land under a
+    /// `default` bucket until the wiring catches up.
+    session_id: Arc<String>,
 }
 
 impl SidecarSupervisor {
@@ -231,7 +248,18 @@ impl SidecarSupervisor {
         Self {
             socket_dir: Arc::new(socket_dir),
             forged_agent_path: Arc::new(forged_agent_path),
+            session_id: Arc::new("default".to_string()),
         }
+    }
+
+    /// F-608 step 7: bind a session id forwarded to every spawned
+    /// child as `--session-id`. The child's panic hook uses it to
+    /// place crash dumps in the right per-session bucket so the
+    /// daemon-side reader (see [`crate::sidecar::crashes`]) can
+    /// enumerate them.
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Arc::new(session_id.into());
+        self
     }
 
     /// Path to the directory the supervisor binds sidecar sockets in.
@@ -292,6 +320,7 @@ impl SidecarSupervisor {
         let supervisor = SupervisorTask {
             socket_dir: self.socket_dir.clone(),
             forged_agent_path: self.forged_agent_path.clone(),
+            session_id: self.session_id.clone(),
             socket_path: socket_path.clone(),
             instance_id: instance_id.clone(),
             params,
@@ -353,6 +382,8 @@ impl SidecarSupervisor {
             .arg(socket_path)
             .arg("--instance-id")
             .arg(instance_id.to_string())
+            .arg("--session-id")
+            .arg(self.session_id.as_str())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -482,6 +513,7 @@ impl SidecarSupervisor {
 struct SupervisorTask {
     socket_dir: Arc<PathBuf>,
     forged_agent_path: Arc<PathBuf>,
+    session_id: Arc<String>,
     socket_path: PathBuf,
     instance_id: AgentInstanceId,
     params: SpawnParams,
@@ -567,6 +599,7 @@ impl SupervisorTask {
                     let supervisor_view = SidecarSupervisor {
                         socket_dir: self.socket_dir.clone(),
                         forged_agent_path: self.forged_agent_path.clone(),
+                        session_id: self.session_id.clone(),
                     };
                     match supervisor_view
                         .launch_and_handshake(

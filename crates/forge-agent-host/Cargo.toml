@@ -34,6 +34,12 @@ anyhow = "1"
 # closure (architecture doc Open Questions §1).
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
+# F-608 step 7: panic-hook crash-dump writer needs `$HOME` to fall back
+# to `~/.local/share/forge/crashes` when neither `$FORGE_CRASH_DIR` nor
+# `$XDG_DATA_HOME` is set. `dirs` is already pulled by other workspace
+# crates (`forge-session`, `forge-mcp`); pinning the same major matches
+# the workspace's existing convention.
+dirs = "6"
 forge-core = { path = "../forge-core" }
 forge-ipc = { path = "../forge-ipc" }
 serde_json = "1"

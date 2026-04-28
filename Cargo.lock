@@ -1405,6 +1405,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "dirs 6.0.0",
  "forge-core",
  "forge-ipc",
  "serde_json",
