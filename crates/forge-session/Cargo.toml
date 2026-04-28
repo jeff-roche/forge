@@ -67,6 +67,12 @@ windows-sys = { version = "0.61", features = [
 
 [dev-dependencies]
 async-trait = "0.1"
+# F-608 step 8: `sidecar_overhead.rs` stamps a fixed `DateTime<Utc>` on
+# every benched event so the per-token measurement excludes the cost
+# of `Utc::now()` (a syscall on Linux). Pulled in as a dev-dep
+# explicitly because the regular `chrono` dep above is not unified into
+# the dev build graph for benches.
+chrono = { version = "0.4", features = ["serde"] }
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support", "async_tokio"] }
 forge-cli = { path = "../forge-cli" }
 # F-586: enable the `RuntimeProvider::Mock` variant for the
@@ -77,7 +83,7 @@ libc = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 similar = "2"
 tempfile = "3"
-tokio = { version = "1", features = ["rt", "macros", "time", "net", "process"] }
+tokio = { version = "1", features = ["rt", "macros", "time", "net", "process", "io-util", "sync"] }
 # F-371: capture subscriber in integration tests pins target + field shape
 # for each tracing emission site.
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
@@ -102,6 +108,19 @@ harness = false
 [[bench]]
 name = "resource_monitor"
 path = "benches/resource_monitor.rs"
+harness = false
+
+# F-608 step 8: in-process vs sidecar per-token overhead + cold-start.
+# `inproc_token_emission` and `sidecar_token_emission` measure 1000
+# `AssistantDelta` events through `Session::emit` (in-process
+# `EventSink`) vs `IpcEventSink` over a UDS pair (sidecar wire path).
+# `sidecar_cold_start` spawns a real `forged-agent` via
+# `SidecarSupervisor` and reports handshake-complete wall time.
+# Architecture-doc aspirations: per-token p99 < 50 µs, cold-start p99
+# < 200 ms — flagged for follow-up rather than tuned to.
+[[bench]]
+name = "sidecar_overhead"
+path = "benches/sidecar_overhead.rs"
 harness = false
 
 [[test]]
