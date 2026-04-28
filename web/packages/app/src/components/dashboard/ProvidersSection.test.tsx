@@ -274,6 +274,43 @@ describe('ProvidersSection (F-586)', () => {
     expect(setActiveCallCount).toBe(2);
   });
 
+  describe('voice & terminology (F-690)', () => {
+    it('renders "unconfigured" not "no model" when a provider has no model_available', async () => {
+      setupInvokeMock();
+      const { findAllByRole } = render(() => <ProvidersSection />);
+      await waitForFetch();
+
+      const radios = await findAllByRole('radio');
+      const anthropic = radios.find((r) => r.textContent?.includes('Anthropic'))!;
+      expect(anthropic.textContent).toContain('unconfigured');
+      expect(anthropic.textContent).not.toMatch(/no model/i);
+    });
+
+    it('renders "ready" not "model ready" when model_available is true with no model name', async () => {
+      setupInvokeMock({
+        entries: [sample({ id: 'ollama', display_name: 'Ollama', model_available: true })],
+      });
+      const { findAllByRole } = render(() => <ProvidersSection />);
+      await waitForFetch();
+
+      const radios = await findAllByRole('radio');
+      expect(radios[0]?.textContent).toContain('ready');
+      expect(radios[0]?.textContent).not.toMatch(/model ready/i);
+    });
+
+    it('aria-label uses provider terminology, never "model"', async () => {
+      setupInvokeMock();
+      const { findAllByRole } = render(() => <ProvidersSection />);
+      await waitForFetch();
+
+      const radios = await findAllByRole('radio');
+      const anthropic = radios.find((r) => r.textContent?.includes('Anthropic'))!;
+      const label = anthropic.getAttribute('aria-label') ?? '';
+      expect(label).not.toMatch(/model/i);
+      expect(label.toLowerCase()).toContain('unconfigured');
+    });
+  });
+
   it('marks the pending card with aria-busy while the IPC is in flight', async () => {
     type Resolver = (value: unknown) => void;
     const resolverHolder: { fn: Resolver | null } = { fn: null };
