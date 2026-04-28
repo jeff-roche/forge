@@ -85,6 +85,8 @@ Dev workflows are wrapped in a top-level `justfile`. Install once with
 just                # list recipes
 just dev            # full Rust + webview + Tauri loop (spawns Vite at :5173)
 just build          # Rust workspace + full pnpm workspace
+just bundle         # production Tauri installers; defaults to all formats
+just bundle rpm     # narrow to one format (rpm, deb, appimage, dmg, msi, …)
 just check          # fmt --check, cargo check, clippy -D warnings, rustdoc -D warnings, typecheck, token drift
 just test           # cargo test --all + pnpm -r test
 just smoke          # Phase 1 CLI-only UAT gate

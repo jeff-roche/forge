@@ -38,6 +38,18 @@ release-bins:
     cd web && pnpm install --frozen-lockfile && pnpm -r build
     cargo build --release -p forge-cli -p forge-session -p forge-shell
 
+# Drives `cargo tauri build`, which runs `beforeBuildCommand` (production
+# pnpm build) and then bundles `forge-shell`. Pass a comma-separated bundle
+# list to narrow the targets — e.g. `just bundle rpm`, `just bundle deb`,
+# `just bundle rpm,deb`. Defaults to `all`, which honours `tauri.conf.json`
+# (.deb / .rpm / .AppImage on Linux; .dmg on macOS; .msi on Windows).
+# Output lands under `target/release/bundle/<format>/`.
+# Production bundle: release-mode Tauri installers for the host platform.
+bundle bundles="all":
+    @command -v cargo-tauri >/dev/null || { echo >&2 "cargo-tauri not found. Install: cargo install tauri-cli --version '^2.0' --locked"; exit 1; }
+    cd web && pnpm install --frozen-lockfile
+    cd crates/forge-shell && cargo tauri build --bundles {{bundles}}
+
 # Auto-format Rust sources.
 fmt:
     cargo fmt --all
