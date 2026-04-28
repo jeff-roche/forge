@@ -202,6 +202,39 @@ describe('<UsagePane>', () => {
     }
   });
 
+  it('range selector buttons use the @forge/design Button primitive', async () => {
+    setupInvoke({ byProvider: emptySummary(), byModel: emptySummary() });
+    const { findByText } = render(() => (
+      <UsagePane workspaceRoot="/ws/a" />
+    ));
+    await flush();
+
+    const today = (await findByText('Today')) as HTMLElement;
+    // The primitive baseline class must be on the rendered button — proves
+    // the raw <button> was replaced with the design-system Button.
+    expect(today.classList.contains('forge-button')).toBe(true);
+    expect(today.classList.contains('forge-button--ghost')).toBe(true);
+    // Active range is reflected via aria-pressed (default 'last30').
+    const last30 = (await findByText('Last 30')) as HTMLElement;
+    expect(last30.getAttribute('aria-pressed')).toBe('true');
+    expect(today.getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('Retry button uses the @forge/design Button primitive', async () => {
+    invokeMock.mockImplementation(() =>
+      Promise.reject(new Error('shell offline')),
+    );
+    const { findByText } = render(() => (
+      <UsagePane workspaceRoot="/ws/a" />
+    ));
+    await flush();
+    await flush();
+
+    const retry = (await findByText('Retry')) as HTMLElement;
+    expect(retry.classList.contains('forge-button')).toBe(true);
+    expect(retry.classList.contains('forge-button--primary')).toBe(true);
+  });
+
   it('cross-workspace toggle flips the IPC argument', async () => {
     setupInvoke({ byProvider: emptySummary(), byModel: emptySummary() });
     const { findByLabelText } = render(() => (

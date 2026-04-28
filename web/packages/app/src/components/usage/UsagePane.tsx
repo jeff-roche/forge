@@ -15,6 +15,7 @@ import {
   Show,
   type Component,
 } from 'solid-js';
+import { Button } from '@forge/design';
 import type { GroupBy, UsageRange } from '@forge/ipc';
 import {
   fetchUsageSummary,
@@ -151,14 +152,14 @@ export const UsagePane: Component<UsagePaneProps> = (props) => {
         >
           <For each={RANGE_OPTIONS}>
             {(opt) => (
-              <button
-                type="button"
-                class="usage-pane__range"
+              <Button
+                variant="ghost"
+                size="sm"
                 aria-pressed={rangeKey() === opt.key}
                 onClick={() => setRangeKey(opt.key)}
               >
                 {opt.label}
-              </button>
+              </Button>
             )}
           </For>
         </div>
@@ -181,13 +182,13 @@ export const UsagePane: Component<UsagePaneProps> = (props) => {
           <div class="usage-pane__error" role="alert">
             <p class="usage-pane__error-title">USAGE UNAVAILABLE</p>
             <p class="usage-pane__error-detail">{detail()}</p>
-            <button
-              type="button"
-              class="usage-pane__range"
+            <Button
+              variant="primary"
+              size="sm"
               onClick={() => void refetch()}
             >
               Retry
-            </button>
+            </Button>
           </div>
         )}
       </Show>

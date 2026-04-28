@@ -96,6 +96,15 @@
   transform: translateY(1px);
 }
 
+/* Toggle state — mirrors `.forge-icon-button[aria-pressed='true']` so a
+ * Button used in a press-toggle pattern (e.g. range selector) reads as
+ * "on" without inventing a new modifier class. */
+.forge-button[aria-pressed='true']:not(:disabled):not([aria-disabled='true']) {
+  background: var(--color-surface-3);
+  border-color: var(--color-ember-400);
+  color: var(--color-text-primary);
+}
+
 /* Danger — destructive primary. */
 .forge-button--danger {
   background: transparent;
