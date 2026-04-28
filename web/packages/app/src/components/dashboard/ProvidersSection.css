@@ -33,12 +33,16 @@
   text-transform: uppercase;
 }
 
-.providers__loading {
-  font-family: var(--font-mono);
-  font-size: var(--type-mono-sm);
-  color: var(--color-text-secondary);
-  letter-spacing: 0.2em;
-  margin: 0;
+/* F-684: provider-grid loading state.
+ *
+ * The skeleton group lays out 4 card-shaped placeholders on the same
+ * `auto-fill, minmax(220px, 1fr)` track that the live `.providers__grid` uses
+ * so the surface does not jump when the resource resolves.
+ */
+.providers__skeleton.forge-skeleton-group {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: var(--sp-3);
 }
 
 .providers__error,

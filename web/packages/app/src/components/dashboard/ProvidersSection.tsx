@@ -1,5 +1,5 @@
 import { createResource, createSignal, For, Show, type Component } from 'solid-js';
-import { Tab, Tabs } from '@forge/design';
+import { Skeleton, Tab, Tabs } from '@forge/design';
 import {
   getActiveProvider,
   listProviders,
@@ -78,7 +78,13 @@ export const ProvidersSection: Component = () => {
       </header>
 
       <Show when={snapshot.loading}>
-        <p class="providers__loading">providers · probing</p>
+        <Skeleton
+          variant="card"
+          count={4}
+          label="Loading providers"
+          class="providers__skeleton"
+          data-testid="providers-loading"
+        />
       </Show>
 
       <Show when={errorDetail()}>

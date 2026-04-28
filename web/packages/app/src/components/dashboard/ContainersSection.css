@@ -34,6 +34,13 @@
   line-height: 1.5;
 }
 
+/* F-684: row-shaped loading state. The skeleton group's gap matches the
+ * gap between live `.containers-section__row` entries so the surface does
+ * not re-layout when the resource resolves. */
+.containers-section__skeleton.forge-skeleton-group {
+  gap: var(--sp-4);
+}
+
 .containers-section__error {
   margin: 0;
   padding: var(--sp-3) var(--sp-4);

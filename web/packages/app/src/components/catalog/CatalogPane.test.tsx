@@ -67,6 +67,20 @@ afterEach(() => {
 });
 
 describe('<CatalogPane> (F-592)', () => {
+  it('renders a skeleton loading state per active tab during the fetch (F-684)', async () => {
+    invokeMock.mockImplementation(() => new Promise(() => undefined));
+    const { findByTestId, queryByText } = render(() => (
+      <CatalogPane workspaceRoot="/ws" />
+    ));
+    // Default active tab is `skills`; only that tabpanel paints its skeleton
+    // because each kind's resource is gated behind its own panel `<Show>`.
+    const skeleton = await findByTestId('catalog-loading-skills');
+    expect(skeleton.getAttribute('role')).toBe('status');
+    expect(skeleton.getAttribute('aria-busy')).toBe('true');
+    // Plain-text "Skills · loading" copy must be gone.
+    expect(queryByText(/Skills · loading/i)).toBeFalsy();
+  });
+
   it('renders three tabs (Skills / MCP / Agents)', async () => {
     setupInvoke();
     const { findAllByRole } = render(() => <CatalogPane workspaceRoot="/ws" />);
