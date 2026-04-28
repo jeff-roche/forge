@@ -92,6 +92,18 @@ describe('SubAgentBanner — expand/collapse', () => {
     );
   });
 
+  // F-696: header is a `role="button"` disclosure — must announce its
+  // collapsed/expanded state via aria-expanded for assistive tech.
+  it('header reports aria-expanded=false when collapsed and true when expanded', () => {
+    const { getByTestId } = render(() => <SubAgentBanner turn={makeTurn()} />);
+    const header = getByTestId('sub-agent-banner-header-child-1');
+    expect(header.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(header);
+    expect(header.getAttribute('aria-expanded')).toBe('true');
+    fireEvent.click(header);
+    expect(header.getAttribute('aria-expanded')).toBe('false');
+  });
+
   it('expands when Enter is pressed on the focused header', () => {
     const { getByTestId } = render(() => <SubAgentBanner turn={makeTurn()} />);
     const header = getByTestId('sub-agent-banner-header-child-1');
@@ -365,6 +377,16 @@ describe('SubAgentBanner — state-chip popover (F-448 Phase 3)', () => {
     expect(getByTestId('sub-agent-banner-popover-child-1')).toBeInTheDocument();
     fireEvent.mouseDown(getByTestId('outside'));
     expect(queryByTestId('sub-agent-banner-popover-child-1')).not.toBeInTheDocument();
+  });
+
+  // F-696: APG menu pattern — opening the popover must move focus into it
+  // (first interactive descendant) so AT can announce its contents and Tab
+  // navigates the popover instead of skipping it.
+  it('moves focus into the popover (first interactive child) on open', () => {
+    const { getByTestId } = render(() => <SubAgentBanner turn={makeTurn()} />);
+    fireEvent.click(getByTestId('sub-agent-banner-state-child-1'));
+    const monitorBtn = getByTestId('sub-agent-banner-popover-monitor-child-1');
+    expect(document.activeElement).toBe(monitorBtn);
   });
 
   it('"Open in Agent Monitor" link inside the popover calls onOpenInMonitor', () => {
