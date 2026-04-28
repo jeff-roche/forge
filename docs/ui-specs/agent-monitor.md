@@ -31,11 +31,9 @@ running · 3m · $0.09              sonnet-4.5        ← meta row
 
 ### 9.2 Trace (middle)
 
-**Header (Phase 2).** Agent name big, id small, live state chip (`running · step N` when running; otherwise the bare state). The chip uses an ember accent while running and the neutral surface chip for `queued` / `done` / `error`. `N` reads from `StepStarted.index` (1-based, [F-606](https://github.com/forge-ide/forge/issues/652)).
+**Header.** Agent name big, id small, live state chip. The chip uses an ember accent while running and the neutral surface chip for `queued` / `done` / `error`. Running format is `running · step N of M` when both [F-606](https://github.com/forge-ide/forge/issues/652)'s `index` and `total` are populated, falling back to `running · step N` when the orchestrator streams step-by-step (today's common case — `total` rides as `None` until the orchestrator pre-plans or emits a retroactive total) and to bare `running` for legacy events with no index. `Stop` / `Pause` / `Resume` / `Interrupt + refine` / `Export transcript` / `Promote to pane` are Inspector-side actions (§9.3) — the trace-header focuses on observation so the toolbar stays purely informational.
 
-**Header (Phase 3 — `Pause` / `Kill` / `Promote` deferred to [F-449](https://github.com/forge-ide/forge/issues/504)).** The chip's `step N of M` form is gated on `StepStarted.total` being populated. Today the orchestrator streams steps turn-by-turn so `total` rides as `None` and the UI shows the bare `step N` form; rendering `of M` lights up automatically once the orchestrator pre-plans (or emits a retroactive total). The `Pause` / `Kill` buttons plus `Promote to pane` for background agents remain blocked on F-449. Phase-2 surfaces `Stop agent` via the Inspector only (§9.3).
-
-**Toolbar (Phase 3 — deferred to [F-449](https://github.com/forge-ide/forge/issues/504)).** Elapsed, token in/out, cost, model, tools-used, spawned-by relationship — all in Fira Code 10px separated by `·`. Blocked on backend plumbing for cost/token/tool-use aggregation.
+**Toolbar.** Elapsed (`mm:ss`, live 1Hz; caps at `99:59+` for sessions over 100 minutes; `—` while `started_at` is unknown), model label, tools-used count (declared `SubAgentSpawned.tool_count` for sub-agents, live aggregation of `ToolCallStarted.tool` for the session-root), spawned-by parent name (`↳ orchestrator` style; falls back to a truncated 8-char id when the parent row isn't loaded). All cells render in Fira Code 10px separated by `·`. The toolbar is intentionally NOT an `aria-live` region — the elapsed cell ticks every second and wrapping the toolbar in `aria-live=polite` would re-announce the entire toolbar every tick (a WCAG live-region anti-pattern); cells expose values via `aria-label`s and are read on demand via focus traversal. Token in/out and cost cells are deferred to a follow-up task — they'll join the toolbar once the §9.2 design is reconciled with the existing `live_session_totals` walker.
 
 **Timeline.** Vertical list of steps. Each step:
 - 16px filled dot, colored by state (done/ok, run/warn, queued/text-tertiary, err/error)
@@ -63,9 +61,12 @@ Five sections:
 2. **Allowed tools.** Pills, each with click-to-view policy.
 3. **Allowed paths.** Pills with mono text; glob patterns rendered verbatim.
 4. **Resource usage.** cpu, rss, fd open, net connections — live, 1Hz update.
-5. **Actions (Phase 2).** Single `Stop agent` action — wires through the `stop_background_agent` Tauri command onto `Orchestrator::stop(id)`.
-
-**Actions (Phase 3 — deferred to [F-449](https://github.com/forge-ide/forge/issues/504)).** `Pause agent`, `Interrupt + refine` (opens a refine composer in context), `Export transcript` (JSONL), `Promote to pane` (background only). Blocked on backend primitives for pause, refine, transcript export, and pane promotion.
+5. **Actions.**
+   - `Stop agent` — wires through the `stop_background_agent` Tauri command onto `Orchestrator::stop(id)`. Available on every row.
+   - `Pause` / `Resume` ([F-603](https://github.com/forge-ide/forge/issues/603)) — `session_pause` / `session_resume` IPC. Idempotent on the backend; the button label flips off `Event::SessionPaused` / `SessionResumed` so the UI and the daemon stay in lock-step without an optimistic toggle. Session-root row only.
+   - `Interrupt + refine` ([F-604](https://github.com/forge-ide/forge/issues/604)) — `session_interrupt_and_refine` IPC. Returns a [`RefineHandoff`](../../web/packages/ipc/src/generated/RefineHandoff.ts) carrying the partial assistant text + capture anchors (`captured_at_step_id`, `captured_at_msg_id`), opens a refine composer dialog seeded with the partial text. The composer's `COPY + CLOSE` writes to the clipboard for paste into the session window's chat composer (the AgentMonitor route can't reach the chat composer directly today). Session-root row only.
+   - `Export transcript` ([F-607](https://github.com/forge-ide/forge/issues/607)) — `export_transcript` IPC returns the raw `events.jsonl` bytes (capped at 50 MiB). Triggers a Blob/anchor-click download in the webview as `forge-transcript-<sessionId>.jsonl`. Session-root row only; a future iteration may swap in `@tauri-apps/plugin-dialog`'s `save` dialog once that plugin is allow-listed.
+   - `Promote to pane` — `promote_background_agent` IPC; navigates back to the session window so the promoted agent's transcript is in front of the user. Background-agent + sub-agent rows only.
 
 ### 9.4 States
 
