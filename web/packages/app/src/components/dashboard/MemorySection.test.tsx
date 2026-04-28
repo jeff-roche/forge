@@ -119,6 +119,14 @@ describe('MemorySection (F-602)', () => {
     expect(await findByTestId('memory-section-empty')).toBeTruthy();
   });
 
+  it('empty-state uses canonical mono noun-phrase copy (F-691)', async () => {
+    const { fn } = buildMemoryInvoke({ entries: [], bodies: {} });
+    setInvokeForTesting(fn as never);
+    const { findByTestId } = render(() => <MemorySection workspaceRoot="/work" />);
+    const empty = await findByTestId('memory-section-empty');
+    expect(empty.textContent).toBe('// no agents');
+  });
+
   it('reflects the toggle state from settings_override', async () => {
     const { fn } = buildMemoryInvoke({
       entries: [

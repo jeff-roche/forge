@@ -145,7 +145,7 @@ export const MemorySection: Component<MemorySectionProps> = (props) => {
         when={(entries() ?? []).length > 0}
         fallback={
           <p class="memory-section__empty" data-testid="memory-section-empty">
-            No agent definitions loaded for this workspace.
+            // no agents
           </p>
         }
       >
