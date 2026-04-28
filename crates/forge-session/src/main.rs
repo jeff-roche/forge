@@ -1,9 +1,9 @@
 use anyhow::Result;
-use forge_providers::{ollama::OllamaProvider, MockProvider};
+use forge_providers::{ollama::OllamaProvider, MockProvider, RuntimeProvider, SwappableProvider};
 use forge_session::{
     pid_file::OwnedPidFile,
     provider_spec::{parse_provider_spec, ProviderKind},
-    server::{event_log_path, serve_with_session},
+    server::{event_log_path, serve_with_session, serve_with_session_swappable},
     session::Session,
     socket_path::resolve_socket_path,
 };
@@ -136,11 +136,23 @@ async fn main() -> Result<()> {
                 } else {
                     eprintln!("ollama base_url {}", url);
                 }
-                let provider = Arc::new(OllamaProvider::new(url.as_str(), model));
-                serve_with_session(
+                // F-640: wrap the concrete `OllamaProvider` in an
+                // `Arc<SwappableProvider>` so a dashboard `provider:changed`
+                // event delivered as `IpcMessage::SwitchProvider` over the
+                // UDS can swap the inner between turns without restarting
+                // the session. The same `Arc` is handed to the daemon as
+                // both the active provider and the swap handle, so the
+                // server's `Provider::chat` calls and the swap arm both
+                // operate on the same in-memory holder.
+                let inner = OllamaProvider::new(url.as_str(), model);
+                let swap = Arc::new(SwappableProvider::new(RuntimeProvider::Ollama(Arc::new(
+                    inner,
+                ))));
+                serve_with_session_swappable(
                     &socket_path,
                     session,
-                    provider,
+                    Arc::clone(&swap),
+                    Some(swap),
                     auto_approve,
                     ephemeral,
                     workspace,

@@ -13,7 +13,7 @@ use forge_core::{
     read_since, SessionId, SessionPersistence, SessionState, WorkspaceId,
 };
 use forge_ipc::{HelloAck, IpcEvent, IpcMessage, PROTO_VERSION, SCHEMA_VERSION};
-use forge_providers::{MockProvider, Provider};
+use forge_providers::{MockProvider, Provider, RuntimeProvider, SwappableProvider};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{broadcast, Mutex};
@@ -315,6 +315,7 @@ fn ipc_message_kind(msg: &IpcMessage) -> &'static str {
         IpcMessage::ResumeSession(_) => "ResumeSession",
         IpcMessage::InterruptSession(_) => "InterruptSession",
         IpcMessage::RefineHandoff(_) => "RefineHandoff",
+        IpcMessage::SwitchProvider(_) => "SwitchProvider",
     }
 }
 
@@ -652,6 +653,40 @@ pub async fn serve(path: &Path, auto_approve: bool, ephemeral: bool) -> Result<(
     .await
 }
 
+/// F-640: build a [`RuntimeProvider`] for a `provider_id` slug.
+///
+/// The daemon's `IpcMessage::SwitchProvider` arm calls this to materialise
+/// a swap target without re-entering the dashboard's settings/credential
+/// flow. Phase 1 only constructs `ollama` (keyless, env-driven). Anything
+/// else returns `Err` so the caller can log + skip the swap. Rebuilding
+/// Anthropic / OpenAI / CustomOpenAI live needs settings + keyring
+/// access that is not plumbed into the daemon today and lands with the
+/// Phase 3.5 bootstrap work; integration tests bypass this helper and
+/// drive [`SwappableProvider::swap`] directly with a `RuntimeProvider::Mock`.
+pub fn build_runtime_provider(provider_id: &str) -> Result<RuntimeProvider> {
+    use forge_providers::ollama::OllamaProvider;
+    match provider_id {
+        "ollama" => {
+            let raw = std::env::var("OLLAMA_BASE_URL").ok();
+            let allow_remote_raw = std::env::var(forge_providers::ollama::ALLOW_REMOTE_ENV).ok();
+            let allow_remote =
+                forge_providers::ollama::parse_allow_remote(allow_remote_raw.as_deref());
+            let url = forge_providers::ollama::validate_base_url(raw.as_deref(), allow_remote)?;
+            let model = std::env::var("FORGE_OLLAMA_MODEL")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "mistral".to_string());
+            Ok(RuntimeProvider::Ollama(Arc::new(OllamaProvider::new(
+                url.as_str(),
+                model,
+            ))))
+        }
+        other => anyhow::bail!(
+            "build_runtime_provider: provider id {other:?} not supported by the daemon yet"
+        ),
+    }
+}
+
 /// Timeout for the post-`EADDRINUSE` liveness probe. Short enough that a
 /// genuinely orphaned socket doesn't stall daemon startup, long enough to let
 /// a slow local daemon reply. The probe is `connect(2)` only — no handshake —
@@ -751,6 +786,44 @@ pub async fn serve_with_session<P: Provider + 'static>(
     // `FORGE_ACTIVE_AGENT` env-var indirection: a typed parameter is the
     // only safe way to give different connections in a persistent-mode
     // daemon distinct active agents.
+    active_agent: Option<String>,
+) -> Result<()> {
+    serve_with_session_swappable(
+        path,
+        session,
+        provider,
+        None,
+        auto_approve,
+        ephemeral,
+        workspace,
+        session_id,
+        credentials,
+        active_agent,
+    )
+    .await
+}
+
+/// F-640: variant of [`serve_with_session`] that also takes the
+/// [`SwappableProvider`] handle backing `provider` so the daemon's
+/// `IpcMessage::SwitchProvider` arm can call `swap.swap(next)` between
+/// turns. `swap` is `None` for callers that do not wrap their provider
+/// (every existing test, plus the headless CLI today) — the
+/// `SwitchProvider` arm logs and skips when the handle is absent.
+///
+/// Production callers: pass `Some(swap)` where `provider` is built from
+/// the same `Arc<SwappableProvider>` (see `forge-session::main` Phase 3
+/// wiring).
+#[allow(clippy::too_many_arguments)]
+pub async fn serve_with_session_swappable<P: Provider + 'static>(
+    path: &Path,
+    session: Arc<Session>,
+    provider: Arc<P>,
+    swap: Option<Arc<SwappableProvider>>,
+    auto_approve: bool,
+    ephemeral: bool,
+    workspace: Option<PathBuf>,
+    session_id: Option<String>,
+    credentials: Option<CredentialContext>,
     active_agent: Option<String>,
 ) -> Result<()> {
     if let Some(parent) = path.parent() {
@@ -980,6 +1053,7 @@ pub async fn serve_with_session<P: Provider + 'static>(
             stream,
             session,
             provider,
+            swap.clone(),
             auto_approve,
             true,
             workspace,
@@ -1053,6 +1127,7 @@ pub async fn serve_with_session<P: Provider + 'static>(
                 let agent_runtime = Arc::clone(&agent_runtime);
                 let dispatcher_cache = Arc::clone(&dispatcher_cache);
                 let credentials_for_conn = credentials.clone();
+                let swap_for_conn = swap.clone();
                 tokio::spawn(async move {
                     // F-371: capture session_id for logging *before* the move
                     // into `handle_connection` consumes the Arc.
@@ -1061,6 +1136,7 @@ pub async fn serve_with_session<P: Provider + 'static>(
                         stream,
                         session,
                         provider,
+                        swap_for_conn,
                         auto_approve,
                         false,
                         workspace,
@@ -1135,6 +1211,12 @@ async fn handle_connection<P: Provider + 'static>(
     mut stream: UnixStream,
     session: Arc<Session>,
     provider: Arc<P>,
+    // F-640: optional swap handle backing `provider`. Wired through to
+    // the `IpcMessage::SwitchProvider` arm so the dashboard's
+    // `provider:changed` event takes effect on the next turn. `None` for
+    // tests / callers that drive `SwappableProvider::swap` directly or
+    // do not need mid-session swap; the arm then logs and skips.
+    swap: Option<Arc<SwappableProvider>>,
     auto_approve: bool,
     ephemeral: bool,
     workspace: Arc<String>,
@@ -1798,6 +1880,48 @@ async fn handle_connection<P: Provider + 'static>(
                                 "McpImportResult write failed",
                             );
                             break;
+                        }
+                    }
+
+                    Some(IpcMessage::SwitchProvider(s)) => {
+                        // F-640: dashboard `provider:changed` arrived via the
+                        // session-window listener. Resolve `provider_id` to a
+                        // `RuntimeProvider` and call `swap.swap(next)` so the
+                        // next `run_turn` invocation dispatches to the new
+                        // inner. In-flight turns finish on the previous
+                        // provider — see `SwappableProvider::swap`. When the
+                        // daemon was started without a swap handle (every
+                        // pre-F-640 caller, plus tests that don't exercise
+                        // mid-session swap), log + skip; the handle absence
+                        // is intentional, not an error condition.
+                        let Some(swap) = swap.as_ref() else {
+                            tracing::debug!(
+                                target: "forge_session::server",
+                                session_id = %session_id,
+                                provider_id = %s.provider_id,
+                                "SwitchProvider received but session has no swap handle; skipping",
+                            );
+                            continue;
+                        };
+                        match build_runtime_provider(&s.provider_id) {
+                            Ok(next) => {
+                                swap.swap(next);
+                                tracing::info!(
+                                    target: "forge_session::server",
+                                    session_id = %session_id,
+                                    provider_id = %s.provider_id,
+                                    "active provider swapped",
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    target: "forge_session::server",
+                                    session_id = %session_id,
+                                    provider_id = %s.provider_id,
+                                    error = %e,
+                                    "SwitchProvider: build_runtime_provider failed; swap skipped",
+                                );
+                            }
                         }
                     }
 

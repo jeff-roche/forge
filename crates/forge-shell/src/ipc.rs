@@ -523,6 +523,8 @@ pub fn build_invoke_handler<R: Runtime>() -> Box<dyn Fn(tauri::ipc::Invoke<R>) -
         // F-603: AgentMonitor Pause/Resume buttons.
         session_pause,
         session_resume,
+        // F-640: forward dashboard `provider:changed` to a session's UDS.
+        session_switch_provider,
         // F-604: Composer interrupt-and-refine target.
         session_interrupt_and_refine,
         session_approve_tool,
@@ -2933,6 +2935,36 @@ pub async fn session_resume<R: Runtime>(
     state
         .bridge
         .resume_session(&session_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// F-640: forward the dashboard's `provider:changed` event onto a
+/// session's UDS so the in-process daemon swaps the active provider for
+/// the next turn.
+///
+/// Wired to a `provider:changed` listener installed by every session
+/// window's `SessionWindow.tsx` mount. The shell-side authz mirrors the
+/// other session commands (only the session's own webview may forward
+/// for that session). The daemon coalesces unknown / unsupported ids
+/// server-side (logs + skips); the call still resolves `Ok(())` once
+/// the frame is written, so the listener can fire on every event
+/// without filtering.
+#[tauri::command]
+pub async fn session_switch_provider<R: Runtime>(
+    session_id: String,
+    provider_id: String,
+    webview: Webview<R>,
+    state: State<'_, BridgeState>,
+) -> Result<(), String> {
+    require_window_label(
+        &webview,
+        &format!("session-{session_id}"),
+        "session_switch_provider",
+    )?;
+    state
+        .bridge
+        .switch_provider(&session_id, provider_id)
         .await
         .map_err(|e| e.to_string())
 }

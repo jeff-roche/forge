@@ -180,6 +180,26 @@ export async function sessionPause(sessionId: SessionId): Promise<void> {
 }
 
 /**
+ * F-640: forward the dashboard's `provider:changed` event onto a session's
+ * UDS so the in-process daemon swaps the active provider for the next
+ * turn. In-flight turns finish on the previous provider —
+ * `SwappableProvider::swap` snapshots the inner at chat-call time, so a
+ * mid-stream swap does not affect the running turn.
+ *
+ * `providerId` matches the dashboard's `[providers.active]` shape
+ * (`"ollama"`, `"anthropic"`, `"openai"`, `"custom_openai:<name>"`). Unknown
+ * or currently-unsupported ids are logged + skipped daemon-side; this
+ * call still resolves successfully so listeners can fire on every event
+ * without filtering.
+ */
+export async function sessionSwitchProvider(
+  sessionId: SessionId,
+  providerId: string,
+): Promise<void> {
+  await invoke('session_switch_provider', { sessionId, providerId });
+}
+
+/**
  * F-603: resume a paused session orchestrator. Idempotent — resuming a
  * session that is already running is a no-op and emits no event.
  */

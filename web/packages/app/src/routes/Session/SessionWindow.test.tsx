@@ -177,15 +177,77 @@ describe('SessionWindow', () => {
   it('detaches the session:event listener on unmount', async () => {
     const { unmount } = renderAt('/session/abc123');
     // F-138: both the SessionWindow adapter listener and the StatusBar's
-    // bg-agents listener attach to `session:event`. Wait for both before
-    // asserting unlisten counts so a race on whichever resolves last doesn't
-    // under-count.
-    await waitFor(() =>
-      expect(listenMock).toHaveBeenCalledTimes(2),
-    );
+    // bg-agents listener attach to `session:event`.
+    // F-640: SessionWindow also subscribes to `provider:changed` to
+    // forward dashboard events onto the per-session UDS as
+    // `IpcMessage::SwitchProvider`.
+    // Wait for all three before asserting unlisten counts so a race on
+    // whichever resolves last doesn't under-count.
+    await waitFor(() => expect(listenMock).toHaveBeenCalledTimes(3));
     unmount();
+    await waitFor(() => expect(unlistenMock).toHaveBeenCalledTimes(3));
+  });
+
+  // F-640: dashboard `provider:changed` events must be forwarded to the
+  // per-session daemon as `session_switch_provider` so the daemon arm in
+  // `handle_connection` can call `SwappableProvider::swap` for the next
+  // turn. The listener must filter out malformed payloads (no
+  // provider_id) so a stale emit can't trigger a noisy backend call.
+  it('forwards provider:changed events to session_switch_provider', async () => {
+    let providerChangedHandler:
+      | ((event: { payload: { type: string; provider_id?: string } }) => void)
+      | null = null;
+    listenMock.mockImplementation((channel: string, handler: never) => {
+      if (channel === 'provider:changed') {
+        providerChangedHandler = handler as never;
+      }
+      return Promise.resolve(unlistenMock);
+    });
+    renderAt('/session/abc123');
     await waitFor(() =>
-      expect(unlistenMock).toHaveBeenCalledTimes(2),
+      expect(listenMock).toHaveBeenCalledWith(
+        'provider:changed',
+        expect.any(Function),
+      ),
+    );
+    expect(providerChangedHandler).not.toBeNull();
+    providerChangedHandler!({
+      payload: { type: 'provider_changed', provider_id: 'anthropic' },
+    });
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith('session_switch_provider', {
+        sessionId: 'abc123',
+        providerId: 'anthropic',
+      }),
+    );
+  });
+
+  it('ignores provider:changed events with empty provider_id', async () => {
+    let providerChangedHandler:
+      | ((event: { payload: { type: string; provider_id?: string } }) => void)
+      | null = null;
+    listenMock.mockImplementation((channel: string, handler: never) => {
+      if (channel === 'provider:changed') {
+        providerChangedHandler = handler as never;
+      }
+      return Promise.resolve(unlistenMock);
+    });
+    renderAt('/session/abc123');
+    await waitFor(() =>
+      expect(listenMock).toHaveBeenCalledWith(
+        'provider:changed',
+        expect.any(Function),
+      ),
+    );
+    providerChangedHandler!({ payload: { type: 'provider_changed' } });
+    providerChangedHandler!({
+      payload: { type: 'provider_changed', provider_id: '' },
+    });
+    // Give the microtask queue a tick to drain — no invoke should fire.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      'session_switch_provider',
+      expect.anything(),
     );
   });
 
