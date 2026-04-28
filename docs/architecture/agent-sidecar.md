@@ -1,6 +1,6 @@
 # Agent Sidecar Architecture
 
-> Status: Architecture shipped (F-608, steps 1–9). Default-on flip pending post-soak; the gate `FORGE_AGENT_SIDECAR=1` remains opt-in for now. Resolves the open design questions captured in issue #654. Companion implementation for F-451 (real PIDs into `ResourceMonitor`) — also closed by this work.
+> Status: Architecture shipped and **default-on**. Operators can fall back to the legacy in-process path with `FORGE_AGENT_SIDECAR=0` (or `false` / `off`, case-insensitive); empty / unset / any other value leaves the sidecar path enabled. Resolves the open design questions captured in issue #654. Companion implementation for F-451 (real PIDs into `ResourceMonitor`) — also closed by this work.
 
 ## Overview
 
@@ -194,14 +194,13 @@ Note that `forge_core::Event` is the canonical wire shape on both legs; the side
 
 ### 8. Rollout
 
-**Decision.** Feature-flag via env var `FORGE_AGENT_SIDECAR=1`. The flag flips on at the `BackgroundAgentRegistry` boundary: `start()` either takes the new sidecar path or the legacy in-process path (today's behaviour). Default is **off** for the F-608 PR; flipped to **on** in a follow-up PR after a one-week soak in nightly.
+**Status.** Default-on. The env var `FORGE_AGENT_SIDECAR` is now an **opt-out** flag: empty / unset / `1` / `true` / any non-disable value keeps the sidecar path enabled; `0` / `false` / `off` (case-insensitive) falls back to the legacy in-process path. The flag is read on every `BackgroundAgentRegistry::start()` call so an operator can flip behaviour between session boots without recompiling.
 
-**Rationale.**
-- The unit-test suite for `BackgroundAgentRegistry` (`crates/forge-session/src/bg_agents.rs:415-720`) does not depend on the fork path. Keeping the legacy code path means those tests continue to validate the lifecycle invariants while the sidecar path validates the new ones.
-- Hard-flip in one release would gate every PR on the entire sidecar story being green; the flag lets us land the seam first and the implementation in pieces.
-- The flag lives at one site (the `start` function); we are not threading it through the request loop. No combinatorial test explosion.
+**History.**
+- F-608 PR (#671): sidecar architecture landed gated **off** behind `FORGE_AGENT_SIDECAR=1`, so the legacy in-process path stayed default while we soaked the new code in nightly and CI.
+- This PR (post-soak follow-up): default flipped to **on**, flag re-purposed as opt-out, production daemon (`forge-shell`) wired with a per-session `SidecarSupervisor` so `start_background_agent` actually forks a `forged-agent` child by default.
 
-**Sunset.** Remove the flag and the legacy path one milestone after the on-by-default flip — same disposition as F-565 / F-575.
+**Sunset.** Remove the flag and the legacy in-process path one milestone after the default-on flip lands — same disposition as F-565 / F-575. The `bg_agents.rs:451-720` legacy-path tests will be migrated or retired alongside that removal.
 
 ---
 
@@ -326,10 +325,11 @@ The current `run_turn` (`crates/forge-session/src/orchestrator.rs:165`) takes an
 - **Contract:** Bench drives 1000 mock tokens through both the in-process and sidecar paths, prints p50/p99 deltas.
 - **Acceptance:** Sidecar p99 overhead per token < 50 µs (well within the 50 ms per-turn budget); cold-start p99 < 200 ms. Hand-checked on Linux x86_64 in CI.
 
-### Step 9: Documentation + flip default — shipped (this PR)
+### Step 9: Documentation + flip default — shipped (#671 + post-soak follow-up)
 
 - **Files to touch:** this document; `docs/architecture/overview.md` cross-link; `CHANGELOG.md`.
-- **Acceptance:** A follow-up PR (post-soak) flips `FORGE_AGENT_SIDECAR=1` to default-on by inverting the gate and removes the flag in a subsequent milestone.
+- **Initial PR (#671):** documentation for the architecture as shipped opt-in; `FORGE_AGENT_SIDECAR=1` enables the path, default off.
+- **Post-soak follow-up (this PR):** gate inverted (default-on); `FORGE_AGENT_SIDECAR=0` is the new opt-out; production daemon (`forge-shell::ipc`) wires a per-session `SidecarSupervisor` (UDS dir under `${XDG_RUNTIME_DIR:-$TMPDIR}/forge/sidecars/<session-id>`, `forged-agent` resolved as a sibling of the shell exe). Legacy in-process path retained for one milestone before removal.
 
 ---
 

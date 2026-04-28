@@ -2324,12 +2324,63 @@ fn new_bg_session<R: Runtime>(
     }
 }
 
+/// Resolve the `forged-agent` sidecar binary path. Mirrors
+/// `crates/forge-cli/src/main.rs::find_forged_binary`: prefer a sibling
+/// of the current executable so a packaged Tauri build (which bundles
+/// `forged-agent` next to the shell binary as a Tauri sidecar) wins over
+/// a stale on-PATH copy. Fall back to a `target/<profile>/forged-agent`
+/// candidate for `cargo run`-style dev launches where the shell exe
+/// lives at e.g. `target/debug/forge-shell`. Final fallback is the bare
+/// name `forged-agent`, which lets `Command::new` consult `$PATH`.
+fn resolve_forged_agent_path() -> PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join("forged-agent");
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+    }
+    PathBuf::from("forged-agent")
+}
+
+/// Per-session UDS directory the [`forge_session::sidecar::SidecarSupervisor`]
+/// binds its sockets in. Mirrors the shell-facing per-session UDS scheme
+/// in `crates/forge-session/src/server.rs` (XDG_RUNTIME_DIR with a
+/// system-temp fall-back). The supervisor itself enforces 0o700 on this
+/// directory at first spawn, so a permissive parent does not widen the
+/// child's reachability.
+fn sidecar_socket_dir(session_id: &str) -> PathBuf {
+    let base = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    base.join("forge").join("sidecars").join(session_id)
+}
+
+/// Construct a per-session [`forge_session::sidecar::SidecarSupervisor`]
+/// for production use. The returned supervisor is wired into the
+/// `BackgroundAgentRegistry` so background-agent `start()` calls fork a
+/// real `forged-agent` child (default-on as of the F-608 post-soak
+/// flip; see `docs/architecture/agent-sidecar.md` §8). Operators can
+/// fall back to the legacy in-process path with `FORGE_AGENT_SIDECAR=0`.
+fn build_session_sidecar_supervisor(
+    session_id: &str,
+) -> Arc<forge_session::sidecar::SidecarSupervisor> {
+    let socket_dir = sidecar_socket_dir(session_id);
+    let forged_agent_path = resolve_forged_agent_path();
+    Arc::new(
+        forge_session::sidecar::SidecarSupervisor::new(socket_dir, forged_agent_path)
+            .with_session_id(session_id.to_string()),
+    )
+}
+
 /// Resolve (or lazily construct) the `BgAgentSession` for `session_id`.
 ///
 /// On first invoke per session we:
 ///   1. look up the cached workspace root (populated by `session_hello`),
 ///   2. load agent defs via `forge_agents::load_agents`,
-///   3. build a new `forge_agents::Orchestrator` + `BackgroundAgentRegistry`,
+///   3. build a new `forge_agents::Orchestrator` + `BackgroundAgentRegistry`
+///      with a per-session `SidecarSupervisor` wired in,
 ///   4. spawn the forwarder task and insert the entry into `BgAgentState`.
 ///
 /// Subsequent invokes reuse the cached entry. Production callers never pass
@@ -2352,10 +2403,11 @@ async fn resolve_bg_session<R: Runtime>(
         .map_err(|e| format!("load agent defs: {e}"))?;
 
     let orchestrator = Arc::new(forge_agents::Orchestrator::new());
-    let registry = Arc::new(forge_session::BackgroundAgentRegistry::new(
-        orchestrator,
-        Arc::new(defs),
-    ));
+    let supervisor = build_session_sidecar_supervisor(session_id);
+    let registry = Arc::new(
+        forge_session::BackgroundAgentRegistry::new(orchestrator, Arc::new(defs))
+            .with_sidecar_supervisor(supervisor),
+    );
     let entry = Arc::new(new_bg_session(
         app.clone(),
         session_id.to_string(),

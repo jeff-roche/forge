@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Agent sidecar architecture is now default-on (F-608 follow-up).** The
+  `FORGE_AGENT_SIDECAR` env var changes from an opt-in to an opt-out: empty,
+  unset, `1`, `true`, or any other non-disable value keeps the per-instance
+  `forged-agent` sidecar path enabled; `0`, `false`, or `off` (case-insensitive)
+  falls back to the legacy in-process path. The production daemon
+  (`forge-shell`) now wires a per-session `SidecarSupervisor` into every
+  `BackgroundAgentRegistry`, so `start_background_agent` actually forks a
+  `forged-agent` child by default. Sockets land under
+  `${XDG_RUNTIME_DIR:-$TMPDIR}/forge/sidecars/<session-id>/` and the binary is
+  resolved as a sibling of the shell executable (with PATH fall-back). The
+  legacy in-process path will be removed one milestone after this flip.
+  Architecture: `docs/architecture/agent-sidecar.md` §8.
+
 ### Added
 
 - **Agent sidecar architecture (F-608).** Background agents and sub-agents now
@@ -20,9 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   Measured on Linux x86_64: ~6 µs sidecar transport overhead per token and
   ~1.4 ms cold-start — well inside the 50 ms / 200 ms aspirations. Closes
   F-451: `ResourceMonitor` now receives real child PIDs and `Event::ResourceSample`
-  reaches the AgentMonitor for every background instance. Gated opt-in via
-  `FORGE_AGENT_SIDECAR=1`; default-on flip deferred to a post-soak follow-up.
-  Architecture: `docs/architecture/agent-sidecar.md`.
+  reaches the AgentMonitor for every background instance. Originally gated
+  opt-in via `FORGE_AGENT_SIDECAR=1`; flipped default-on in the post-soak
+  follow-up listed under "Changed" above. Architecture:
+  `docs/architecture/agent-sidecar.md`.
 
 ## [0.2.0] — Phase 2: Full Layout + MCP — 2026-04-26
 

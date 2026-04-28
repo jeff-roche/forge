@@ -41,26 +41,33 @@ use tokio::sync::{broadcast, Mutex};
 use crate::resource_monitor::{default_sampler, ResourceMonitor, DEFAULT_TICK};
 use crate::sidecar::{SidecarHandle, SidecarSupervisor, SpawnParams};
 
-/// Env flag that enables the per-instance sidecar fork path. Read on
-/// every [`BackgroundAgentRegistry::start`] so an operator can flip the
-/// behavior between session boots without recompiling. Any value other
-/// than the empty string and `0` enables the sidecar path; the
-/// architecture doc §"Open questions / Feature-flag" pins the
-/// `FORGE_AGENT_SIDECAR=1` form as the canonical opt-in.
+/// Env flag that **opts out** of the per-instance sidecar fork path.
+/// Read on every [`BackgroundAgentRegistry::start`] so an operator can
+/// flip the behavior between session boots without recompiling.
+///
+/// Default-on as of the F-608 post-soak follow-up: empty / unset / `1` /
+/// `true` all leave the sidecar path enabled; `0` / `false` / `off`
+/// (case-insensitive) disable it and fall back to the legacy in-process
+/// path. The architecture doc §8 owns the rollout history.
 const SIDECAR_ENV_FLAG: &str = "FORGE_AGENT_SIDECAR";
 
-/// Returns true when the `FORGE_AGENT_SIDECAR` env flag is set to a
-/// truthy value. Empty / unset / `0` / `false` all disable the path —
-/// any other value enables it. Mirrors the shape of the existing
-/// `FORGE_FORCE_SHELL_HANDSHAKE` flag the daemon already honors so
-/// operators have one mental model for opt-ins.
+/// Returns true when the sidecar path should be taken for a `start()`
+/// call. Default is enabled; an operator can opt out by setting
+/// `FORGE_AGENT_SIDECAR=0` (or `false` / `off`, case-insensitive).
+/// Mirrors the shape of the existing `FORGE_FORCE_SHELL_HANDSHAKE` flag
+/// the daemon already honors so operators have one mental model for
+/// env-var toggles.
 fn sidecar_flag_enabled() -> bool {
     match std::env::var(SIDECAR_ENV_FLAG) {
         Ok(val) => {
             let v = val.trim();
-            !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
+            // Treat empty as "unset" — same as the absent case below.
+            if v.is_empty() {
+                return true;
+            }
+            !(v == "0" || v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("off"))
         }
-        Err(_) => false,
+        Err(_) => true,
     }
 }
 
@@ -223,11 +230,12 @@ pub struct BackgroundAgentRegistry {
     events: broadcast::Sender<Event>,
     monitor: Arc<ResourceMonitor>,
     /// F-608 step 5: optional per-instance sidecar supervisor. When set
-    /// AND the `FORGE_AGENT_SIDECAR` env flag is enabled at `start()`
-    /// time, the registry forks a `forged-agent` child via this
-    /// supervisor and feeds the child's PID into [`ResourceMonitor`] —
-    /// closing F-451. Unset (default) preserves the legacy in-process
-    /// path with the daemon-PID no-op guard on the monitor.
+    /// AND the `FORGE_AGENT_SIDECAR` env flag has not been disabled at
+    /// `start()` time, the registry forks a `forged-agent` child via
+    /// this supervisor and feeds the child's PID into [`ResourceMonitor`] —
+    /// closing F-451. Unset preserves the legacy in-process path with
+    /// the daemon-PID no-op guard on the monitor (the same fall-back
+    /// kicks in when an operator sets `FORGE_AGENT_SIDECAR=0`).
     sidecar_supervisor: Option<Arc<SidecarSupervisor>>,
     /// F-608 step 5: live sidecar handles, keyed by instance id. Held
     /// here so the `SidecarHandle::Drop` impl does not fire (and SIGKILL
@@ -305,8 +313,9 @@ impl BackgroundAgentRegistry {
         }
     }
 
-    /// F-608 step 5: bind a [`SidecarSupervisor`] used when the
-    /// `FORGE_AGENT_SIDECAR` env flag is enabled at `start()` time.
+    /// F-608 step 5: bind a [`SidecarSupervisor`] used whenever the
+    /// `FORGE_AGENT_SIDECAR` env flag has not been disabled at
+    /// `start()` time (default = enabled).
     ///
     /// Returns `self` so the caller can fluent-chain after `new` /
     /// `with_monitor`. The flag check happens on every `start()` call
@@ -412,15 +421,18 @@ impl BackgroundAgentRegistry {
             "started",
         );
 
-        // F-608 step 5 / F-451: when the sidecar flag is on AND a
-        // supervisor is wired, fork the per-instance `forged-agent`
-        // child and feed its real PID into the resource monitor — the
-        // daemon-PID no-op guard then steps aside and per-instance
-        // `ResourceSample` events begin flowing on the registry bus
-        // (closing F-451). On supervisor spawn failure we fall through
-        // to the legacy daemon-PID path so a misconfigured operator
-        // still gets the lifecycle events; the failure is logged for
-        // triage.
+        // F-608 step 5 / F-451: by default (and on every start unless
+        // `FORGE_AGENT_SIDECAR=0` is set) we fork the per-instance
+        // `forged-agent` child and feed its real PID into the resource
+        // monitor — the daemon-PID no-op guard then steps aside and
+        // per-instance `ResourceSample` events begin flowing on the
+        // registry bus (closing F-451). On supervisor spawn failure we
+        // fall through to the legacy daemon-PID path so a misconfigured
+        // operator still gets the lifecycle events; the failure is
+        // logged for triage. An explicit `FORGE_AGENT_SIDECAR=0` opt-out
+        // also takes the legacy path (used by tests and by operators
+        // running an environment where the sidecar binary cannot be
+        // launched).
         let sidecar_pid = if sidecar_flag_enabled() {
             match &self.sidecar_supervisor {
                 Some(supervisor) => {
@@ -893,6 +905,50 @@ mod tests {
             "registry event bus must surface ResourceSample when monitor is \
              tracking a real per-instance PID"
         );
+    }
+
+    /// Pin the inverted flag semantics shipped with the F-608 default-on
+    /// flip: empty / unset / `1` / `true` / any non-disable value keeps
+    /// the sidecar path enabled; only `0` / `false` / `off`
+    /// (case-insensitive) disable it. The test is `#[ignore]` by default
+    /// because it mutates a process-global env var — `cargo test --
+    /// --include-ignored sidecar_flag_semantics` runs it explicitly.
+    /// Inverse-semantics regressions still surface via the integration
+    /// test in `tests/bg_agents_sidecar.rs`, which is the load-bearing
+    /// production-path coverage.
+    #[test]
+    #[ignore = "mutates process-global FORGE_AGENT_SIDECAR; run with --include-ignored"]
+    fn sidecar_flag_semantics() {
+        let prior = std::env::var(SIDECAR_ENV_FLAG).ok();
+        struct Guard(Option<String>);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(v) => std::env::set_var(SIDECAR_ENV_FLAG, v),
+                    None => std::env::remove_var(SIDECAR_ENV_FLAG),
+                }
+            }
+        }
+        let _g = Guard(prior);
+
+        std::env::remove_var(SIDECAR_ENV_FLAG);
+        assert!(sidecar_flag_enabled(), "unset must default to enabled");
+
+        for off in ["0", "false", "FALSE", "False", "off", "OFF"] {
+            std::env::set_var(SIDECAR_ENV_FLAG, off);
+            assert!(
+                !sidecar_flag_enabled(),
+                "{off} must opt out of the sidecar path"
+            );
+        }
+
+        for on in ["", "1", "true", "TRUE", "yes", "anything-else"] {
+            std::env::set_var(SIDECAR_ENV_FLAG, on);
+            assert!(
+                sidecar_flag_enabled(),
+                "{on:?} must keep the sidecar path enabled (default-on)"
+            );
+        }
     }
 
     #[tokio::test]
