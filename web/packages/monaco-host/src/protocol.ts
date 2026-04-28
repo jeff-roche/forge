@@ -63,6 +63,19 @@ export type EditorOutboundMessage =
       /** LSP notification from the client (fire-and-forget). */
       kind: 'client.notification';
       payload: unknown;
+    }
+  | {
+      /**
+       * F-687: keystroke forwarded from the iframe so the parent can
+       * react to keys (e.g. Escape) that fire while focus is trapped
+       * inside the iframe and thus never reach the parent's
+       * window-level `keydown` listener. Only the `key` is sent — we
+       * deliberately do not forward modifier state or the full
+       * KeyboardEvent shape; consumers that need richer keystroke
+       * routing should extend this kind explicitly.
+       */
+      kind: 'keydown';
+      key: string;
     };
 
 /** Minimal editor surface we need. Real Monaco satisfies this via an adapter. */
