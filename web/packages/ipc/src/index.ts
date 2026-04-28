@@ -24,6 +24,7 @@ export type { PaneType } from './generated/PaneType';
 export type { PersistentApprovalEntry } from './generated/PersistentApprovalEntry';
 export type { ProviderId } from './generated/ProviderId';
 export type { McpId } from './generated/McpId';
+export type { RefineHandoff } from './generated/RefineHandoff';
 export type { RerunVariant } from './generated/RerunVariant';
 export type { RosterEntry } from './generated/RosterEntry';
 export type { RosterScope } from './generated/RosterScope';
