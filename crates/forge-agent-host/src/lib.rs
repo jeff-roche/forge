@@ -46,7 +46,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use forge_core::{Event, EventSink, MessageId, ProviderId};
 use forge_ipc::sidecar::{
-    SidecarAgentDef, SidecarCrashed, SidecarEvent, SidecarHeartbeat, SidecarHelloAck,
+    CrashDump, SidecarAgentDef, SidecarCrashed, SidecarEvent, SidecarHeartbeat, SidecarHelloAck,
     SidecarMessage, SidecarProviderSpec, SidecarRunTurn, SIDECAR_SCHEMA_VERSION,
 };
 use tokio::io::{ReadHalf, WriteHalf};
@@ -64,10 +64,17 @@ pub struct AgentArgs {
     /// Logical instance identifier the daemon assigned. Round-tripped
     /// through tracing fields and the `Hello` frame.
     pub instance_id: String,
+    /// Session id the spawning daemon belongs to. Used for the on-disk
+    /// crash-dump path
+    /// (`<XDG_DATA_HOME or ~/.local/share>/forge/crashes/<session-id>/...`).
+    /// Optional for back-compat — older supervisors that never pass
+    /// `--session-id` get crash dumps under a `default` bucket. F-608
+    /// step 7 lands the flag; step 5+ supervisors will start passing it.
+    pub session_id: String,
 }
 
 impl AgentArgs {
-    /// Parse `forged-agent --socket <path> --instance-id <id>`.
+    /// Parse `forged-agent --socket <path> --instance-id <id> [--session-id <sess>]`.
     ///
     /// Hand-rolled rather than `clap` because the sidecar boots on the
     /// time-to-first-token path; the architecture doc §1 calls out the
@@ -79,6 +86,7 @@ impl AgentArgs {
     {
         let mut socket: Option<PathBuf> = None;
         let mut instance_id: Option<String> = None;
+        let mut session_id: Option<String> = None;
         let mut iter = args.into_iter().map(Into::into);
         // Skip argv[0] (program name) — `std::env::args` includes it.
         let _ = iter.next();
@@ -92,6 +100,9 @@ impl AgentArgs {
                 "--instance-id" => {
                     instance_id = Some(iter.next().context("--instance-id requires a value")?);
                 }
+                "--session-id" => {
+                    session_id = Some(iter.next().context("--session-id requires a value")?);
+                }
                 other => {
                     anyhow::bail!("unknown argument: {other}");
                 }
@@ -100,6 +111,7 @@ impl AgentArgs {
         Ok(Self {
             socket: socket.context("--socket is required")?,
             instance_id: instance_id.context("--instance-id is required")?,
+            session_id: session_id.unwrap_or_else(|| "default".to_string()),
         })
     }
 }
@@ -114,19 +126,37 @@ type CrashSink = Arc<Mutex<Option<Vec<u8>>>>;
 
 static CRASH_SINK: OnceLock<CrashSink> = OnceLock::new();
 
+/// Identity carried into the panic hook so the on-disk dump can be
+/// attributed to the right session + instance. Populated by
+/// [`install_panic_hook`].
+#[derive(Debug, Clone)]
+pub struct CrashIdentity {
+    pub instance_id: String,
+    pub session_id: String,
+}
+
 /// Install the panic hook. Idempotent — the underlying `OnceLock` only
 /// stores the first sink, so the integration test (which spawns the
 /// binary fresh per-test) gets a clean install every process.
 ///
-/// The hook serializes a [`SidecarMessage::Crashed`] payload into the
-/// shared sink. The main loop's shutdown path drains the sink onto the
-/// wire before exit. We deliberately do **not** write to the socket from
-/// inside the hook itself: the hook may run on any thread (including
-/// blocking ones with no tokio runtime context), and a blocking write
-/// inside `panic` invites deadlocks. Best-effort delivery is fine — the
-/// supervisor falls back to EOF + non-zero exit detection per
-/// architecture doc §10.
-pub fn install_panic_hook() -> CrashSink {
+/// Two side-effects per panic:
+///   1. **Defensive (file-on-disk).** Persist a [`CrashDump`] to
+///      `<XDG_DATA_HOME or $HOME/.local/share>/forge/crashes/<session-id>/<instance-id>-<unix-ts>.json`,
+///      mode-`0o700` directory, written from inside the hook with
+///      `std::fs` (no tokio dependency). Survives even when the IPC
+///      pipe to the daemon is broken.
+///   2. **Cooperative (IPC).** Serialize a [`SidecarMessage::Crashed`]
+///      payload into the shared sink. The main loop's shutdown path
+///      drains the sink onto the wire before exit. We deliberately do
+///      **not** write to the socket from inside the hook itself: the
+///      hook may run on any thread (including blocking ones with no
+///      tokio runtime context), and a blocking write inside `panic`
+///      invites deadlocks.
+///
+/// Both paths are best-effort — a hard segfault never produces either
+/// frame. The supervisor falls back to EOF + non-zero exit detection
+/// per architecture doc §10.
+pub fn install_panic_hook(identity: CrashIdentity) -> CrashSink {
     let sink: CrashSink = CRASH_SINK
         .get_or_init(|| Arc::new(Mutex::new(None)))
         .clone();
@@ -149,6 +179,26 @@ pub fn install_panic_hook() -> CrashSink {
             std::backtrace::BacktraceStatus::Captured => Some(backtrace.to_string()),
             _ => None,
         };
+
+        // 1. Defensive: persist the dump to the crashes dir. Best-
+        //    effort — a write failure here only loses the file path,
+        //    not the IPC path below.
+        let captured_at = Utc::now();
+        let dump = CrashDump {
+            instance_id: identity.instance_id.clone(),
+            session_id: identity.session_id.clone(),
+            panic_message: panic_message.clone(),
+            backtrace: backtrace_str.clone(),
+            captured_at,
+        };
+        if let Err(e) = write_crash_dump_to_disk(&dump) {
+            // Use eprintln (not tracing) — the panic hook may run with
+            // no tracing subscriber attached and we still want CI logs
+            // to surface the failure.
+            eprintln!("forged-agent: failed to persist crash dump: {e}");
+        }
+
+        // 2. Cooperative: queue the IPC frame for drain-on-shutdown.
         let frame = SidecarMessage::Crashed(SidecarCrashed {
             panic_message,
             backtrace: backtrace_str,
@@ -165,6 +215,62 @@ pub fn install_panic_hook() -> CrashSink {
         prev(info);
     }));
     sink
+}
+
+/// Resolve the crash-dump base directory, honoring (in priority order)
+/// `$FORGE_CRASH_DIR`, `$XDG_DATA_HOME/forge/crashes`, then
+/// `$HOME/.local/share/forge/crashes`. Mirrors
+/// `forge_session::sidecar::crashes::crash_dir_with` — kept inline here
+/// so the sidecar doesn't pull `forge-session` (with its persistence /
+/// MCP graph) into its compile closure.
+fn crash_base_dir() -> Result<PathBuf> {
+    let forge_override = std::env::var("FORGE_CRASH_DIR").ok();
+    if let Some(s) = forge_override.filter(|s| !s.is_empty()) {
+        return Ok(PathBuf::from(s));
+    }
+    let xdg = std::env::var("XDG_DATA_HOME").ok();
+    if let Some(s) = xdg.filter(|s| !s.is_empty()) {
+        return Ok(PathBuf::from(s).join("forge").join("crashes"));
+    }
+    let home = dirs::home_dir().ok_or_else(|| {
+        anyhow::anyhow!(
+            "cannot resolve crash directory: $FORGE_CRASH_DIR / $XDG_DATA_HOME / $HOME all unset"
+        )
+    })?;
+    Ok(home.join(".local/share/forge/crashes"))
+}
+
+/// Write `dump` to disk under the resolved crash dir. Synchronous —
+/// this runs from inside the panic hook on any thread, with no tokio
+/// runtime guaranteed to be available.
+fn write_crash_dump_to_disk(dump: &CrashDump) -> Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+
+    let base = crash_base_dir()?;
+    let dir = base.join(&dump.session_id);
+    // 0o700 on every component we have to create. An existing parent
+    // we leave untouched — a shared `~/.local/share` is a normal user
+    // setup and we don't want to fight the operator's umask.
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&dir)
+        .with_context(|| format!("creating crash dir {}", dir.display()))?;
+    // Defensive: re-tighten the leaf dir we just created in case it
+    // pre-existed with a looser mode (DirBuilder.recursive doesn't
+    // chmod existing components).
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+
+    // Filename: `<instance-id>-<unix-ts>.json`. The architecture doc
+    // §"Step 7" calls out instance_id + timestamp as the collision-
+    // proof discriminator.
+    let ts = dump.captured_at.timestamp();
+    let path = dir.join(format!("{}-{}.json", dump.instance_id, ts));
+    let bytes = serde_json::to_vec_pretty(dump).context("serialize crash dump")?;
+    std::fs::write(&path, &bytes)
+        .with_context(|| format!("writing crash dump {}", path.display()))?;
+    Ok(())
 }
 
 /// Drain any queued crash payload into a single [`SidecarMessage::Crashed`]
@@ -394,6 +500,16 @@ fn spawn_heartbeat(
 async fn handle_run_turn_stub(events: &dyn EventSink, turn: SidecarRunTurn) -> Result<()> {
     use forge_core::{StepId, StepKind, StepOutcome};
 
+    // F-608 step 7: test-only panic injection. The acceptance test
+    // sets `FORGE_TEST_PANIC_ON_RUNTURN=<msg>` to drive the panic
+    // hook → on-disk crash-dump path end-to-end. The variable is
+    // undocumented for end users; only the test harness uses it.
+    if let Ok(msg) = std::env::var("FORGE_TEST_PANIC_ON_RUNTURN") {
+        if !msg.is_empty() {
+            panic!("{msg}");
+        }
+    }
+
     let now = Utc::now();
     let assistant_id = MessageId::new();
     let step_id = StepId::new();
@@ -541,9 +657,13 @@ async fn dispatch_loop(
 /// Library-level entry so the integration test can drive the same body
 /// without spawning the binary.
 pub async fn run(args: AgentArgs) -> Result<()> {
-    let crash_sink = install_panic_hook();
+    let crash_sink = install_panic_hook(CrashIdentity {
+        instance_id: args.instance_id.clone(),
+        session_id: args.session_id.clone(),
+    });
     info!(
         instance_id = %args.instance_id,
+        session_id = %args.session_id,
         socket = %args.socket.display(),
         "forged-agent starting"
     );
@@ -682,6 +802,23 @@ mod tests {
         .unwrap();
         assert_eq!(parsed.socket, PathBuf::from("/tmp/foo.sock"));
         assert_eq!(parsed.instance_id, "inst-1");
+        // F-608 step 7: omitted --session-id falls back to "default".
+        assert_eq!(parsed.session_id, "default");
+    }
+
+    #[test]
+    fn parse_args_with_session_id() {
+        let parsed = AgentArgs::parse_from([
+            "forged-agent",
+            "--socket",
+            "/tmp/foo.sock",
+            "--instance-id",
+            "inst-1",
+            "--session-id",
+            "sess-xyz",
+        ])
+        .unwrap();
+        assert_eq!(parsed.session_id, "sess-xyz");
     }
 
     #[test]

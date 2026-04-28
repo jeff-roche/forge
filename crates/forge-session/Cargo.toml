@@ -190,3 +190,10 @@ path = "tests/sidecar_supervisor.rs"
 [[test]]
 name = "bg_agents_sidecar"
 path = "tests/bg_agents_sidecar.rs"
+
+# F-608 step 7: panic-hook crash-dump writer + reader. Drives the
+# `forged-agent` binary into a panic and asserts the on-disk dump
+# lands at the architected path with the panic message intact.
+[[test]]
+name = "sidecar_crash_dump"
+path = "tests/sidecar_crash_dump.rs"
