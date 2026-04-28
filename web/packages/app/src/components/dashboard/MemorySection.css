@@ -108,10 +108,20 @@
   color: var(--color-text-secondary);
 }
 
+/* Error surface (F-685) — per docs/design/ai-patterns.md §"Interaction
+ * states": ember-400 border on the affected surface plus a persistent toast
+ * (the toast is dispatched from MemorySection.tsx). The padded, tinted
+ * background is what makes the border read as the affected surface rather
+ * than a stray accent stripe; the toast carries the verbatim identifier so
+ * the failure remains visible if the user scrolls away. */
 .memory-section__error {
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--color-danger, var(--color-warning));
+  border-left: 3px solid var(--color-ember-400);
+  background: rgba(255, 74, 18, 0.06);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-xs);
 }
 
 .memory-section__empty {
