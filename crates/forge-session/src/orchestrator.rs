@@ -7,13 +7,15 @@ use chrono::Utc;
 use forge_core::{
     apply_superseded,
     credentials::Credentials,
-    ids::{MessageId, ProviderId, StepId, ToolCallId},
+    ids::{AgentInstanceId, MessageId, ProviderId, StepId, ToolCallId},
     read_since, ApprovalScope, ApprovalSource, Event, EventSink, RerunVariant, StepKind,
     StepOutcome,
 };
+use forge_ipc::sidecar::{SecretBytes, SidecarCredentials, SidecarMessage};
 use forge_providers::{ChatBlock, ChatChunk, ChatMessage, ChatRequest, ChatRole, Provider};
 use futures::StreamExt;
-use tokio::sync::{oneshot, Mutex};
+use secrecy::ExposeSecret;
+use tokio::sync::{mpsc, oneshot, Mutex};
 
 /// F-587: per-turn credential pull binding.
 ///
@@ -39,6 +41,44 @@ use tokio::sync::{oneshot, Mutex};
 pub struct CredentialContext {
     pub store: Arc<dyn Credentials>,
     pub provider_id: String,
+    /// F-608 step 6: optional daemon → sidecar credential push hook.
+    ///
+    /// When set, the orchestrator's per-turn pull frames the just-
+    /// pulled credential as a [`SidecarMessage::Credentials`] and
+    /// sends it on the supplied [`mpsc::Sender`] **before** the request
+    /// loop opens. The hook is wired by the supervisor / bg-agent glue
+    /// when `FORGE_AGENT_SIDECAR=1` is active; in-process callers
+    /// (today's default) leave it `None` and the function never frames
+    /// the secret onto a wire.
+    ///
+    /// Push errors are non-fatal: a closed channel means the supervisor
+    /// has wound the sidecar down, in which case the upcoming
+    /// `RunTurn` would also be discarded — we log at warn and continue
+    /// rather than fail the turn pre-emptively.
+    pub sidecar_push: Option<SidecarCredentialPush>,
+}
+
+/// F-608 step 6: handle for pushing a credential frame onto a per-
+/// instance sidecar.
+///
+/// Holds an `instance_id` (for the "pushed credential" trace emission)
+/// and the supervisor's outbound command channel. Cheap to clone; the
+/// channel is bounded, so a backpressured sidecar surfaces as `Err` from
+/// `try_send` in the push path rather than blocking the orchestrator.
+#[derive(Clone)]
+pub struct SidecarCredentialPush {
+    pub instance_id: AgentInstanceId,
+    pub command_tx: mpsc::Sender<SidecarMessage>,
+}
+
+impl std::fmt::Debug for SidecarCredentialPush {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Channel handle is uninteresting; the instance_id is the
+        // useful diagnostic field.
+        f.debug_struct("SidecarCredentialPush")
+            .field("instance_id", &self.instance_id)
+            .finish_non_exhaustive()
+    }
 }
 
 impl std::fmt::Debug for CredentialContext {
@@ -48,6 +88,7 @@ impl std::fmt::Debug for CredentialContext {
         // by contract.
         f.debug_struct("CredentialContext")
             .field("provider_id", &self.provider_id)
+            .field("sidecar_push", &self.sidecar_push)
             .finish_non_exhaustive()
     }
 }
@@ -75,6 +116,52 @@ async fn pull_active_credential(ctx: &Option<CredentialContext>) -> Result<()> {
             hit = pulled.is_some(),
             "credential pull",
         );
+
+        // F-608 step 6: when a sidecar push hook is wired AND the
+        // credential pull hit, frame the value as a `Credentials` IPC
+        // message and forward it to the per-instance sidecar before the
+        // orchestrator's caller emits `RunTurn`. The provider's
+        // per-request auth shape on the sidecar side then has the value
+        // staged. We deliberately do NOT push on the miss path —
+        // staging an empty credential would teach the sidecar a bogus
+        // "I have a key" signal for a provider that's actually keyless.
+        //
+        // Security: `expose_secret()` is the only call site that
+        // touches the cleartext bytes; the result is moved straight
+        // into `SecretBytes` (whose `Debug`/`Display` redact) and never
+        // bound to a `&str` we could accidentally log. The trace
+        // emission below carries `provider_id` + `instance_id` only —
+        // never the byte count, never the value.
+        if let (Some(secret), Some(push)) = (pulled.as_ref(), ctx.sidecar_push.as_ref()) {
+            let frame = SidecarMessage::Credentials(SidecarCredentials {
+                provider_id: ProviderId::from_string(ctx.provider_id.clone()),
+                secret: SecretBytes::new(secret.expose_secret().as_bytes().to_vec()),
+            });
+            match push.command_tx.send(frame).await {
+                Ok(()) => {
+                    tracing::trace!(
+                        target: "forge_session::orchestrator::credentials",
+                        provider_id = %ctx.provider_id,
+                        instance_id = %push.instance_id,
+                        "pushed credential",
+                    );
+                }
+                Err(_) => {
+                    // Closed channel = supervisor has wound the sidecar
+                    // down. The pending `RunTurn` will land on the same
+                    // closed channel; surface here as a warn rather than
+                    // failing the turn pre-emptively so the caller's own
+                    // error path (if any) drives the lifecycle.
+                    tracing::warn!(
+                        target: "forge_session::orchestrator::credentials",
+                        provider_id = %ctx.provider_id,
+                        instance_id = %push.instance_id,
+                        "sidecar credential push: channel closed",
+                    );
+                }
+            }
+        }
+
         drop(pulled);
     }
     Ok(())

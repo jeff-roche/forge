@@ -42,6 +42,11 @@ chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
 forge-core = { path = "../forge-core" }
 forge-ipc = { path = "../forge-ipc" }
+# F-608 step 6: sidecar-side credential stash. Inbound `Credentials`
+# frames are unwrapped from `SecretBytes` straight into `SecretString`
+# (zeroize-on-drop, redacted `Debug`) so the credential value never
+# exists in a cleartext-debug-printable form past the receive boundary.
+secrecy = "0.10"
 serde_json = "1"
 tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "sync", "time", "signal"] }
 tracing = "0.1"
@@ -56,3 +61,11 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time",
 [[test]]
 name = "forged_agent_lifecycle"
 path = "tests/forged_agent_lifecycle.rs"
+
+# F-608 step 6: receive `Credentials`, stash in `SecretString`, no log
+# leakage at any tracing level. Drives a real `forged-agent` child
+# under `FORGE_LOG=trace` and audits captured stderr for the test
+# secret.
+[[test]]
+name = "forged_agent_credentials"
+path = "tests/forged_agent_credentials.rs"
