@@ -118,7 +118,13 @@ pub const SIDECAR_PROTO_VERSION: u32 = 1;
 /// * `2` — F-608 step 6: `Credentials.secret_handle: String` →
 ///   `Credentials.secret: SecretBytes` (`Vec<u8>` opaque, redacted
 ///   `Debug`/`Display`).
-pub const SIDECAR_SCHEMA_VERSION: u32 = 2;
+/// * `3` — F-676: split the overloaded `Hello` discriminator into
+///   `Hello` (sidecar → daemon handshake) and `DaemonHello` (daemon →
+///   sidecar metadata follow-up). The daemon and sidecar binaries ship
+///   together, so this is a co-deployed bump; mixing a pre-`3`
+///   supervisor with a `3`-aware sidecar (or vice versa) is unsupported
+///   and surfaces as a deserialization error on the unknown variant.
+pub const SIDECAR_SCHEMA_VERSION: u32 = 3;
 
 /// Bidirectional message exchanged between `forged` and `forged-agent`.
 ///
@@ -129,10 +135,17 @@ pub const SIDECAR_SCHEMA_VERSION: u32 = 2;
 #[serde(tag = "t")]
 pub enum SidecarMessage {
     // ── daemon → sidecar ──────────────────────────────────────────────────
-    /// First frame after the sidecar connects. Carries everything the
-    /// child needs to initialize its provider loop without re-reading
-    /// daemon-owned state from disk.
-    Hello(SidecarHello),
+    /// Daemon → sidecar metadata frame sent immediately after the
+    /// supervisor's [`SidecarMessage::HelloAck`]. Carries the agent
+    /// definition, allowed paths, workspace path, provider spec,
+    /// sandbox level, and telemetry endpoint the run-turn body needs to
+    /// initialize without re-reading daemon-owned state from disk.
+    ///
+    /// Split from [`SidecarMessage::Hello`] in F-676 (schema_version 3)
+    /// so the discriminator no longer encodes two semantically distinct
+    /// frames. The receive side validates `proto` and `instance_id`
+    /// against the values established at handshake time.
+    DaemonHello(SidecarHello),
 
     /// Run one turn of the request loop. The sidecar streams events back
     /// as [`SidecarMessage::Event`] frames and emits no reply; the
@@ -164,7 +177,15 @@ pub enum SidecarMessage {
     Shutdown(SidecarShutdown),
 
     // ── sidecar → daemon ──────────────────────────────────────────────────
-    /// Acknowledges [`SidecarMessage::Hello`] and reports the child's
+    /// Initial handshake frame the *child* sends on connect to advertise
+    /// its `instance_id` and `proto` version. The supervisor validates
+    /// both before responding with [`SidecarMessage::HelloAck`]. The
+    /// daemon-initiated metadata follow-up is
+    /// [`SidecarMessage::DaemonHello`]; F-676 split the two so this
+    /// discriminator carries the handshake direction unambiguously.
+    Hello(SidecarHello),
+
+    /// Acknowledges [`SidecarMessage::Hello`] and reports the daemon's
     /// PID. The supervisor pins this `pid` into `ResourceMonitor::track`
     /// (closing F-451) and uses `started_at` to time-stamp restart
     /// counters.
@@ -195,8 +216,11 @@ pub enum SidecarMessage {
 
 // ── daemon → sidecar payloads ────────────────────────────────────────────
 
-/// Initial sidecar → daemon handshake payload (and, in step-4 of F-608,
-/// the daemon → sidecar follow-up that forwards the spawn parameters).
+/// Handshake / metadata payload shared by [`SidecarMessage::Hello`]
+/// (sidecar → daemon, on connect) and [`SidecarMessage::DaemonHello`]
+/// (daemon → sidecar, after `HelloAck`). The runtime fields are
+/// identical; F-676 splits the *discriminator* so call sites can tell
+/// the two flows apart without inspecting context.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SidecarHello {
     pub proto: u32,
@@ -452,6 +476,28 @@ mod tests {
                 telemetry_endpoint: Some("http://otel:4317".into()),
                 schema_version: SIDECAR_SCHEMA_VERSION,
             }),
+            SidecarMessage::DaemonHello(SidecarHello {
+                proto: SIDECAR_PROTO_VERSION,
+                instance_id: AgentInstanceId::from_string("inst-3".into()),
+                agent_def: SidecarAgentDef {
+                    name: "daemon-payload".into(),
+                    description: Some("daemon → sidecar metadata".into()),
+                    body: "## Prompt".into(),
+                    allowed_paths: vec!["/workspace".into()],
+                    isolation: "process".into(),
+                    memory_enabled: true,
+                },
+                allowed_paths: vec!["/workspace".into()],
+                workspace_path: "/workspace".into(),
+                provider_spec: SidecarProviderSpec {
+                    kind: "ollama".into(),
+                    model: "llama3.1:8b".into(),
+                    base_url: None,
+                },
+                sandbox_level: SidecarSandboxLevel::Level1,
+                telemetry_endpoint: Some("http://otel:4317".into()),
+                schema_version: SIDECAR_SCHEMA_VERSION,
+            }),
             SidecarMessage::RunTurn(SidecarRunTurn {
                 turn_id: "turn-1".into(),
                 msg_id: MessageId::from_string("msg-1".into()),
@@ -516,6 +562,59 @@ mod tests {
             let got_json = serde_json::to_string(&got).unwrap();
             assert_eq!(sent_json, got_json, "round-trip mismatch");
         }
+    }
+
+    /// F-676: `Hello` and `DaemonHello` carry the same payload shape
+    /// but must serialize with distinct `t` tags so the receive side can
+    /// disambiguate the handshake-direction frame from the daemon-side
+    /// metadata follow-up. Pin both tags here so a future enum-rename
+    /// surfaces in CI.
+    #[test]
+    fn hello_and_daemon_hello_use_distinct_wire_tags() {
+        let payload = SidecarHello {
+            proto: SIDECAR_PROTO_VERSION,
+            instance_id: AgentInstanceId::from_string("inst-x".into()),
+            agent_def: SidecarAgentDef {
+                name: "n".into(),
+                description: None,
+                body: String::new(),
+                allowed_paths: vec![],
+                isolation: "process".into(),
+                memory_enabled: false,
+            },
+            allowed_paths: vec![],
+            workspace_path: "/workspace".into(),
+            provider_spec: SidecarProviderSpec {
+                kind: "ollama".into(),
+                model: "llama3.1:8b".into(),
+                base_url: None,
+            },
+            sandbox_level: SidecarSandboxLevel::Level1,
+            telemetry_endpoint: None,
+            schema_version: SIDECAR_SCHEMA_VERSION,
+        };
+
+        let hello_v: serde_json::Value = serde_json::from_slice(
+            &serde_json::to_vec(&SidecarMessage::Hello(payload.clone())).unwrap(),
+        )
+        .unwrap();
+        let daemon_v: serde_json::Value = serde_json::from_slice(
+            &serde_json::to_vec(&SidecarMessage::DaemonHello(payload.clone())).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(hello_v.get("t").and_then(|v| v.as_str()), Some("Hello"));
+        assert_eq!(
+            daemon_v.get("t").and_then(|v| v.as_str()),
+            Some("DaemonHello")
+        );
+
+        // Round-trip back to the typed enum: the `t` tag must drive the
+        // arm, not the payload shape.
+        let hello_back: SidecarMessage = serde_json::from_value(hello_v).unwrap();
+        let daemon_back: SidecarMessage = serde_json::from_value(daemon_v).unwrap();
+        assert!(matches!(hello_back, SidecarMessage::Hello(_)));
+        assert!(matches!(daemon_back, SidecarMessage::DaemonHello(_)));
     }
 
     /// `CrashDump` is the on-disk dump shape persisted by the sidecar's

@@ -48,7 +48,8 @@ use chrono::Utc;
 use forge_core::{Event, EventSink, MessageId, ProviderId};
 use forge_ipc::sidecar::{
     CrashDump, SidecarAgentDef, SidecarCrashed, SidecarCredentials, SidecarEvent, SidecarHeartbeat,
-    SidecarHelloAck, SidecarMessage, SidecarProviderSpec, SidecarRunTurn, SIDECAR_SCHEMA_VERSION,
+    SidecarHelloAck, SidecarMessage, SidecarProviderSpec, SidecarRunTurn, SIDECAR_PROTO_VERSION,
+    SIDECAR_SCHEMA_VERSION,
 };
 use secrecy::SecretString;
 use tokio::io::{ReadHalf, WriteHalf};
@@ -769,21 +770,49 @@ async fn dispatch_loop(
                     grace_ms: s.grace_ms,
                 });
             }
-            // F-608 step 5: the supervisor forwards the daemon-side
-            // `Hello` payload as a follow-up frame after the
-            // handshake. Capture the agent_def / provider_spec /
-            // workspace path so the (still-stub) RunTurn handler — and
-            // step 6's real provider body — can seed itself from the
-            // metadata the daemon already had on hand. Validate the
-            // `instance_id` against argv to catch a confused supervisor
-            // wiring two children to the same socket; the error is
-            // non-fatal (we drop the frame and continue) so the
-            // sidecar does not take itself down on a peer mistake.
-            SidecarMessage::Hello(h) => {
+            // F-608 step 5 / F-676: the supervisor forwards the
+            // daemon-side metadata payload as a dedicated `DaemonHello`
+            // frame after the handshake (split from the original
+            // overloaded `Hello` discriminator in F-676). Capture the
+            // agent_def / provider_spec / workspace path so the
+            // (still-stub) RunTurn handler — and step 6's real provider
+            // body — can seed itself from the metadata the daemon
+            // already had on hand. Re-validate `proto` and
+            // `instance_id` against the values established at handshake
+            // time; the errors are non-fatal (we drop the frame and
+            // continue) so the sidecar does not take itself down on a
+            // peer mistake.
+            SidecarMessage::DaemonHello(h) => {
+                if h.proto != SIDECAR_PROTO_VERSION {
+                    warn!(
+                        instance_id = %h.instance_id,
+                        proto = h.proto,
+                        expected = SIDECAR_PROTO_VERSION,
+                        "DaemonHello proto mismatch; dropping frame"
+                    );
+                    continue;
+                }
+                if h.instance_id.to_string() != instance_id {
+                    warn!(
+                        received = %h.instance_id,
+                        expected = %instance_id,
+                        "DaemonHello instance_id mismatch; dropping frame"
+                    );
+                    continue;
+                }
+                // F-678: surface daemon↔sidecar schema-version skew on
+                // the DaemonHello metadata frame too (the same check
+                // that fires on `HelloAck`). Soft warn — drift is not
+                // fatal here, the discriminator change is what matters.
+                forge_ipc::warn_if_schema_mismatch(
+                    "daemon",
+                    h.schema_version,
+                    SIDECAR_SCHEMA_VERSION,
+                );
                 info!(
                     instance_id = %h.instance_id,
                     proto = h.proto,
-                    "received daemon Hello payload"
+                    "received DaemonHello payload"
                 );
                 daemon_hello.set(DaemonHelloPayload {
                     agent_def: h.agent_def,
@@ -794,11 +823,13 @@ async fn dispatch_loop(
                     telemetry_endpoint: h.telemetry_endpoint,
                 });
             }
-            // Sidecar → daemon variants on the daemon → sidecar half are
-            // a protocol violation; warn and continue rather than crash
-            // (we don't want the sidecar to take itself down on a
-            // confused supervisor).
-            SidecarMessage::HelloAck(_)
+            // The sidecar → daemon `Hello` handshake variant should
+            // never arrive on this side after the initial handshake.
+            // Treat as a protocol violation; warn and continue rather
+            // than crash (we don't want the sidecar to take itself
+            // down on a confused supervisor).
+            SidecarMessage::Hello(_)
+            | SidecarMessage::HelloAck(_)
             | SidecarMessage::Event(_)
             | SidecarMessage::ToolCallApprovalRequest(_)
             | SidecarMessage::Heartbeat(_)
