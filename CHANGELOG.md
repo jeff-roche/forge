@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **Agent sidecar architecture (F-608).** Background agents and sub-agents now
+  run in a per-instance `forged-agent` child process supervised by the daemon
+  over a per-instance Unix domain socket, replacing the in-process tokio-task
+  model. The daemon retains authority over credentials, persistence, MCP, the
+  event log, and the shell-facing UDS; sidecars only drive the per-turn
+  provider request loop. Crash isolation, bounded auto-restart (3 retries / 60
+  s window), credential push, panic-hook crash dumps, and a criterion bench
+  (`crates/forge-session/benches/sidecar_overhead.rs`) all land together.
+  Measured on Linux x86_64: ~6 µs sidecar transport overhead per token and
+  ~1.4 ms cold-start — well inside the 50 ms / 200 ms aspirations. Closes
+  F-451: `ResourceMonitor` now receives real child PIDs and `Event::ResourceSample`
+  reaches the AgentMonitor for every background instance. Gated opt-in via
+  `FORGE_AGENT_SIDECAR=1`; default-on flip deferred to a post-soak follow-up.
+  Architecture: `docs/architecture/agent-sidecar.md`.
+
 ## [0.2.0] — Phase 2: Full Layout + MCP — 2026-04-26
 
 Second milestone. A user can arrange the shell into a full multi-pane IDE

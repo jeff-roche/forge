@@ -1,10 +1,10 @@
 # Agent Sidecar Architecture
 
-> Status: Proposed (F-608). Resolves the open design questions captured in issue #654 so an implementer can pick this up directly. Companion plan for F-451 (real PIDs into `ResourceMonitor`).
+> Status: Architecture shipped (F-608, steps 1–9). Default-on flip pending post-soak; the gate `FORGE_AGENT_SIDECAR=1` remains opt-in for now. Resolves the open design questions captured in issue #654. Companion implementation for F-451 (real PIDs into `ResourceMonitor`) — also closed by this work.
 
 ## Overview
 
-Today every Forge agent is a tokio task inside `forged`. The session orchestrator (`crates/forge-session/src/orchestrator.rs`) drives the provider request loop in-process; `BackgroundAgentRegistry::start` (`crates/forge-session/src/bg_agents.rs:199`) registers a logical `AgentInstance` but never forks. The result: `ResourceMonitor::track` is fed the daemon's own PID and is elided by the daemon-PID guard at `crates/forge-session/src/resource_monitor.rs:235`, samples never reach the UI (`crates/forge-session/src/bg_agents.rs:265`), and a single panicking provider stream takes the whole daemon down.
+Before F-608, every Forge agent ran as a tokio task inside `forged`. The session orchestrator (`crates/forge-session/src/orchestrator.rs`) drove the provider request loop in-process; `BackgroundAgentRegistry::start` (`crates/forge-session/src/bg_agents.rs:199`) registered a logical `AgentInstance` but never forked. The result: `ResourceMonitor::track` was fed the daemon's own PID and was elided by the daemon-PID guard at `crates/forge-session/src/resource_monitor.rs:235`, samples never reached the UI (`crates/forge-session/src/bg_agents.rs:265`), and a single panicking provider stream took the whole daemon down.
 
 The sidecar architecture moves the per-turn request loop into a child process, one per `AgentInstanceId`. The daemon stays the authority: it owns credentials, persistence, MCP, the event log, and the shell-facing UDS. Sidecars are dumb workers — they receive a turn description, drive the provider, stream events back, and exit (or stay warm) on the daemon's command. The shell's IPC contract is unchanged.
 
@@ -188,6 +188,8 @@ Note that `forge_core::Event` is the canonical wire shape on both legs; the side
 - The existing `Mock` provider (`forge_providers::MockProvider`) is the right tool: it generates deterministic streams without network cost.
 - Hook the `tracing::span!` already wrapping `run_turn` so a `tokio-console` user can see the IPC overhead per turn.
 
+**Measured numbers (Linux x86_64, release; PR #669).** The `crates/forge-session/benches/sidecar_overhead.rs` criterion bench reports a median sidecar transport overhead of **~6.1 µs per token** (sidecar 14.25 µs/tok minus in-process 8.15 µs/tok over 1000 `AssistantDelta`s) and a median **cold-start of ~1.42 ms** for `supervisor.spawn(...)` through `Hello`/`HelloAck`. Both numbers sit comfortably inside the original budget — per-token overhead is ~4 orders of magnitude under the 50 ms aspiration, cold-start ~140× under the 200 ms ceiling. Future regressions surface as drift in `target/criterion/`.
+
 ---
 
 ### 8. Rollout
@@ -241,7 +243,7 @@ self.monitor.track(id.clone(), handle.pid).await;
 
 Each step is independently reviewable; later steps assume earlier ones merged.
 
-### Step 1: Define the sidecar wire protocol in `forge-ipc`
+### Step 1: Define the sidecar wire protocol in `forge-ipc` — shipped (#660)
 
 - **Files to touch:** `crates/forge-ipc/src/lib.rs` (add a `pub mod sidecar` with the new tagged enum from §2; export `SidecarMessage`, `SidecarRunTurn`, `SidecarHello`, `SidecarShutdown`, etc.)
 - **Contract:**
@@ -250,7 +252,7 @@ Each step is independently reviewable; later steps assume earlier ones merged.
   - Include round-trip serde tests (`sidecar_message_roundtrip`).
 - **Acceptance:** `cargo test -p forge-ipc` passes; the new module exports compile from a downstream `forge-session` `use forge_ipc::sidecar::...` line.
 
-### Step 2: Create the `forged-agent` binary
+### Step 2: Create the `forged-agent` binary — shipped (#663)
 
 - **Files to touch:** new `crates/forge-agent-host/` (or `crates/forge-session/src/bin/forged-agent.rs`); add to workspace `Cargo.toml`.
 - **Contract:**
@@ -261,7 +263,7 @@ Each step is independently reviewable; later steps assume earlier ones merged.
   - Tracing: subscriber on stderr, JSON-lines.
 - **Acceptance:** `forged-agent` connects to a test UDS, exchanges a synthetic `RunTurn` with a `MockProvider`, emits `Event::AssistantMessage` frames, exits cleanly on `Shutdown`.
 
-### Step 3: Refactor `run_turn` to be transport-agnostic
+### Step 3: Refactor `run_turn` to be transport-agnostic — shipped (#665)
 
 The current `run_turn` (`crates/forge-session/src/orchestrator.rs:165`) takes an `Arc<Session>` and calls `session.emit(Event)` directly. We need to split the emission target so the same body runs in-process (writing to the local `Session`) and in-sidecar (writing frames out the IPC).
 
@@ -273,7 +275,7 @@ The current `run_turn` (`crates/forge-session/src/orchestrator.rs:165`) takes an
   - `run_turn` and `run_request_loop` take `&dyn EventSink` (or `Arc<dyn EventSink>`) instead of `Arc<Session>`.
 - **Acceptance:** Existing `crates/forge-session/tests/step_events.rs` still passes (the in-process `Session` sink is the only one used by those tests); `cargo test -p forge-session` is green.
 
-### Step 4: Implement the `SidecarSupervisor`
+### Step 4: Implement the `SidecarSupervisor` — shipped (#666)
 
 - **Files to touch:** new `crates/forge-session/src/sidecar.rs`; wire from `crates/forge-session/src/server.rs`.
 - **Contract:**
@@ -291,7 +293,7 @@ The current `run_turn` (`crates/forge-session/src/orchestrator.rs:165`) takes an
   - `crash_exhausts_retries_emits_failed`
   - `shutdown_grace_window_then_sigterm`
 
-### Step 5: Wire `BackgroundAgentRegistry` to the supervisor (gated by `FORGE_AGENT_SIDECAR`)
+### Step 5: Wire `BackgroundAgentRegistry` to the supervisor (gated by `FORGE_AGENT_SIDECAR`) — shipped (#667)
 
 - **Files to touch:** `crates/forge-session/src/bg_agents.rs`.
 - **Contract:**
@@ -302,7 +304,7 @@ The current `run_turn` (`crates/forge-session/src/orchestrator.rs:165`) takes an
   - Existing `crates/forge-session/src/bg_agents.rs:451-720` tests still pass with flag unset (default).
   - New gated test `start_with_sidecar_flag_real_pid_emits_resource_sample` proves §9: with `FORGE_AGENT_SIDECAR=1`, `Event::ResourceSample` arrives on the registry bus for the new instance — closing F-451.
 
-### Step 6: Plumb credential push (§5)
+### Step 6: Plumb credential push (§5) — shipped (#670)
 
 - **Files to touch:** `crates/forge-session/src/orchestrator.rs` (the `pull_active_credential` path at line 68), the new sidecar message handlers.
 - **Contract:**
@@ -310,7 +312,7 @@ The current `run_turn` (`crates/forge-session/src/orchestrator.rs:165`) takes an
   - Sidecar-side: stash the credential in a `SecretString`, hand it to the provider's per-request auth shape (Phase-1 keyless OllamaProvider — no-op; Anthropic/OpenAI when they land).
 - **Acceptance:** Trace log emits `pushed credential` with `provider_id` + `instance_id`. No credential value appears in any log at any level.
 
-### Step 7: Crash-dump writer and observability glue (§10)
+### Step 7: Crash-dump writer and observability glue (§10) — shipped (#668)
 
 - **Files to touch:** new `crates/forge-session/src/sidecar/crashes.rs`; add panic-hook installation in `forged-agent`'s `main`.
 - **Contract:**
@@ -318,13 +320,13 @@ The current `run_turn` (`crates/forge-session/src/orchestrator.rs:165`) takes an
   - Filename collision impossible (timestamp + instance id); directory created with mode 0o700.
 - **Acceptance:** Test injects a panicking provider into a sidecar, asserts the crash file appears with the panic message intact.
 
-### Step 8: Performance benchmark
+### Step 8: Performance benchmark — shipped (#669)
 
 - **Files to touch:** new `crates/forge-session/benches/sidecar_overhead.rs`.
 - **Contract:** Bench drives 1000 mock tokens through both the in-process and sidecar paths, prints p50/p99 deltas.
 - **Acceptance:** Sidecar p99 overhead per token < 50 µs (well within the 50 ms per-turn budget); cold-start p99 < 200 ms. Hand-checked on Linux x86_64 in CI.
 
-### Step 9: Documentation + flip default
+### Step 9: Documentation + flip default — shipped (this PR)
 
 - **Files to touch:** this document; `docs/architecture/overview.md` cross-link; `CHANGELOG.md`.
 - **Acceptance:** A follow-up PR (post-soak) flips `FORGE_AGENT_SIDECAR=1` to default-on by inverting the gate and removes the flag in a subsequent milestone.
