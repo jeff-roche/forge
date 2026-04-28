@@ -1,0 +1,14 @@
+.usage-route {
+  min-height: 100vh;
+  padding: var(--sp-8);
+  background: var(--color-bg);
+  color: var(--color-text-primary);
+  font-family: var(--font-body);
+}
+
+.usage-route__title {
+  font-family: var(--font-display);
+  font-size: 2rem;
+  color: var(--color-text-ember);
+  margin: 0 0 var(--sp-5) 0;
+}

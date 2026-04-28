@@ -4,6 +4,7 @@ import { Dashboard } from './routes/Dashboard';
 import { SessionWindow } from './routes/Session/SessionWindow';
 import { AgentMonitor } from './routes/AgentMonitor';
 import { Catalog } from './routes/Catalog';
+import { Usage } from './routes/Usage';
 import { CommandPalette, registerBuiltins } from './commands';
 
 /**
@@ -37,6 +38,9 @@ export const App: Component = () => {
           missing parameter renders a friendly "open from a session" notice
           rather than calling list_* with an empty path. */}
       <Route path="/catalog" component={Catalog} />
+      {/* F-594: Usage view — chart + limits + per-model breakdown over the
+          F-593 `usage_summary` IPC. Mounts on the dashboard window. */}
+      <Route path="/usage" component={Usage} />
     </Router>
   );
 };
