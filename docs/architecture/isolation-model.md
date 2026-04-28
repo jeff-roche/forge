@@ -92,7 +92,27 @@ Implementation:
 
 Implemented in `crates/forge-session/src/sandbox/level2.rs` (F-596),
 backed by the `forge_oci::ContainerRuntime` trait shipped in F-595
-(today: `PodmanRuntime`).
+and broadened in F-680 to host more than one runtime
+(today: `PodmanRuntime`; future: `DockerRuntime` etc.).
+
+#### Trait surface
+
+`ContainerRuntime` is a runtime-agnostic lifecycle contract:
+
+| Method | Role |
+|---|---|
+| `detect()` | Probe the host and classify failure into one of the canonical `OciError` variants (`RuntimeMissing`, `RuntimeBroken`, `RootlessUnavailable`). |
+| `pull(image)` | Idempotent image fetch into the local store. |
+| `create(image, argv: &[&str])` | Create a container with the given in-container command. Argv is borrowed `&str` slices so callers don't have to allocate. |
+| `start(handle)` / `stop(handle)` / `remove(handle)` | Lifecycle transitions. |
+| `exec(handle, argv: &[&str])` | Run a command inside a started container. |
+| `stats(handle)` | Snapshot resource usage. Implementations call `parse_stats` after fetching the runtime's stats blob. |
+| `parse_stats(raw)` | Runtime-specific JSON-shape parser. Each runtime owns its own field-name and unit conventions (podman emits `cpu_percent`/`mem_usage`/`pids`; docker would emit different shapes). The trait pins the seam so callers drive parsing through a single method. |
+
+The seam matters most around `detect` and `parse_stats`: both are
+shapes that vary across runtimes, and putting them on the trait
+means a future `DockerRuntime` can ship without callers learning
+the runtime-specific schema.
 
 #### Lifecycle (pre-warm + reuse)
 

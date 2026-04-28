@@ -279,21 +279,32 @@ pub trait ContainerLogs: Send + Sync {
 }
 
 /// Container lifecycle surface. See module docs.
+///
+/// Implementations are runtime-specific (`PodmanRuntime`, future
+/// `DockerRuntime`, etc.). The trait is shaped for argv-only invocation —
+/// every method takes structured slices, never shell strings.
 #[async_trait]
 pub trait ContainerRuntime: Send + Sync {
+    /// Probe the host: confirm the runtime binary is present, functional, and
+    /// configured for rootless operation. Each implementation classifies its
+    /// own probe failures into the canonical `OciError` variants
+    /// ([`OciError::RuntimeMissing`], [`OciError::RuntimeBroken`],
+    /// [`OciError::RootlessUnavailable`]) so callers can switch on the variant
+    /// without knowing which runtime is underneath.
+    async fn detect(&self) -> Result<(), OciError>;
+
     /// Pull the image into the local runtime store. Idempotent.
     async fn pull(&self, image: &ImageRef) -> Result<(), OciError>;
 
     /// Create a container from `image` with `argv` as the command. The
     /// container is created but not started; call [`Self::start`] separately.
-    async fn create(&self, image: &ImageRef, argv: &[String]) -> Result<ContainerHandle, OciError>;
+    async fn create(&self, image: &ImageRef, argv: &[&str]) -> Result<ContainerHandle, OciError>;
 
     /// Start a created container.
     async fn start(&self, handle: &ContainerHandle) -> Result<(), OciError>;
 
     /// Run `argv` inside an already-started container and capture its output.
-    async fn exec(&self, handle: &ContainerHandle, argv: &[String])
-        -> Result<ExecResult, OciError>;
+    async fn exec(&self, handle: &ContainerHandle, argv: &[&str]) -> Result<ExecResult, OciError>;
 
     /// Stop a running container (graceful — runtime sends SIGTERM, then
     /// SIGKILL after its grace period).
@@ -304,6 +315,19 @@ pub trait ContainerRuntime: Send + Sync {
 
     /// Capture a single resource snapshot.
     async fn stats(&self, handle: &ContainerHandle) -> Result<Stats, OciError>;
+
+    /// Parse a runtime-specific stats payload into the common [`Stats`]
+    /// shape. Each runtime emits its own JSON schema and unit conventions
+    /// (podman: `cpu_percent`/`mem_usage`/`pids`; docker would differ);
+    /// pinning the parser at the trait surface keeps that schema-shape
+    /// knowledge localized to the implementation while letting callers
+    /// drive parsing through a single seam.
+    ///
+    /// Implementations should be tolerant of partial/missing fields — return
+    /// `Stats { ..: None }` for fields the payload does not carry rather
+    /// than failing the whole call. Hard parse failures (e.g. malformed
+    /// JSON envelope) should surface as [`OciError::InvalidJson`].
+    fn parse_stats(&self, raw: &[u8]) -> Result<Stats, OciError>;
 }
 
 #[cfg(test)]
@@ -393,13 +417,16 @@ mod tests {
 
     #[async_trait]
     impl ContainerRuntime for MockRuntime {
+        async fn detect(&self) -> Result<(), OciError> {
+            Ok(())
+        }
         async fn pull(&self, _image: &ImageRef) -> Result<(), OciError> {
             Ok(())
         }
         async fn create(
             &self,
             _image: &ImageRef,
-            _argv: &[String],
+            _argv: &[&str],
         ) -> Result<ContainerHandle, OciError> {
             Ok(ContainerHandle::new("mock"))
         }
@@ -409,7 +436,7 @@ mod tests {
         async fn exec(
             &self,
             _handle: &ContainerHandle,
-            _argv: &[String],
+            _argv: &[&str],
         ) -> Result<ExecResult, OciError> {
             Ok(ExecResult {
                 exit_code: Some(0),
@@ -430,22 +457,57 @@ mod tests {
                 pids: None,
             })
         }
+        fn parse_stats(&self, _raw: &[u8]) -> Result<Stats, OciError> {
+            Ok(Stats {
+                cpu_percent: None,
+                memory_bytes: None,
+                pids: None,
+            })
+        }
     }
 
     #[tokio::test]
     async fn mock_runtime_satisfies_trait() {
         let rt: &dyn ContainerRuntime = &MockRuntime;
+        rt.detect().await.unwrap();
         let img = ImageRef::parse("alpine:3.19").unwrap();
         rt.pull(&img).await.unwrap();
-        let h = rt
-            .create(&img, &["echo".into(), "hi".into()])
-            .await
-            .unwrap();
+        // `create`/`exec` accept caller-borrowed `&str` slices directly —
+        // no `.into()` allocation required.
+        let h = rt.create(&img, &["echo", "hi"]).await.unwrap();
         rt.start(&h).await.unwrap();
-        let res = rt.exec(&h, &["true".into()]).await.unwrap();
+        let res = rt.exec(&h, &["true"]).await.unwrap();
         assert_eq!(res.exit_code, Some(0));
         rt.stop(&h).await.unwrap();
         rt.remove(&h).await.unwrap();
         let _ = rt.stats(&h).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn detect_is_callable_through_dyn_trait() {
+        // F-680: `detect` is part of the trait surface so callers can
+        // probe any runtime without knowing the concrete type.
+        let rt: &dyn ContainerRuntime = &MockRuntime;
+        rt.detect().await.unwrap();
+    }
+
+    #[test]
+    fn parse_stats_is_callable_through_dyn_trait() {
+        // F-680: parsing a runtime-specific stats payload is a trait
+        // method, so each runtime owns its own schema interpretation
+        // while callers drive parsing through a single seam.
+        let rt: &dyn ContainerRuntime = &MockRuntime;
+        let _ = rt.parse_stats(b"ignored").unwrap();
+    }
+
+    #[tokio::test]
+    async fn create_and_exec_accept_borrowed_str_slices() {
+        // F-680: argv parameters are `&[&str]` so callers with borrowed
+        // string slices can call directly without allocating a Vec<String>.
+        let rt: &dyn ContainerRuntime = &MockRuntime;
+        let img = ImageRef::parse("alpine:3.19").unwrap();
+        let argv: [&str; 2] = ["echo", "hi"];
+        let _ = rt.create(&img, &argv).await.unwrap();
+        let _ = rt.exec(&ContainerHandle::new("x"), &argv).await.unwrap();
     }
 }
