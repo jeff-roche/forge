@@ -124,6 +124,15 @@ pub(crate) const MAX_REJECT_REASON_BYTES: usize = 1024;
 /// without permitting unbounded growth if a compromised webview lies.
 pub(crate) const MAX_MESSAGE_ID_BYTES: usize = 64;
 
+/// F-675: canonical cap on every `provider_id` accepted by an IPC command.
+/// Slugs are short ASCII (`anthropic`, `openai`, `ollama`); 128 bytes is the
+/// generous upper bound that still admits the longest realistic
+/// `custom_openai:<name>` form while rejecting hostile renderers driving
+/// megabyte calls. Defined here — and only here — so the credentials and
+/// providers IPC surfaces share one cap and a slug accepted by one command
+/// is never silently rejected by another.
+pub(crate) const MAX_PROVIDER_ID_BYTES: usize = 128;
+
 /// F-036 / F-068 (L4 / T7): caps on untyped-string inputs to the persistent
 /// approval commands. `workspace_root` is an absolute filesystem path — 4096
 /// bytes covers PATH_MAX on every target platform (Linux 4096, macOS 1024,
@@ -3387,9 +3396,6 @@ fn validate_roster_scope(scope: &forge_core::RosterScope) -> Result<(), String> 
         }
     }
 }
-
-// Reuse the F-587 cap for embedded id payloads.
-use crate::credentials_ipc::MAX_PROVIDER_ID_BYTES;
 
 /// F-591: load every workspace + user-home skill and tag each as a session-
 /// wide roster entry.
