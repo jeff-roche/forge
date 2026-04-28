@@ -114,7 +114,7 @@ Never plain-text credentials on disk.
 
 ### 8.5 Background agents — sidecar processes
 
-Background agents and sub-agents do not run as in-process tokio tasks inside `forged`. Each `AgentInstanceId` runs in a dedicated `forged-agent` child process supervised by the daemon over a per-instance UDS, so a panicking provider stream cannot take the daemon down and `ResourceMonitor` reads real per-agent CPU/RSS from `/proc/<pid>/stat`. The daemon retains authority — credentials, persistence, MCP, the event log, and the shell-facing UDS all live in `forged`; sidecars only drive the per-turn provider request loop. Gated opt-in via `FORGE_AGENT_SIDECAR=1` for now; default-on flip pending post-soak. See `docs/architecture/agent-sidecar.md` for the full design.
+Background agents and sub-agents do not run as in-process tokio tasks inside `forged`. Each `AgentInstanceId` runs in a dedicated `forged-agent` child process supervised by the daemon over a per-instance UDS, so a panicking provider stream cannot take the daemon down and `ResourceMonitor` reads real per-agent CPU/RSS from `/proc/<pid>/stat`. The daemon retains authority — credentials, persistence, MCP, the event log, and the shell-facing UDS all live in `forged`; sidecars only drive the per-turn provider request loop. Default-on; opt out with `FORGE_AGENT_SIDECAR=0`. See `docs/architecture/agent-sidecar.md` for the full design.
 
 ---
 

@@ -1,4 +1,4 @@
-//! F-608 step 5 acceptance: when `FORGE_AGENT_SIDECAR=1` the
+//! F-608 step 5 acceptance: with the sidecar path enabled the
 //! `BackgroundAgentRegistry::start` path forks a real `forged-agent`
 //! child via the [`SidecarSupervisor`] and feeds the child's PID into
 //! the [`ResourceMonitor`]. The first per-instance
@@ -6,12 +6,13 @@
 //! F-451 — the daemon-PID no-op guard is replaced by a real PID and
 //! the AgentMonitor pills receive live numbers.
 //!
-//! These tests must NOT influence the flag-off baseline covered by
-//! the in-module tests at `crates/forge-session/src/bg_agents.rs:451-720`.
-//! Each test sets / unsets the env var locally; the registry reads the
-//! flag on every `start()` call so concurrent tests with different
-//! settings don't cross-contaminate as long as they don't share a
-//! registry mid-test.
+//! Post-soak follow-up to #671: the sidecar path is now the default and
+//! the `FORGE_AGENT_SIDECAR` env var is an opt-out. This test
+//! intentionally does NOT touch the env var so it exercises the
+//! production default; the flag-off (legacy) baseline is covered by
+//! the in-module tests at `crates/forge-session/src/bg_agents.rs:451-720`,
+//! which run without a supervisor wired and therefore fall through to
+//! the legacy daemon-PID path regardless of flag state.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -84,32 +85,41 @@ fn registry_with_sidecar(supervisor: Arc<SidecarSupervisor>) -> BackgroundAgentR
 
 /// F-608 step 5 / F-451 closure.
 ///
-/// With `FORGE_AGENT_SIDECAR=1` set, starting a background agent must:
+/// On the default sidecar path, starting a background agent must:
 ///   1. Fork a `forged-agent` child via the supervisor.
 ///   2. Surface a non-daemon child PID into the resource monitor.
 ///   3. Cause an `Event::ResourceSample { instance_id, .. }` to arrive
 ///      on the registry's broadcast bus for the new instance — the
 ///      daemon-PID no-op guard is no longer in the way.
 ///
-/// The flag-off path is exercised by the in-module test
-/// `start_does_not_emit_resource_sample_for_background_agents`; this
-/// test only flips the flag on for its own duration.
+/// The legacy path is exercised by the in-module test
+/// `start_does_not_emit_resource_sample_for_background_agents`, which
+/// runs without a supervisor wired and therefore stays in-process
+/// whether or not the env var is set.
 #[tokio::test]
-async fn start_with_sidecar_flag_real_pid_emits_resource_sample() {
-    // SAFETY: the test sets a process-global env var. The
-    // `BackgroundAgentRegistry::start` flag check is read-once-per-
-    // call, so other concurrent tests in this file that don't depend
-    // on the flag still see whatever default is in their own
-    // environment by the time their `start()` runs. We unset on the
-    // happy path AND on early returns via the `FlagGuard` RAII below.
-    struct FlagGuard;
+async fn start_default_sidecar_path_real_pid_emits_resource_sample() {
+    // SAFETY: the test ensures any inherited `FORGE_AGENT_SIDECAR` opt-out
+    // from the harness environment is cleared so we exercise the real
+    // production default (sidecar on). Restored by the `FlagGuard` RAII
+    // — but only if we set a value here, which we don't, since "unset"
+    // IS the default. The unconditional `remove_var` covers the
+    // pathological case where the harness propagated `FORGE_AGENT_SIDECAR=0`
+    // into our process.
+    struct FlagGuard {
+        prior: Option<String>,
+    }
     impl Drop for FlagGuard {
         fn drop(&mut self) {
-            std::env::remove_var("FORGE_AGENT_SIDECAR");
+            match &self.prior {
+                Some(v) => std::env::set_var("FORGE_AGENT_SIDECAR", v),
+                None => std::env::remove_var("FORGE_AGENT_SIDECAR"),
+            }
         }
     }
-    std::env::set_var("FORGE_AGENT_SIDECAR", "1");
-    let _guard = FlagGuard;
+    let _guard = FlagGuard {
+        prior: std::env::var("FORGE_AGENT_SIDECAR").ok(),
+    };
+    std::env::remove_var("FORGE_AGENT_SIDECAR");
 
     let tmp = TempDir::new().expect("tmp");
     let supervisor = Arc::new(SidecarSupervisor::new(
@@ -156,7 +166,7 @@ async fn start_with_sidecar_flag_real_pid_emits_resource_sample() {
     }
     assert!(
         saw_sample,
-        "FORGE_AGENT_SIDECAR=1 must surface Event::ResourceSample on the \
+        "default sidecar path must surface Event::ResourceSample on the \
          registry bus for the new instance (closes F-451)"
     );
 
