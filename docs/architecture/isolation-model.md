@@ -14,7 +14,7 @@ Agents and MCP servers are untrusted code running with access to the user's file
 |---|---|---|
 | **0 — Trusted** | None. Runs in session process. | **Built-in skills only.** User-defined agents cannot declare this. |
 | **1 — Process** | Separate OS process, restricted env, fs-scope per `allowed_paths`. | **Default for user-defined agents and MCP servers.** |
-| **2 — Container** | OCI (podman preferred, docker fallback). Per-session rootfs, network policy, resource caps. | Opt-in for risky agents or CI-style runs. |
+| **2 — Container** | OCI (podman preferred, docker fallback). Per-session rootfs and user namespace. Network policy, resource caps, capability hardening, and image trust are designed but not yet wired (see §8.3). | Opt-in for risky agents or CI-style runs. |
 
 User-defined agents that omit `isolation:` get Level 1 automatically. Level 0 is reserved for code Forge ships.
 
@@ -44,13 +44,15 @@ Sandbox enforces **runtime containment**. Approval enforces **human-in-the-loop*
 | Read | auto-approved | auto-approved | auto-approved |
 | Write | approval required | approval required | approval required |
 | Execute | not allowed | approval required | approval required |
-| Network | not allowed | open (no approval per call) | `allowed_hosts` only, no approval |
+| Network | not allowed | open (no approval per call) | open today; `allowed_hosts` enforcement is future work ([F-642](https://github.com/forge-ide/forge/issues/678)) |
 
 A containerized agent still needs approval for writes. A trusted built-in skill doing a read doesn't need approval. The two systems do different jobs.
 
 ### 6.4 Level 1 networking is open
 
-Process-isolated agents can reach the network freely. Forge does not firewall at the process level. MCP servers and built-in tools like `fetch` do their own allow-listing. This is a deliberate tradeoff — Level 1 is a filesystem and privilege sandbox, not a network sandbox. Users who need network restriction choose Level 2.
+Process-isolated agents can reach the network freely. Forge does not firewall at the process level. MCP servers and built-in tools like `fetch` do their own allow-listing. This is a deliberate tradeoff — Level 1 is a filesystem and privilege sandbox, not a network sandbox.
+
+Level 2 is **also open by default today** — `--network none` and CNI allow-listing are tracked as future work ([F-642](https://github.com/forge-ide/forge/issues/678)). Until that lands, neither level enforces network restriction at the runtime boundary.
 
 ### 6.5 Sub-agents use independent isolation
 
@@ -94,6 +96,13 @@ Implemented in `crates/forge-session/src/sandbox/level2.rs` (F-596),
 backed by the `forge_oci::ContainerRuntime` trait shipped in F-595
 (today: `PodmanRuntime`).
 
+> **Honest scope.** Level 2 today provides **rootless-podman process /
+> filesystem isolation only**. Resource caps, capability hardening,
+> read-only rootfs, and network policy are designed but **not yet
+> wired**. Each gap below links to the security finding that tracks
+> the fix. Treat the bare unqualified phrases "Level 2 hardening" or
+> "Level 2 resource limits" as aspirational until those issues land.
+
 #### Lifecycle (pre-warm + reuse)
 
 A session that opts into Level 2 brings up exactly **one** container
@@ -107,9 +116,9 @@ for the duration of the session. The lifecycle, owned by
 2. **Pull** — `runtime.pull(image)`. Idempotent; layers cached.
 3. **Create** — `runtime.create(image, ["sleep", "infinity"])`. The
    `sleep infinity` init keeps the container alive between `exec`
-   calls. Resource limits attach at this step in the long-term
-   design (see below) — **deferred to follow-up #631**; containers
-   currently run with the host slice's default limits, and
+   calls. Resource limits, capability hardening, and network policy
+   are **NOT** attached here in the shipped code — see "Resource
+   limits", "Capability hardening", and "Image trust" below.
    `Level2Session::create` emits a `tracing::warn!` whenever a
    non-default `ContainerLimits` is passed so operators are not
    surprised at runtime.
@@ -140,12 +149,22 @@ delegates to `session.exec_step(argv)`. The unified return shape is
 
 #### Resource limits
 
-Per-step caps land on the container's cgroup v2 leaf at **create
-time**, not exec time — `podman exec` does not accept resource
-flags. `ContainerLimits` captures the three caps Phase 1 cares
-about:
+> **Currently NOT enforced.** `ContainerLimits` is captured into
+> `Level2Session` and exposed via `session.limits()` for
+> observability, but it is **never passed to `podman create`**.
+> Containers run with whatever limits the host slice applies —
+> for rootless podman, that is the user's slice, not the values
+> on `ContainerLimits`. `Level2Session::create` emits a
+> `tracing::warn!` whenever a non-default `ContainerLimits` is
+> configured so operators see the gap at runtime. Tracked as
+> [F-654 / #690](https://github.com/forge-ide/forge/issues/690).
 
-| Field | podman flag | Maps to |
+Intended design (when F-654 lands): per-step caps land on the
+container's cgroup v2 leaf at **create time**, not exec time —
+`podman exec` does not accept resource flags. `ContainerLimits`
+captures the three caps Phase 1 cares about:
+
+| Field | podman flag (intended) | Maps to (intended) |
 |---|---|---|
 | `cpus: Option<f32>` | `--cpus <N>` | cgroup v2 `cpu.max` |
 | `memory_bytes: Option<u64>` | `--memory <bytes>` | cgroup v2 `memory.max` |
@@ -157,16 +176,47 @@ These map directly onto the same intent as the Level-1
 enforcement (per-container) instead of `setrlimit` (per-process /
 per-uid).
 
-> **Known gap, tracked as a follow-up (issue #631).** F-595's
-> `ContainerRuntime::create` signature accepts only
-> `(image, argv)`. To preserve the F-595 public API (per F-596's
-> constraints), `Level2Session::create` currently stores the
-> `ContainerLimits` on the session for observability rather than
-> passing them through to `podman create`. The argv-shaping helper
-> `level2::limits_to_create_flags` pins the canonical podman flag
-> rendering (verified by unit test) so the eventual wiring — once
-> the trait grows a `create_with_limits` method — is a one-line
-> change.
+> **Wiring gap.** F-595's `ContainerRuntime::create` signature
+> accepts only `(image, argv)`. To preserve the F-595 public API
+> (per F-596's constraints), `Level2Session::create` currently
+> stores the `ContainerLimits` on the session for observability
+> rather than passing them through to `podman create`. The
+> argv-shaping helper `level2::limits_to_create_flags` pins the
+> canonical podman flag rendering (verified by unit test) so the
+> eventual wiring — once the trait grows a `create_with_limits`
+> method — is a one-line change. Tracked as
+> [F-654 / #690](https://github.com/forge-ide/forge/issues/690).
+
+#### Capability hardening (currently NOT applied)
+
+The shipped `PodmanRuntime::create` argv contains only
+`["create", &image_string]` plus the caller-supplied init argv
+(`sleep infinity`). The following hardening flags are **not**
+injected:
+
+| Flag | What it would do | Status |
+|---|---|---|
+| `--security-opt no-new-privileges` | Block setuid escalation inside the container | not applied |
+| `--cap-drop ALL` | Drop all Linux capabilities (currently inherits rootless-podman defaults) | not applied |
+| `--read-only` | Mount the container rootfs read-only | not applied |
+| `--network none` | Disable container networking by default | not applied |
+
+Containers therefore run with rootless podman's default capability
+set and **unrestricted network**. The "blast radius" trade-off
+elsewhere in this doc must be read with that in mind: the
+namespace + rootfs boundary is real, but a compromised tool inside
+the container can still reach the network and exercise the
+default cap set. Tracked as
+[F-642 / #678](https://github.com/forge-ide/forge/issues/678).
+
+#### Image trust (currently NOT enforced)
+
+Images are pulled by floating tag (e.g. `alpine:3.19`,
+`oci.io/forge/rust-tools:<ver>`) with **no digest pinning** and
+**no signature verification**. A registry compromise or a
+tag-mutation attack can swap the image bytes between sessions
+without detection. Tracked as
+[F-643 / #679](https://github.com/forge-ide/forge/issues/679).
 
 #### Auto-fallback to Level 1
 
@@ -206,14 +256,24 @@ queries don't break on Rust enum renames.
 - **Async, preferred:** `Level2Session::teardown()` runs `stop`
   then `remove(-f)` through the `ContainerRuntime` trait. Callers
   on the clean shutdown path should always reach for this.
-- **Sync, panic-safety net:** `Level2Session`'s `Drop` impl
-  fire-and-forgets `podman rm -f <id>` via
-  `std::process::Command::spawn` whenever `teardown()` did not
-  complete. This protects against panic, early `?`, and task
-  cancellation. The Drop is detached (no `wait()`), so a slow or
+- **Sync, panic-safety net (post-construction only):**
+  `Level2Session`'s `Drop` impl fire-and-forgets
+  `podman rm -f <id>` via `std::process::Command::spawn` whenever
+  `teardown()` did not complete. This protects against panic,
+  early `?`, and task cancellation **after `Level2Session` is
+  constructed**. The Drop is detached (no `wait()`), so a slow or
   hung `podman` cannot block the panicking thread. A successful
   async `teardown()` arms a flag that disarms the Drop net so the
   cleanup does not run twice.
+
+> **Known gap: partial-create failures bypass Drop.**
+> `Level2Session::create` runs `pull → create → start → construct
+> Self`. If `start()` (or anything before `Self` is built) fails,
+> `Self` is never constructed and `Drop` therefore never fires —
+> a container created by `runtime.create()` but not started, or
+> one started but never wrapped in `Self`, leaks. The safety net
+> only covers post-construction crashes. Tracked as
+> [F-655 / #691](https://github.com/forge-ide/forge/issues/691).
 
 The Drop path hard-codes `podman` because `PodmanRuntime` is the
 only `ContainerRuntime` implementation today; introducing a second
@@ -255,14 +315,15 @@ level.
 
 #### Trade-offs vs Level 1
 
-| Concern | Level 1 | Level 2 |
+| Concern | Level 1 | Level 2 (shipped) |
 |---|---|---|
-| Blast radius of a compromised tool | Process tree of one sandbox | Container rootfs + namespace |
+| Blast radius of a compromised tool | Process tree of one sandbox | Container rootfs + user namespace; no `--cap-drop`, no `--read-only`, default network ([F-642](https://github.com/forge-ide/forge/issues/678)) |
 | Cold-start cost | Microseconds (fork+exec) | Image pull (one-off) + container create+start (~hundreds of ms, once per session) |
 | Per-step cost | fork+exec | `podman exec` (~tens of ms) |
-| Network containment | None (open network) | CNI policy (future); default-deny once mounts are wired |
-| Filesystem containment | `forge-fs` path checks | Container rootfs by construction |
-| Resource limits | `setrlimit` (per-process / per-uid) + cgroup v2 `pids.max` (per-sandbox) | cgroup v2 `cpu.max` / `memory.max` / `pids.max` (per-container) |
+| Network containment | None (open network) | None today (open network); CNI policy is future work ([F-642](https://github.com/forge-ide/forge/issues/678)) |
+| Filesystem containment | `forge-fs` path checks | Container rootfs by construction (rootfs is read-write — `--read-only` not yet applied) |
+| Resource limits | `setrlimit` (per-process / per-uid) + cgroup v2 `pids.max` (per-sandbox) | None enforced — `ContainerLimits` captured but not passed to `podman create` ([F-654](https://github.com/forge-ide/forge/issues/690)) |
+| Image trust | n/a | Floating tags; no digest pinning, no signature verification ([F-643](https://github.com/forge-ide/forge/issues/679)) |
 | Operator burden | Linux + cgroup v2 | Linux + cgroup v2 + rootless `podman` |
 
 ### 8.4 Approval — orthogonal to isolation
