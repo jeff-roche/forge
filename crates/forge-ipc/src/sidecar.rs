@@ -16,6 +16,77 @@ use chrono::{DateTime, Utc};
 use forge_core::{AgentInstanceId, Event, MessageId, ProviderId};
 use serde::{Deserialize, Serialize};
 
+/// Opaque byte container for [`SidecarCredentials::secret`].
+///
+/// F-608 step 6 swaps the step-1 placeholder `secret_handle: String` for
+/// real credential bytes pushed daemon → sidecar. The wire shape is just
+/// a JSON byte array (serde transparent), but `Debug` and `Display` are
+/// overridden to redact the contents — so a stray `tracing::debug!("{:?}",
+/// frame)` anywhere in the supervisor / sidecar stack cannot leak the
+/// secret bytes into logs. The sidecar wraps the inner `Vec<u8>` into a
+/// `secrecy::SecretString` immediately on receive, so the only place the
+/// raw bytes ever appear in cleartext is on the wire and inside the
+/// receive-side conversion — both narrow, audited paths.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SecretBytes(Vec<u8>);
+
+impl SecretBytes {
+    /// Construct from a raw byte buffer. Callers should typically have a
+    /// `SecretString` in hand and call `from_secret` instead — this
+    /// constructor exists for the deserialize / round-trip / test paths.
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
+    /// Length of the inner buffer. Non-secret — only the byte count is
+    /// exposed, never the payload itself.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Predicate mirror of [`Self::len`].
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Consume the wrapper and return the inner bytes.
+    ///
+    /// The receive side uses this to hand the bytes straight into a
+    /// `secrecy::SecretString` (which zeroes-on-drop) without any
+    /// intermediate clone. The original `SecretBytes` is dropped by the
+    /// move; no intermediate `String` ever exists at trace level.
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.0
+    }
+
+    /// Borrow the inner bytes. Reserved for narrow audited call sites
+    /// (e.g. immediate conversion into `SecretString` on receive). Do
+    /// not pass the slice to anything that may log or stringify it.
+    pub fn expose_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for SecretBytes {
+    /// Redact the payload. The byte count is included so log lines remain
+    /// useful for triage (e.g. confirming a non-empty credential was
+    /// pushed) without leaking the value.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SecretBytes([REDACTED {} bytes])", self.0.len())
+    }
+}
+
+impl std::fmt::Display for SecretBytes {
+    /// `Display` mirrors `Debug` so a `format!("{}", bytes)` cannot leak
+    /// the credential. There is no legitimate caller for stringifying
+    /// secret bytes — every consumer should be unwrapping into a
+    /// `SecretString` and exposing only at the network boundary.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[REDACTED {} bytes]", self.0.len())
+    }
+}
+
 /// Wire protocol version negotiated in [`SidecarMessage::Hello`].
 ///
 /// Bumped when the discriminator set or any payload field changes shape.
@@ -31,7 +102,13 @@ pub const SIDECAR_PROTO_VERSION: u32 = 1;
 /// serialization changes (renames, type widening, etc.). The supervisor
 /// logs the value but does not gate startup on it today; that becomes a
 /// hard check once we ship a non-`1` schema.
-pub const SIDECAR_SCHEMA_VERSION: u32 = 1;
+///
+/// History:
+/// * `1` — initial F-608 step 1 protocol.
+/// * `2` — F-608 step 6: `Credentials.secret_handle: String` →
+///   `Credentials.secret: SecretBytes` (`Vec<u8>` opaque, redacted
+///   `Debug`/`Display`).
+pub const SIDECAR_SCHEMA_VERSION: u32 = 2;
 
 /// Bidirectional message exchanged between `forged` and `forged-agent`.
 ///
@@ -54,9 +131,11 @@ pub enum SidecarMessage {
     RunTurn(SidecarRunTurn),
 
     /// Push a per-provider credential to the sidecar (§5: daemon owns
-    /// the keyring; sidecar receives just-in-time). `secret_handle` is
-    /// an opaque string for step 1 — real `secrecy::SecretString`
-    /// plumbing lands with step 6.
+    /// the keyring; sidecar receives just-in-time). The bytes ride
+    /// inside [`SecretBytes`], whose `Debug` / `Display` impls redact —
+    /// so a stray `format!("{:?}", frame)` anywhere in the supervisor
+    /// or sidecar code path cannot leak the credential. The receive
+    /// side immediately wraps into `secrecy::SecretString`.
     Credentials(SidecarCredentials),
 
     /// Approve a pending tool call. Mirrors [`crate::ToolCallApproved`]
@@ -180,13 +259,16 @@ pub struct SidecarRunTurn {
     pub byte_budget: u64,
 }
 
-/// Push a credential for `provider_id`. Step 1 stores it as an opaque
-/// string handle; step 6 swaps in `Vec<u8>` + `secrecy::SecretString`
-/// and adds the zeroize-on-drop discipline.
+/// Push a credential for `provider_id`. F-608 step 6: the secret rides
+/// inside a [`SecretBytes`] wrapper whose `Debug` / `Display` redact, so
+/// nothing in the daemon / supervisor / sidecar stack can leak the value
+/// through a tracing emission. The sidecar wraps the inner bytes into
+/// `secrecy::SecretString` (zeroize-on-drop) the moment the frame is
+/// dispatched.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SidecarCredentials {
     pub provider_id: ProviderId,
-    pub secret_handle: String,
+    pub secret: SecretBytes,
 }
 
 /// Approve a pending tool call (mirrors [`crate::ToolCallApproved`]).
@@ -358,7 +440,7 @@ mod tests {
             }),
             SidecarMessage::Credentials(SidecarCredentials {
                 provider_id: ProviderId::from_string("prov-1".into()),
-                secret_handle: "handle-abc".into(),
+                secret: SecretBytes::new(b"handle-abc".to_vec()),
             }),
             SidecarMessage::ToolCallApproved(SidecarToolCallApproved {
                 id: "tool-1".into(),
@@ -439,6 +521,72 @@ mod tests {
             "captured_at",
         ] {
             assert!(value.get(key).is_some(), "missing key {key}: {value}");
+        }
+    }
+
+    /// F-608 step 6: `SecretBytes::Debug` must redact the payload so a
+    /// stray `tracing::debug!("{:?}", frame)` can never leak credential
+    /// bytes — even if the surrounding `SidecarCredentials` derives
+    /// `Debug`. Pinned here because the redaction guarantee is the
+    /// security contract the architecture doc §5 calls out by name.
+    #[test]
+    fn secret_bytes_debug_redacts_payload() {
+        let secret = SecretBytes::new(b"sk-ant-leaked-key".to_vec());
+        let dbg = format!("{secret:?}");
+        let display = format!("{secret}");
+        assert!(
+            !dbg.contains("sk-ant-leaked-key"),
+            "Debug must not leak secret bytes: {dbg}"
+        );
+        assert!(
+            !display.contains("sk-ant-leaked-key"),
+            "Display must not leak secret bytes: {display}"
+        );
+        assert!(dbg.contains("REDACTED"), "Debug should mark redaction");
+        // The payload's byte count is non-secret — handy for triage.
+        assert!(dbg.contains("17"), "Debug should report byte count");
+    }
+
+    /// F-608 step 6: even the variant's derived `Debug` must not leak
+    /// the credential — `SidecarCredentials` derives `Debug`, but the
+    /// inner `secret: SecretBytes` field overrides its own `Debug` to
+    /// redact. This test pins both layers.
+    #[test]
+    fn sidecar_credentials_debug_redacts_payload() {
+        let frame = SidecarMessage::Credentials(SidecarCredentials {
+            provider_id: ProviderId::from_string("anthropic".into()),
+            secret: SecretBytes::new(b"sk-ant-leaked-key".to_vec()),
+        });
+        let dbg = format!("{frame:?}");
+        assert!(
+            !dbg.contains("sk-ant-leaked-key"),
+            "outer Debug must not leak the secret bytes: {dbg}"
+        );
+        assert!(
+            dbg.contains("anthropic"),
+            "non-secret provider_id should remain visible: {dbg}"
+        );
+    }
+
+    /// F-608 step 6: the wire format *does* carry the secret bytes
+    /// (that's the frame's job) — only `Debug` / `Display` redact. Pin
+    /// the round-trip so the receive side recovers the exact bytes the
+    /// daemon pushed.
+    #[test]
+    fn sidecar_credentials_round_trip_preserves_bytes() {
+        let original = SidecarCredentials {
+            provider_id: ProviderId::from_string("anthropic".into()),
+            secret: SecretBytes::new(b"sk-ant-secret".to_vec()),
+        };
+        let frame = SidecarMessage::Credentials(original);
+        let bytes = serde_json::to_vec(&frame).unwrap();
+        let recovered: SidecarMessage = serde_json::from_slice(&bytes).unwrap();
+        match recovered {
+            SidecarMessage::Credentials(c) => {
+                assert_eq!(c.provider_id.to_string(), "anthropic");
+                assert_eq!(c.secret.expose_bytes(), b"sk-ant-secret");
+            }
+            other => panic!("expected Credentials, got {other:?}"),
         }
     }
 

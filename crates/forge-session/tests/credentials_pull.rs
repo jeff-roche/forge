@@ -119,6 +119,7 @@ async fn run_turn_pulls_credential_when_context_supplied() {
         Some(CredentialContext {
             store: cred_store,
             provider_id: "anthropic".to_string(),
+            sidecar_push: None,
         }),
     )
     .await
@@ -170,6 +171,7 @@ async fn run_turn_proceeds_when_credential_is_missing() {
         Some(CredentialContext {
             store: cred_store,
             provider_id: "anthropic".to_string(),
+            sidecar_push: None,
         }),
     )
     .await
@@ -209,6 +211,7 @@ async fn run_turn_fails_when_credential_backend_errors() {
         Some(CredentialContext {
             store,
             provider_id: "anthropic".to_string(),
+            sidecar_push: None,
         }),
     )
     .await
@@ -338,6 +341,7 @@ async fn rerun_replace_pulls_credential_when_context_supplied() {
             Some(CredentialContext {
                 store: cred_store,
                 provider_id: "anthropic".to_string(),
+                sidecar_push: None,
             }),
         )
         .await
@@ -384,6 +388,7 @@ async fn rerun_replace_fails_when_credential_backend_errors() {
             Some(CredentialContext {
                 store,
                 provider_id: "anthropic".to_string(),
+                sidecar_push: None,
             }),
         )
         .await
@@ -427,6 +432,7 @@ async fn rerun_branch_pulls_credential_when_context_supplied() {
             Some(CredentialContext {
                 store: cred_store,
                 provider_id: "anthropic".to_string(),
+                sidecar_push: None,
             }),
         )
         .await
@@ -471,6 +477,7 @@ async fn rerun_fresh_pulls_credential_when_context_supplied() {
             Some(CredentialContext {
                 store: cred_store,
                 provider_id: "anthropic".to_string(),
+                sidecar_push: None,
             }),
         )
         .await

@@ -1408,6 +1408,7 @@ dependencies = [
  "dirs 6.0.0",
  "forge-core",
  "forge-ipc",
+ "secrecy",
  "serde_json",
  "tempfile",
  "tokio",

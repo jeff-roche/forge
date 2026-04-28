@@ -191,6 +191,13 @@ path = "tests/eprintln_audit.rs"
 name = "credentials_pull"
 path = "tests/credentials_pull.rs"
 
+# F-608 step 6: orchestrator-side sidecar credential push contract +
+# log-leak audit. Asserts the credential value never appears in
+# captured tracing output at any level.
+[[test]]
+name = "credentials_sidecar_push"
+path = "tests/credentials_sidecar_push.rs"
+
 [[test]]
 name = "provider_swap"
 path = "tests/provider_swap.rs"

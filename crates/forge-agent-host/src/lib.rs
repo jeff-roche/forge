@@ -36,6 +36,7 @@
 //! 4+ swaps the stub body for a call into the refactored
 //! orchestrator, passing the same sink as `&dyn EventSink`.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -46,9 +47,10 @@ use async_trait::async_trait;
 use chrono::Utc;
 use forge_core::{Event, EventSink, MessageId, ProviderId};
 use forge_ipc::sidecar::{
-    CrashDump, SidecarAgentDef, SidecarCrashed, SidecarEvent, SidecarHeartbeat, SidecarHelloAck,
-    SidecarMessage, SidecarProviderSpec, SidecarRunTurn, SIDECAR_SCHEMA_VERSION,
+    CrashDump, SidecarAgentDef, SidecarCrashed, SidecarCredentials, SidecarEvent, SidecarHeartbeat,
+    SidecarHelloAck, SidecarMessage, SidecarProviderSpec, SidecarRunTurn, SIDECAR_SCHEMA_VERSION,
 };
+use secrecy::SecretString;
 use tokio::io::{ReadHalf, WriteHalf};
 use tokio::net::UnixStream;
 use tokio::sync::Mutex as AsyncMutex;
@@ -383,6 +385,91 @@ impl DaemonHelloState {
     }
 }
 
+/// F-608 step 6: per-sidecar credential stash.
+///
+/// `Credentials` frames inbound from the daemon land here, keyed by
+/// `provider_id`. The bytes are wrapped in [`SecretString`] (zeroize-on-
+/// drop, redacted `Debug`) the moment the dispatch loop hands them in,
+/// so the only cleartext copy of the credential past the receive
+/// boundary lives inside the secrecy crate's RAII guard. The (still-
+/// stub) RunTurn handler — and step 6+'s real provider body — pulls the
+/// value out via [`Self::take`] / [`Self::get`] only at the network
+/// boundary, never logging the result.
+///
+/// Phase-1 Ollama is keyless, so the stash is observed but unused; the
+/// slot is here so Anthropic/OpenAI providers can hook in without a
+/// further protocol revision when they ship.
+#[derive(Clone, Default)]
+pub struct CredentialStash {
+    inner: Arc<Mutex<HashMap<String, SecretString>>>,
+}
+
+impl std::fmt::Debug for CredentialStash {
+    /// Custom `Debug` so a stray `tracing::debug!("{:?}", stash)` cannot
+    /// even hint at provider IDs that have credentials cached. The byte
+    /// count is fine — credential identifiers are non-secret — but the
+    /// SecretString Debug already redacts, so this is belt-and-braces.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let len = self.inner.lock().map(|g| g.len()).unwrap_or(0);
+        f.debug_struct("CredentialStash")
+            .field("entries", &len)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CredentialStash {
+    /// Replace any existing entry for `provider_id` with `secret`. The
+    /// daemon side resolves a single active provider per session today,
+    /// but the storage shape allows a future multi-provider workflow to
+    /// stage credentials for several providers without reconnecting.
+    pub fn put(&self, provider_id: String, secret: SecretString) {
+        match self.inner.lock() {
+            Ok(mut guard) => {
+                guard.insert(provider_id, secret);
+            }
+            Err(_) => {
+                // Poisoned mutex — an earlier panic with the lock held
+                // already routed through the panic hook's crash dump.
+                // Don't overwrite; the supervisor will recycle this
+                // sidecar shortly via the EOF-on-exit detection.
+            }
+        }
+    }
+
+    /// Snapshot the credential for `provider_id`, or `None` when no
+    /// frame has yet been pushed for it. Returns a clone of the
+    /// `SecretString` (cheap — `secrecy::SecretBox` is `Arc`-shaped)
+    /// so the caller can hand the value to a provider auth shape
+    /// without touching the stash again.
+    pub fn get(&self, provider_id: &str) -> Option<SecretString> {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|g| g.get(provider_id).cloned())
+    }
+
+    /// Remove and return the credential for `provider_id`. Use this on
+    /// a one-shot auth path so the stash drops the secret as soon as
+    /// the provider has consumed it.
+    pub fn take(&self, provider_id: &str) -> Option<SecretString> {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|mut g| g.remove(provider_id))
+    }
+
+    /// Number of currently-staged credentials. Diagnostic-only — never
+    /// reveals identifiers or values.
+    pub fn len(&self) -> usize {
+        self.inner.lock().map(|g| g.len()).unwrap_or(0)
+    }
+
+    /// Predicate mirror of [`Self::len`].
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 /// Per-instance event sequence number. Threaded through the heartbeat
 /// task and the run-turn handler so every outbound `Event` frame is
 /// totally ordered. Starts at 1 (0 is reserved as a "never emitted"
@@ -557,6 +644,46 @@ enum LoopExit {
     PeerClosed,
 }
 
+/// F-608 step 6: stash an inbound `Credentials` frame.
+///
+/// The bytes are unwrapped from [`forge_ipc::sidecar::SecretBytes`] —
+/// itself redacted at `Debug` / `Display` — and re-wrapped into a
+/// `SecretString` via `String::from_utf8`. Credential values are ASCII
+/// API keys today; a future binary-secret provider would swap this for
+/// `SecretBox<Vec<u8>>`. On UTF-8 failure the frame is rejected with a
+/// non-leaking warning rather than panicked through — a malformed
+/// credential should not take the sidecar down on a confused peer.
+///
+/// The trace emission is deliberately bare: `provider_id` only, never
+/// the byte count of the credential and never the value. The byte
+/// count would let a side-channel observer correlate "small key"
+/// vs. "long bearer token"; the security audit policy in the
+/// architecture doc §5 forbids it.
+fn stash_credential(stash: &CredentialStash, instance_id: &str, cred: SidecarCredentials) {
+    let provider_id = cred.provider_id.to_string();
+    let bytes = cred.secret.into_bytes();
+    let as_string = match String::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(_) => {
+            warn!(
+                target: "forge_agent_host::credentials",
+                instance_id = %instance_id,
+                provider_id = %provider_id,
+                "rejecting non-utf8 credential payload",
+            );
+            return;
+        }
+    };
+    let secret = SecretString::from(as_string);
+    stash.put(provider_id.clone(), secret);
+    tracing::trace!(
+        target: "forge_agent_host::credentials",
+        instance_id = %instance_id,
+        provider_id = %provider_id,
+        "stashed credential",
+    );
+}
+
 /// Read loop: dispatch incoming daemon → sidecar messages until a
 /// `Shutdown` frame or EOF. Uses a hoisted buffer so the streaming-token
 /// path stays allocation-free per frame (mirrors `forge-ipc`'s
@@ -567,6 +694,8 @@ async fn dispatch_loop(
     seq: EventSeq,
     pending_turns: Arc<AtomicU64>,
     daemon_hello: DaemonHelloState,
+    credentials: CredentialStash,
+    instance_id: &str,
 ) -> Result<LoopExit> {
     // F-608 step 3: build the sink once and reuse across turns. Cheap
     // to clone (two `Arc`s); cloning per RunTurn would be equally
@@ -596,15 +725,24 @@ async fn dispatch_loop(
                     error!(error = %e, "run_turn stub failed");
                 }
             }
+            SidecarMessage::Credentials(cred) => {
+                // F-608 step 6: stash the credential keyed by
+                // `provider_id`. Phase-1 OllamaProvider is keyless so
+                // the (still-stub) RunTurn handler ignores the stash;
+                // the slot is here so Anthropic / OpenAI auth shapes
+                // can hook in without a further protocol revision.
+                // `stash_credential` redacts on every log emission —
+                // see its module-doc.
+                stash_credential(&credentials, instance_id, cred);
+            }
             SidecarMessage::ToolCallApproved(_)
             | SidecarMessage::ToolCallRejected(_)
-            | SidecarMessage::Credentials(_)
             | SidecarMessage::CompactTranscript(_) => {
                 // Steps 4+ wire these to the refactored orchestrator
-                // (approval queue, credential push, compaction
-                // proxy). Step 3 only swaps the run_turn emission
-                // path onto the EventSink trait — these stay no-ops
-                // until the orchestrator body lands here.
+                // (approval queue, compaction proxy). Step 3 only
+                // swaps the run_turn emission path onto the EventSink
+                // trait — these stay no-ops until the orchestrator
+                // body lands here.
                 debug!("ignoring non-RunTurn daemon message in stub handler");
             }
             SidecarMessage::Shutdown(s) => {
@@ -713,6 +851,7 @@ pub async fn run(args: AgentArgs) -> Result<()> {
     let pending_turns = Arc::new(AtomicU64::new(0));
     let seq = EventSeq::default();
     let daemon_hello = DaemonHelloState::default();
+    let credentials = CredentialStash::default();
     let hb_handle = spawn_heartbeat(writer.clone(), pending_turns.clone());
 
     // Main dispatch loop.
@@ -722,6 +861,8 @@ pub async fn run(args: AgentArgs) -> Result<()> {
         seq,
         pending_turns,
         daemon_hello,
+        credentials,
+        &args.instance_id,
     )
     .await?;
 
