@@ -42,7 +42,7 @@ use ts_rs::TS;
 use forge_agents::{Memory, MemoryFrontmatter, MemoryStore, WriteMode};
 
 #[cfg(feature = "webview")]
-use crate::ipc::{require_size, require_window_label_in, BridgeState, MAX_WORKSPACE_ROOT_BYTES};
+use crate::ipc::{require_size, require_window_label, BridgeState, MAX_WORKSPACE_ROOT_BYTES};
 
 /// Maximum agent id length. Mirrors the cap on credential / catalog ids.
 pub const MAX_AGENT_ID_BYTES: usize = 64;
@@ -194,7 +194,7 @@ pub async fn list_agent_memory<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<Vec<AgentMemoryEntry>, String> {
-    require_window_label_in(&webview, &["dashboard"], false, "list_agent_memory")?;
+    require_window_label(&webview, "dashboard", "list_agent_memory")?;
     require_size("workspace_root", &workspace_root, MAX_WORKSPACE_ROOT_BYTES)?;
 
     let workspace_path =
@@ -230,7 +230,7 @@ pub async fn read_agent_memory<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<String, String> {
-    require_window_label_in(&webview, &["dashboard"], false, "read_agent_memory")?;
+    require_window_label(&webview, "dashboard", "read_agent_memory")?;
     validate_agent_id(&agent_id)?;
 
     let user_dir = crate::ipc::resolve_user_config_dir(&state);
@@ -254,7 +254,7 @@ pub async fn save_agent_memory<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<AgentMemorySavedDto, String> {
-    require_window_label_in(&webview, &["dashboard"], false, "save_agent_memory")?;
+    require_window_label(&webview, "dashboard", "save_agent_memory")?;
     validate_agent_id(&agent_id)?;
     validate_memory_body(&body)?;
 
@@ -281,7 +281,7 @@ pub async fn clear_agent_memory<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, BridgeState>,
 ) -> Result<(), String> {
-    require_window_label_in(&webview, &["dashboard"], false, "clear_agent_memory")?;
+    require_window_label(&webview, "dashboard", "clear_agent_memory")?;
     validate_agent_id(&agent_id)?;
 
     let user_dir = crate::ipc::resolve_user_config_dir(&state);
