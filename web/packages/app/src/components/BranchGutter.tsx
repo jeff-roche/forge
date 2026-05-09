@@ -1,4 +1,4 @@
-import { type Component } from 'solid-js';
+import { type Component, createEffect } from 'solid-js';
 import './BranchGutter.css';
 
 /**
@@ -27,20 +27,21 @@ export interface BranchGutterProps {
 
 export const BranchGutter: Component<BranchGutterProps> = (props) => {
   // Bridge `depth` into CSS via the `--branch-depth` custom property so the
-  // 4px indent step is owned by `tokens.css` (`var(--sp-1)`). Using `left`
-  // rather than `transform: translateX` keeps layout math straightforward
-  // for nested branches (no transform compounding).
-  const style = (): Record<string, string> => ({
-    '--branch-depth': String(props.depth),
+  // 4px indent step is owned by `tokens.css` (`var(--sp-1)`). Set through
+  // `setProperty` on a ref rather than a JSX `style={...}` binding so
+  // `style-src-attr` can drop `'unsafe-inline'` (F-805).
+  let ref: HTMLSpanElement | undefined;
+  createEffect(() => {
+    ref?.style.setProperty('--branch-depth', String(props.depth));
   });
 
   return (
     <span
+      ref={ref}
       class="branch-gutter"
       data-testid="branch-gutter"
       data-branch-depth={String(props.depth)}
       aria-hidden="true"
-      style={style()}
     />
   );
 };

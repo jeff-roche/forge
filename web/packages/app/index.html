@@ -9,15 +9,16 @@
       (app.security.csp). This meta tag mirrors that policy for the Vite dev
       server and the Playwright harness, which do not read tauri.conf.json.
 
-      Intentional divergence (F-664): production tightens `style-src` into
-      `style-src-elem 'self'` (no `'unsafe-inline'`) so injected `<style>`
-      tags cannot drive CSS-attribute-selector exfiltration. The dev meta
-      below keeps `'unsafe-inline'` for `style-src` so Vite HMR — which
-      appends `<style>` tags to `document.head` at runtime — keeps working.
-      Production never exercises that codepath. Inline `style="..."`
-      attributes on JSX elements remain permitted in both contexts via
-      `style-src-attr 'unsafe-inline'`; tightening those is tracked as a
-      follow-up to F-664 (see PR notes / risk catalog).
+      Intentional divergence (F-664 + F-805): production tightens `style-src`
+      into the granular pair `style-src-elem 'self'` (no `'unsafe-inline'`,
+      blocks injected `<style>` tags) and `style-src-attr 'self'` (no
+      `'unsafe-inline'`, blocks inline `style="..."` attributes). The dev
+      meta below keeps the legacy `style-src 'self' 'unsafe-inline'` so
+      Vite HMR — which appends `<style>` tags to `document.head` at
+      runtime — keeps working. Production never exercises that codepath.
+      Per F-805 the 11 catalogued JSX `style={...}` bindings have been
+      migrated to ref-based `element.style.setProperty(...)` calls, which
+      CSP allows under `style-src-attr 'self'`.
     -->
     <meta
       http-equiv="Content-Security-Policy"
