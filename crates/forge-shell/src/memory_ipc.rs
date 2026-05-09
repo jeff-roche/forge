@@ -140,8 +140,24 @@ pub fn build_agent_memory_entries(
 ) -> Vec<AgentMemoryEntry> {
     let mut out: Vec<AgentMemoryEntry> = defs
         .iter()
-        .map(|def| {
-            let path = store.path_for(&def.name);
+        .filter_map(|def| {
+            // F-649: `path_for` validates the agent name. By the time we get
+            // here, names have already been gated at parse time, so any
+            // failure means a programmatic def constructed with a hostile
+            // name slipped through — drop the row rather than surface a
+            // half-resolved path to the dashboard.
+            let path = match store.path_for(&def.name) {
+                Ok(p) => p,
+                Err(err) => {
+                    tracing::warn!(
+                        target: "forge_shell::memory_ipc",
+                        agent_id = %def.name,
+                        error = %err,
+                        "skipping memory entry: invalid agent name",
+                    );
+                    return None;
+                }
+            };
             let (size_bytes, updated_at, version) = match std::fs::metadata(&path) {
                 Ok(meta) => {
                     let size = meta.len();
@@ -165,7 +181,7 @@ pub fn build_agent_memory_entries(
                 }
                 Err(_) => (None, None, None),
             };
-            AgentMemoryEntry {
+            Some(AgentMemoryEntry {
                 agent_id: def.name.clone(),
                 path: path.display().to_string(),
                 size_bytes,
@@ -173,7 +189,7 @@ pub fn build_agent_memory_entries(
                 version,
                 def_enabled: def.memory_enabled,
                 settings_override: settings_overrides.get(&def.name).copied(),
-            }
+            })
         })
         .collect();
     // Stable sort for deterministic UI rendering / test assertions.
