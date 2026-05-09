@@ -198,7 +198,26 @@ impl Level2Session {
         let handle = runtime
             .create(&image, Self::default_init_argv(), &opts)
             .await?;
-        runtime.start(&handle).await?;
+        // F-655: if `start` fails after `create` succeeds, the
+        // container exists in podman's store but `Level2Session` is
+        // never constructed — so its `Drop` panic-safety net never
+        // arms. Without an explicit reap here, every transient start
+        // failure leaks a container. Best-effort cleanup: surface the
+        // original start error regardless of whether `remove`
+        // succeeds (the start error is the actionable signal; a
+        // failing remove is logged for diagnosis but must not mask
+        // it).
+        if let Err(start_err) = runtime.start(&handle).await {
+            if let Err(rm_err) = runtime.remove(&handle).await {
+                tracing::warn!(
+                    error = %rm_err,
+                    container_id = %handle.id,
+                    "Level 2 cleanup after failed start could not remove container; \
+                     manual `podman rm -f <id>` may be required"
+                );
+            }
+            return Err(start_err);
+        }
         Ok(Self {
             runtime,
             image,
@@ -435,6 +454,12 @@ mod tests {
         // Last SecurityOpts seen by `create`, captured for F-642 tests
         // that need to verify the hardened defaults reached the trait.
         last_create_opts: Mutex<Option<SecurityOpts>>,
+        // F-655: force `start` to return the configured error so we can
+        // exercise the create-then-start cleanup guard.
+        start_error: Mutex<Option<OciError>>,
+        // F-655: force `remove` to return the configured error so we can
+        // verify the original start error is the one that propagates.
+        remove_error: Mutex<Option<OciError>>,
     }
 
     impl MockRuntime {
@@ -446,6 +471,12 @@ mod tests {
         }
         fn last_create_opts(&self) -> Option<SecurityOpts> {
             self.last_create_opts.lock().unwrap().clone()
+        }
+        fn fail_start(&self, err: OciError) {
+            *self.start_error.lock().unwrap() = Some(err);
+        }
+        fn fail_remove(&self, err: OciError) {
+            *self.remove_error.lock().unwrap() = Some(err);
         }
     }
 
@@ -471,6 +502,9 @@ mod tests {
         }
         async fn start(&self, _handle: &ContainerHandle) -> Result<(), OciError> {
             self.record("start");
+            if let Some(err) = self.start_error.lock().unwrap().take() {
+                return Err(err);
+            }
             Ok(())
         }
         async fn exec(
@@ -496,6 +530,9 @@ mod tests {
         }
         async fn remove(&self, _handle: &ContainerHandle) -> Result<(), OciError> {
             self.record("remove");
+            if let Some(err) = self.remove_error.lock().unwrap().take() {
+                return Err(err);
+            }
             Ok(())
         }
         async fn stats(&self, _handle: &ContainerHandle) -> Result<Stats, OciError> {
@@ -659,6 +696,67 @@ mod tests {
         // Defuse for the actual drop in this test environment so we
         // don't fork off a real `podman rm -f`.
         session.disable_drop_cleanup();
+    }
+
+    // ── F-655: container leak on start failure ──────────────────────
+
+    #[tokio::test]
+    async fn create_removes_container_when_start_fails() {
+        // Bug fix invariant: if `runtime.create` succeeds but
+        // `runtime.start` fails, the partially-constructed container
+        // must be reaped. Without this, every transient start failure
+        // leaks a container into podman's store.
+        let mock: Arc<MockRuntime> = Arc::new(MockRuntime::default());
+        mock.fail_start(OciError::CommandFailed {
+            tool: "podman",
+            args: vec!["start".into(), "mock-container".into()],
+            exit_code: Some(125),
+            stderr: "transient infra failure".into(),
+        });
+        let runtime: Arc<dyn ContainerRuntime> = mock.clone();
+
+        let res = Level2Session::create(runtime, alpine(), ContainerLimits::default()).await;
+        assert!(res.is_err(), "create must propagate the start failure");
+
+        // Lifecycle proof: pull → create → start (failed) → remove.
+        // `remove` is the load-bearing assertion — it is what prevents
+        // the orphan.
+        assert_eq!(mock.calls(), vec!["pull", "create", "start", "remove"]);
+    }
+
+    #[tokio::test]
+    async fn create_propagates_original_start_error_when_remove_also_fails() {
+        // The cleanup is best-effort: if `remove` itself fails the
+        // caller must still see the *start* error, not the remove
+        // error. The start error is the actionable signal; the
+        // remove failure is logged for diagnosis but must not mask it.
+        let mock: Arc<MockRuntime> = Arc::new(MockRuntime::default());
+        mock.fail_start(OciError::CommandFailed {
+            tool: "podman",
+            args: vec!["start".into(), "mock-container".into()],
+            exit_code: Some(125),
+            stderr: "ORIGINAL START FAILURE".into(),
+        });
+        mock.fail_remove(OciError::CommandFailed {
+            tool: "podman",
+            args: vec!["rm".into(), "-f".into(), "mock-container".into()],
+            exit_code: Some(2),
+            stderr: "remove also failed".into(),
+        });
+        let runtime: Arc<dyn ContainerRuntime> = mock.clone();
+
+        let res = Level2Session::create(runtime, alpine(), ContainerLimits::default()).await;
+        let err = match res {
+            Ok(_) => panic!("create must return Err when start fails"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ORIGINAL START FAILURE"),
+            "expected original start error to propagate, got: {msg}"
+        );
+        // Best-effort cleanup still attempted.
+        assert_eq!(mock.calls(), vec!["pull", "create", "start", "remove"]);
     }
 
     // ── F-642: Level2Session passes hardened defaults to runtime.create ──
