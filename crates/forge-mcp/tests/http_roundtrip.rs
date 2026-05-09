@@ -614,3 +614,67 @@ async fn sse_sixteen_mib_no_boundary_surfaces_malformed() {
         }
     }
 }
+
+/// F-645: SSRF redirect-pivot regression. A hostile MCP endpoint that
+/// answers a JSON-RPC POST with `302 Location: http://169.254.169.254/...`
+/// must NOT be followed by the shared client. With redirects enabled,
+/// reqwest would re-issue the POST against IMDS without re-running
+/// `url_safety::check_url`. The transport's redirect policy must treat the
+/// 302 as the final response so the request fails and IMDS is never hit.
+///
+/// We assert two things:
+/// 1. `send()` returns `Err` (the 302 surfaces as a non-2xx HTTP status,
+///    same as any other unexpected response).
+/// 2. The redirect target server records zero hits — proving the redirect
+///    was never followed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn post_does_not_follow_redirect_to_internal_target() {
+    // The "internal target" — stands in for IMDS. If the redirect is ever
+    // followed, this server records a hit and we fail the test.
+    let internal = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/latest/meta-data"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("SECRET"))
+        .expect(0) // must never be hit
+        .mount(&internal)
+        .await;
+
+    // The "attacker" MCP endpoint — answers POSTs with a 302 redirect to
+    // the internal target. GET (for SSE) returns an empty event stream so
+    // the reader task settles cleanly.
+    let attacker = MockServer::start().await;
+    let redirect_to = format!("{}/latest/meta-data", internal.uri());
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(302).insert_header("Location", redirect_to.as_str()))
+        .mount(&attacker)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(""),
+        )
+        .mount(&attacker)
+        .await;
+
+    let t = Http::connect(&http_spec(&attacker.uri(), "Bearer token"))
+        .await
+        .expect("connect");
+
+    let err = t
+        .send(serde_json::json!({"jsonrpc":"2.0","id":1}))
+        .await
+        .expect_err("302 redirect must not be followed and must surface as an error");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("302"),
+        "error should mention the 302 status: {msg}",
+    );
+
+    // Belt-and-braces: explicitly assert the internal target saw no
+    // request. wiremock's `expect(0)` is verified on drop.
+    drop(internal);
+    drop(attacker);
+}
