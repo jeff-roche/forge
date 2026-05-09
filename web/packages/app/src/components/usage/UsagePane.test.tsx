@@ -131,12 +131,21 @@ describe('UsagePane helpers', () => {
 // ---------------------------------------------------------------------------
 
 describe('<UsagePane>', () => {
-  it('renders the loading state during the IPC fetch', async () => {
+  it('renders a skeleton loading state during the IPC fetch (F-684)', async () => {
     invokeMock.mockImplementation(() => new Promise(() => undefined));
-    const { findByText } = render(() => (
+    const { findByTestId, queryByText } = render(() => (
       <UsagePane workspaceRoot="/ws/a" />
     ));
-    expect(await findByText(/usage · probing/i)).toBeTruthy();
+    const skeletonHost = await findByTestId('usage-loading');
+    // Skeleton primitive carries `role="status"` + `aria-busy="true"`; one
+    // for the chart, one for the table rows.
+    const statuses = skeletonHost.querySelectorAll('[role="status"]');
+    expect(statuses.length).toBe(2);
+    for (const s of Array.from(statuses)) {
+      expect(s.getAttribute('aria-busy')).toBe('true');
+    }
+    // Plain-text loading copy must be gone — F-684 replaces it with skeletons.
+    expect(queryByText(/usage · probing/i)).toBeFalsy();
   });
 
   it('renders the empty state when no usage exists in range', async () => {
@@ -200,6 +209,39 @@ describe('<UsagePane>', () => {
     for (const [, args] of calls) {
       expect((args as { range: { type: string } }).range.type).toBe('Today');
     }
+  });
+
+  it('range selector buttons use the @forge/design Button primitive', async () => {
+    setupInvoke({ byProvider: emptySummary(), byModel: emptySummary() });
+    const { findByText } = render(() => (
+      <UsagePane workspaceRoot="/ws/a" />
+    ));
+    await flush();
+
+    const today = (await findByText('Today')) as HTMLElement;
+    // The primitive baseline class must be on the rendered button — proves
+    // the raw <button> was replaced with the design-system Button.
+    expect(today.classList.contains('forge-button')).toBe(true);
+    expect(today.classList.contains('forge-button--ghost')).toBe(true);
+    // Active range is reflected via aria-pressed (default 'last30').
+    const last30 = (await findByText('Last 30')) as HTMLElement;
+    expect(last30.getAttribute('aria-pressed')).toBe('true');
+    expect(today.getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('Retry button uses the @forge/design Button primitive', async () => {
+    invokeMock.mockImplementation(() =>
+      Promise.reject(new Error('shell offline')),
+    );
+    const { findByText } = render(() => (
+      <UsagePane workspaceRoot="/ws/a" />
+    ));
+    await flush();
+    await flush();
+
+    const retry = (await findByText('Retry')) as HTMLElement;
+    expect(retry.classList.contains('forge-button')).toBe(true);
+    expect(retry.classList.contains('forge-button--primary')).toBe(true);
   });
 
   it('cross-workspace toggle flips the IPC argument', async () => {

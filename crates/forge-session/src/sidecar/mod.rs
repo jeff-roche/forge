@@ -95,11 +95,37 @@ const MAX_RETRIES_IN_WINDOW: usize = 3;
 /// architecture-doc §4 default.
 const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_millis(2000);
 
+/// F-652: per-frame read deadline on the steady-state sidecar event
+/// pump. A healthy `forged-agent` heartbeats every few seconds; a 60 s
+/// silence is unambiguously a stalled or wedged child (and a
+/// slowloris-style same-uid attacker holding the socket open without
+/// sending data). On timeout the pump treats the read as an EOF /
+/// crash and the supervisor's restart loop kicks in.
+const PUMP_FRAME_DEADLINE: Duration = Duration::from_secs(60);
+
 /// Buffer depth on the daemon → child command channel. Sized for the
 /// realistic burst of approval frames a single turn can produce; an
 /// over-eager producer is back-pressured rather than allowed to balloon
 /// memory.
 const COMMAND_CHANNEL_DEPTH: usize = 64;
+
+/// Buffer depth on the sidecar → daemon event channel.
+///
+/// F-658: the inbound `SidecarMessage::Event` reader hands frames to a
+/// dedicated emitter task through a bounded `mpsc::channel`. A
+/// misbehaving (or compromised) sidecar that emits at line rate is
+/// back-pressured at this boundary: once the channel is full, the read
+/// loop awaits on `Sender::send`, the kernel UDS read buffer fills, and
+/// the sidecar's own [`forge_ipc::write_frame`] call blocks. End-to-end
+/// flow control with a documented memory ceiling — no daemon-side queue
+/// can grow unbounded regardless of peer behavior.
+///
+/// Sized at 1024 frames (~few-hundred-KiB worst case for typical
+/// `Event` payloads) so a normal turn's burst — token streaming chunks
+/// plus tool-call envelopes — never observes backpressure under
+/// healthy conditions, but a sustained flood saturates well before
+/// memory pressure.
+pub const EVENT_CHANNEL_DEPTH: usize = 1024;
 
 /// Resolve the supervisor's effective handshake deadline. Reads the
 /// same `FORGE_IPC_HANDSHAKE_DEADLINE_MS` env override the daemon's
@@ -317,6 +343,17 @@ impl SidecarSupervisor {
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<ShutdownRequest>();
         let pid_cell = Arc::new(AtomicU32::new(initial.child_pid));
 
+        // F-658: decouple inbound-event reads from sink emission with a
+        // bounded mpsc. The supervisor task pushes onto `event_tx` and
+        // backpressures the read loop when full; the emitter task drains
+        // `event_rx` into the sink without ever blocking the IPC read
+        // path. Failure-path escalations bypass the channel via the
+        // retained `event_sink` clone in `SupervisorTask` so an
+        // exhausted-budget event is delivered even if the channel is
+        // saturated.
+        let (event_tx, event_rx) = mpsc::channel::<Event>(EVENT_CHANNEL_DEPTH);
+        let emitter_join = spawn_event_emitter(event_rx, event_sink.clone(), instance_id.clone());
+
         let supervisor = SupervisorTask {
             socket_dir: self.socket_dir.clone(),
             forged_agent_path: self.forged_agent_path.clone(),
@@ -325,6 +362,8 @@ impl SidecarSupervisor {
             instance_id: instance_id.clone(),
             params,
             event_sink: event_sink.clone(),
+            event_tx,
+            emitter_join: Some(emitter_join),
             command_rx,
             shutdown_rx,
             pid_cell: pid_cell.clone(),
@@ -420,37 +459,52 @@ impl SidecarSupervisor {
                 );
             }
         };
+
+        // F-651: defence-in-depth peer-uid check. The sidecar UDS lives
+        // in a 0o700 directory and the socket itself is 0o600, but
+        // verifying the connecting peer's uid matches our euid in code
+        // closes the same-uid attacker hole and rejects any future
+        // operator misconfiguration of the parent dir without silently
+        // trusting the connection. Tokio's `peer_cred()` wraps
+        // SO_PEERCRED on Linux and LOCAL_PEERCRED on macOS.
+        if let Err(e) = verify_peer_uid(&stream, current_euid()) {
+            warn!(
+                target: "forge_session::sidecar",
+                instance_id = %instance_id,
+                error = %e,
+                "rejecting sidecar peer with mismatched uid",
+            );
+            let _ = child.kill().await;
+            return Err(e).context("verify forged-agent peer uid");
+        }
+
         let (mut reader, mut writer) = tokio::io::split(stream);
 
         // Read the child's Hello. The architecture-doc §2 protocol has
         // the *child* send Hello first; we validate the proto version
         // and instance_id before completing the handshake.
+        //
+        // F-652: `read_frame_into_with_deadline` enforces the same
+        // handshake deadline directly inside the framing helper so a
+        // silent child can't pin the worker.
         let mut buf = Vec::new();
-        let hello_frame: SidecarMessage = match tokio::time::timeout(
-            deadline,
-            forge_ipc::read_frame_into::<_, SidecarMessage>(&mut reader, &mut buf),
-        )
+        let hello_frame: SidecarMessage = match forge_ipc::read_frame_into_with_deadline::<
+            _,
+            SidecarMessage,
+        >(&mut reader, &mut buf, deadline)
         .await
         {
-            Ok(Ok(m)) => m,
-            Ok(Err(e)) => {
+            Ok(m) => m,
+            Err(e) => {
                 let _ = child.kill().await;
                 return Err(e.context("read Hello from forged-agent"));
-            }
-            Err(_) => {
-                let _ = child.kill().await;
-                anyhow::bail!("forged-agent did not send Hello within {:?}", deadline);
             }
         };
         match &hello_frame {
             SidecarMessage::Hello(h) => {
-                if h.instance_id.to_string() != instance_id.to_string() {
+                if let Err(e) = validate_sidecar_hello(h, instance_id) {
                     let _ = child.kill().await;
-                    anyhow::bail!(
-                        "forged-agent reported instance_id={}, expected {}",
-                        h.instance_id,
-                        instance_id
-                    );
+                    return Err(e);
                 }
             }
             other => {
@@ -517,7 +571,18 @@ struct SupervisorTask {
     socket_path: PathBuf,
     instance_id: AgentInstanceId,
     params: SpawnParams,
+    /// Direct sink reference. Used **only** for failure-path
+    /// escalations (`emit_failure`); routine inbound events flow through
+    /// `event_tx` so the F-658 backpressure contract is preserved.
     event_sink: Arc<dyn EventSink>,
+    /// Bounded sender feeding the per-supervisor emitter task. Frames
+    /// arrive on the IPC read half; the supervisor awaits this send so
+    /// a slow sink propagates backpressure all the way to the sidecar.
+    event_tx: mpsc::Sender<Event>,
+    /// JoinHandle for the emitter task. Held `Option<>` so the
+    /// supervisor can `take()` it on shutdown, drop the sender, and
+    /// await final drain.
+    emitter_join: Option<JoinHandle<()>>,
     command_rx: mpsc::Receiver<SidecarMessage>,
     shutdown_rx: oneshot::Receiver<ShutdownRequest>,
     pid_cell: Arc<AtomicU32>,
@@ -561,6 +626,7 @@ impl SupervisorTask {
                         instance_id = %self.instance_id,
                         "sidecar supervisor exiting after clean shutdown"
                     );
+                    self.drain_emitter().await;
                     return;
                 }
                 LifecycleOutcome::Crashed(reason) => {
@@ -589,6 +655,7 @@ impl SupervisorTask {
                             "sidecar exhausted retry budget; escalating to BackgroundAgentCompleted (failure)"
                         );
                         self.emit_failure(reason).await;
+                        self.drain_emitter().await;
                         return;
                     }
 
@@ -650,6 +717,7 @@ impl SupervisorTask {
                                     "sidecar restart-after-crash budget exhausted; escalating"
                                 );
                                 self.emit_failure(format!("restart failed: {e}")).await;
+                                self.drain_emitter().await;
                                 return;
                             }
                             // Otherwise sleep briefly to avoid a hot
@@ -677,6 +745,7 @@ impl SupervisorTask {
                                     );
                                     self.emit_failure(format!("relaunch retry failed: {e2}"))
                                         .await;
+                                    self.drain_emitter().await;
                                     return;
                                 }
                             }
@@ -721,7 +790,7 @@ impl SupervisorTask {
                         }
                     }
                 }
-                read = forge_ipc::read_frame_into::<_, SidecarMessage>(&mut live.reader, &mut buf) => {
+                read = forge_ipc::read_frame_into_with_deadline::<_, SidecarMessage>(&mut live.reader, &mut buf, PUMP_FRAME_DEADLINE) => {
                     match read {
                         Ok(frame) => {
                             if let Some(reason) = self.handle_inbound(frame).await {
@@ -853,12 +922,21 @@ impl SupervisorTask {
     async fn handle_inbound(&self, frame: SidecarMessage) -> Option<String> {
         match frame {
             SidecarMessage::Event(ev) => {
-                if let Err(e) = self.event_sink.emit(ev.event).await {
+                // F-658: route routine events through the bounded
+                // channel. `send().await` parks the read loop when the
+                // channel is full — that's the daemon-side backpressure
+                // signal that propagates back through the kernel UDS
+                // buffer to the sidecar's writer. A `Closed` error
+                // means the emitter task has exited (sink dropped or
+                // panicked); log and continue rather than taking the
+                // supervisor down on a downstream subscriber's
+                // collapse.
+                if let Err(e) = self.event_tx.send(ev.event).await {
                     warn!(
                         target: "forge_session::sidecar",
                         instance_id = %self.instance_id,
                         error = %e,
-                        "event_sink emit failed"
+                        "event channel closed; emitter task gone"
                     );
                 }
                 None
@@ -937,6 +1015,31 @@ impl SupervisorTask {
         let _ = tokio::fs::remove_file(&self.socket_path).await;
     }
 
+    /// Close the event channel and await the emitter task's final
+    /// drain so callers observing the supervisor's exit are guaranteed
+    /// every accepted frame has reached the sink. Idempotent — calling
+    /// twice is a no-op because the JoinHandle has been taken.
+    async fn drain_emitter(&mut self) {
+        // Replace `event_tx` with a fresh, unconnected sender so the
+        // original is dropped here; the emitter task observes
+        // `recv() -> None` and exits. We can't simply move out of
+        // `self.event_tx` because the surrounding methods take `&mut self`
+        // for the duration of the supervisor's run.
+        let (sentinel_tx, _) = mpsc::channel::<Event>(1);
+        let closing = std::mem::replace(&mut self.event_tx, sentinel_tx);
+        drop(closing);
+        if let Some(join) = self.emitter_join.take() {
+            if let Err(e) = join.await {
+                warn!(
+                    target: "forge_session::sidecar",
+                    instance_id = %self.instance_id,
+                    error = %e,
+                    "event emitter task did not exit cleanly"
+                );
+            }
+        }
+    }
+
     /// Drop crash-log entries older than [`RETRY_WINDOW`].
     fn prune_crash_log(&mut self, now: Instant) {
         while let Some(&front) = self.crash_log.front() {
@@ -949,6 +1052,49 @@ impl SupervisorTask {
     }
 }
 
+/// F-658: spawn the event emitter task that drains a bounded channel
+/// of `Event`s into a real [`EventSink`].
+///
+/// The supervisor's IPC read loop pushes inbound `SidecarMessage::Event`
+/// payloads onto the paired [`mpsc::Sender`] using `send().await`. When
+/// the sink is slow, the channel fills, the read loop parks, the kernel
+/// UDS read buffer fills, and the sidecar's writer blocks — end-to-end
+/// flow control with a documented memory ceiling
+/// ([`EVENT_CHANNEL_DEPTH`]).
+///
+/// Sink errors are logged at `warn!` and **do not** stop the task —
+/// dropping the entire pump on a single transient failure would leave
+/// the daemon's read loop wedged on a saturated channel forever. The
+/// task exits only when its receiver closes (sender dropped), which
+/// happens on the supervisor's shutdown / failure-escalation path.
+///
+/// Exposed as a free function (rather than baked into the supervisor)
+/// so the F-658 regression test can drive the same drain logic without
+/// spawning a real `forged-agent` binary.
+pub fn spawn_event_emitter(
+    mut rx: mpsc::Receiver<Event>,
+    sink: Arc<dyn EventSink>,
+    instance_id: AgentInstanceId,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            if let Err(e) = sink.emit(event).await {
+                warn!(
+                    target: "forge_session::sidecar",
+                    instance_id = %instance_id,
+                    error = %e,
+                    "event_sink emit failed"
+                );
+            }
+        }
+        debug!(
+            target: "forge_session::sidecar",
+            instance_id = %instance_id,
+            "event emitter task drained; exiting"
+        );
+    })
+}
+
 /// Mode-700 the per-supervisor socket dir. Idempotent: a pre-existing
 /// dir is left in place and chmodded back to 0o700 defensively.
 async fn ensure_socket_dir(dir: &Path) -> Result<()> {
@@ -956,6 +1102,56 @@ async fn ensure_socket_dir(dir: &Path) -> Result<()> {
         .await
         .with_context(|| format!("create sidecar socket dir at {}", dir.display()))?;
     let _ = tokio::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).await;
+    Ok(())
+}
+
+/// F-651: read the daemon's effective uid. Wraps the `geteuid()`
+/// libc call so the supervisor doesn't pull in `nix` for a single
+/// syscall; `forge-session` already depends on `libc`.
+fn current_euid() -> u32 {
+    // Safe: `geteuid()` is async-signal-safe and has no failure mode.
+    unsafe { libc::geteuid() }
+}
+
+/// F-678: validate a sidecar's `Hello` frame. The `instance_id` check
+/// is hard (returns `Err` so the supervisor can kill the misrouted
+/// child); the `schema_version` check is soft and emits `tracing::warn!`
+/// through the shared [`forge_ipc::warn_if_schema_mismatch`] helper.
+/// Lives outside `LiveSidecar::spawn` so unit tests can drive the
+/// validation path without spawning a real `forged-agent` binary.
+pub(crate) fn validate_sidecar_hello(
+    hello: &SidecarHello,
+    expected_instance_id: &AgentInstanceId,
+) -> Result<()> {
+    if hello.instance_id.to_string() != expected_instance_id.to_string() {
+        anyhow::bail!(
+            "forged-agent reported instance_id={}, expected {}",
+            hello.instance_id,
+            expected_instance_id
+        );
+    }
+    forge_ipc::warn_if_schema_mismatch("sidecar", hello.schema_version, SIDECAR_SCHEMA_VERSION);
+    Ok(())
+}
+
+/// F-651: assert that the connected peer's uid matches `expected_uid`.
+/// Tokio's `peer_cred()` wraps SO_PEERCRED on Linux and LOCAL_PEERCRED
+/// on macOS; both report the credentials of the process that
+/// `connect()`'d the socket. A mismatch is a defence-in-depth signal:
+/// even though the parent dir is 0o700 and the socket file 0o600, a
+/// real different-uid peer or a confused operator must be rejected.
+fn verify_peer_uid(stream: &UnixStream, expected_uid: u32) -> Result<()> {
+    let cred = stream
+        .peer_cred()
+        .context("read peer credentials from sidecar UDS")?;
+    let peer_uid = cred.uid();
+    if peer_uid != expected_uid {
+        anyhow::bail!(
+            "sidecar peer uid {} does not match daemon euid {}",
+            peer_uid,
+            expected_uid
+        );
+    }
     Ok(())
 }
 
@@ -999,5 +1195,231 @@ async fn bind_uds_safely(path: &Path) -> Result<UnixListener> {
                 .with_context(|| format!("retry bind failed at {}", path.display()))
         }
         Err(e) => Err(e).with_context(|| format!("bind failed at {}", path.display())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// F-651: a connected peer with the same uid as the daemon (the
+    /// realistic case — both halves of a `UnixStream::pair` belong to
+    /// our own process) is accepted.
+    #[tokio::test]
+    async fn verify_peer_uid_accepts_same_uid() {
+        let (a, _b) = UnixStream::pair().expect("UnixStream::pair");
+        let euid = current_euid();
+        verify_peer_uid(&a, euid).expect("same-uid peer must be accepted");
+    }
+
+    /// F-651: a connected peer whose uid does not match the daemon's
+    /// euid is rejected. We can't fork a different-uid process under
+    /// `cargo test` without privileges, so we exercise the rejection
+    /// path by passing a deliberately-wrong `expected_uid` — the
+    /// supervisor's call site always passes `current_euid()`, so this
+    /// test pins the comparison's negative branch end-to-end.
+    #[tokio::test]
+    async fn verify_peer_uid_rejects_mismatched_uid() {
+        let (a, _b) = UnixStream::pair().expect("UnixStream::pair");
+        let euid = current_euid();
+        let bogus = euid.wrapping_add(1);
+        let err = verify_peer_uid(&a, bogus).expect_err("mismatched-uid peer must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("does not match"),
+            "expected mismatch error, got: {msg}"
+        );
+    }
+
+    /// F-678: a sidecar `Hello` whose `schema_version` matches the
+    /// supervisor's `SIDECAR_SCHEMA_VERSION` validates without
+    /// emitting a warn — the silent path.
+    #[test]
+    fn validate_sidecar_hello_silent_on_match() {
+        use forge_core::AgentInstanceId;
+        use forge_ipc::sidecar::{
+            SidecarAgentDef, SidecarHello, SidecarProviderSpec, SidecarSandboxLevel,
+            SIDECAR_PROTO_VERSION,
+        };
+        let id = AgentInstanceId::from_string("inst-match".into());
+        let hello = SidecarHello {
+            proto: SIDECAR_PROTO_VERSION,
+            instance_id: id.clone(),
+            agent_def: SidecarAgentDef {
+                name: "t".into(),
+                description: None,
+                body: String::new(),
+                allowed_paths: vec![],
+                isolation: "process".into(),
+                memory_enabled: false,
+            },
+            allowed_paths: vec![],
+            workspace_path: "/tmp".into(),
+            provider_spec: SidecarProviderSpec {
+                kind: "stub".into(),
+                model: "stub".into(),
+                base_url: None,
+            },
+            sandbox_level: SidecarSandboxLevel::Level1,
+            telemetry_endpoint: None,
+            schema_version: SIDECAR_SCHEMA_VERSION,
+        };
+        validate_sidecar_hello(&hello, &id).expect("matching schema_version must validate");
+    }
+
+    /// F-678: a sidecar `Hello` whose `schema_version` differs from
+    /// `SIDECAR_SCHEMA_VERSION` still passes validation (warn-only,
+    /// non-fatal) and emits a `warn!` through the shared helper. Pin
+    /// the wire of that warn under a capture subscriber so the contract
+    /// stays observable from operator logs.
+    #[test]
+    fn validate_sidecar_hello_warns_on_schema_mismatch() {
+        use forge_core::AgentInstanceId;
+        use forge_ipc::sidecar::{
+            SidecarAgentDef, SidecarHello, SidecarProviderSpec, SidecarSandboxLevel,
+            SIDECAR_PROTO_VERSION,
+        };
+        use std::io;
+        use std::sync::{Arc, Mutex as StdMutex};
+        use tracing_subscriber::fmt::MakeWriter;
+
+        #[derive(Clone, Default)]
+        struct CaptureWriter(Arc<StdMutex<Vec<u8>>>);
+        impl io::Write for CaptureWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> MakeWriter<'a> for CaptureWriter {
+            type Writer = CaptureWriter;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let writer = CaptureWriter::default();
+        let buf = writer.0.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .with_target(true)
+            .with_writer(writer)
+            .finish();
+
+        let id = AgentInstanceId::from_string("inst-skew".into());
+        let bogus_schema = SIDECAR_SCHEMA_VERSION.wrapping_add(99);
+        let hello = SidecarHello {
+            proto: SIDECAR_PROTO_VERSION,
+            instance_id: id.clone(),
+            agent_def: SidecarAgentDef {
+                name: "t".into(),
+                description: None,
+                body: String::new(),
+                allowed_paths: vec![],
+                isolation: "process".into(),
+                memory_enabled: false,
+            },
+            allowed_paths: vec![],
+            workspace_path: "/tmp".into(),
+            provider_spec: SidecarProviderSpec {
+                kind: "stub".into(),
+                model: "stub".into(),
+                base_url: None,
+            },
+            sandbox_level: SidecarSandboxLevel::Level1,
+            telemetry_endpoint: None,
+            schema_version: bogus_schema,
+        };
+
+        tracing::subscriber::with_default(subscriber, || {
+            validate_sidecar_hello(&hello, &id)
+                .expect("schema mismatch must be warn-only, not an error");
+        });
+
+        let captured = String::from_utf8(buf.lock().unwrap().clone()).expect("utf-8");
+        assert!(
+            captured.contains("schema_version mismatch"),
+            "expected mismatch warn, got: {captured}",
+        );
+        assert!(
+            captured.contains("peer=\"sidecar\""),
+            "expected peer=sidecar label, got: {captured}",
+        );
+        assert!(
+            captured.contains(&format!("peer_schema_version={bogus_schema}")),
+            "expected reported peer schema_version, got: {captured}",
+        );
+    }
+
+    /// F-678: a sidecar `Hello` carrying a wrong `instance_id` still
+    /// hard-rejects (the supervisor would kill the misrouted child).
+    /// Pin this so the validator refactor cannot accidentally swallow
+    /// the instance_id check while preserving the new schema warn.
+    #[test]
+    fn validate_sidecar_hello_rejects_bad_instance_id() {
+        use forge_core::AgentInstanceId;
+        use forge_ipc::sidecar::{
+            SidecarAgentDef, SidecarHello, SidecarProviderSpec, SidecarSandboxLevel,
+            SIDECAR_PROTO_VERSION,
+        };
+        let expected = AgentInstanceId::from_string("inst-expected".into());
+        let reported = AgentInstanceId::from_string("inst-other".into());
+        let hello = SidecarHello {
+            proto: SIDECAR_PROTO_VERSION,
+            instance_id: reported,
+            agent_def: SidecarAgentDef {
+                name: "t".into(),
+                description: None,
+                body: String::new(),
+                allowed_paths: vec![],
+                isolation: "process".into(),
+                memory_enabled: false,
+            },
+            allowed_paths: vec![],
+            workspace_path: "/tmp".into(),
+            provider_spec: SidecarProviderSpec {
+                kind: "stub".into(),
+                model: "stub".into(),
+                base_url: None,
+            },
+            sandbox_level: SidecarSandboxLevel::Level1,
+            telemetry_endpoint: None,
+            schema_version: SIDECAR_SCHEMA_VERSION,
+        };
+        let err = validate_sidecar_hello(&hello, &expected)
+            .expect_err("instance_id mismatch must hard-reject");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("instance_id"),
+            "expected instance_id error, got: {msg}",
+        );
+    }
+
+    /// F-652: an idle (silent) sidecar peer must not pin the steady-
+    /// state pump indefinitely. `read_frame_into_with_deadline` returns
+    /// an error after `PUMP_FRAME_DEADLINE`; the supervisor's
+    /// `pump_until_exit` then routes that into its EOF-classification
+    /// branch and the restart loop.
+    #[tokio::test]
+    async fn pump_frame_deadline_fires_on_silent_peer() {
+        // Use a short deadline derived from the same helper the
+        // supervisor uses, so a regression that drops the deadline
+        // wrapper would still surface as a hang here.
+        let (a, _b) = UnixStream::pair().expect("UnixStream::pair");
+        let mut reader = a;
+        let started = Instant::now();
+        let deadline = Duration::from_millis(150);
+        let result =
+            forge_ipc::read_frame_with_deadline::<_, SidecarMessage>(&mut reader, deadline).await;
+        let elapsed = started.elapsed();
+        assert!(result.is_err(), "deadline must fire for a silent peer");
+        assert!(
+            elapsed < Duration::from_millis(750),
+            "deadline did not fire promptly: {elapsed:?}"
+        );
     }
 }

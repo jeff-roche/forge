@@ -1,3 +1,4 @@
+#![allow(deprecated)] // F-652: tests/benches still drive the deprecated bare read_frame helpers.
 //! Integration test: `forged` owns its pid file lifecycle (F-049, F-338).
 //!
 //! Persistent-mode `forged` must:
@@ -63,6 +64,7 @@ async fn handshake(sock: &std::path::Path) {
                 pid: std::process::id(),
                 user: "tester".into(),
             },
+            schema_version: forge_ipc::SCHEMA_VERSION,
         }),
     )
     .await

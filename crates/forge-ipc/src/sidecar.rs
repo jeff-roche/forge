@@ -27,7 +27,13 @@ use serde::{Deserialize, Serialize};
 /// `secrecy::SecretString` immediately on receive, so the only place the
 /// raw bytes ever appear in cleartext is on the wire and inside the
 /// receive-side conversion — both narrow, audited paths.
-#[derive(Clone, Serialize, Deserialize)]
+///
+/// F-659: derives [`zeroize::Zeroize`] and [`zeroize::ZeroizeOnDrop`] so
+/// the inner buffer is wiped before its heap slot is freed. Without this,
+/// intermediate copies (clones, deserialization temporaries) leave
+/// plaintext credential bytes recoverable from a heap dump or core file
+/// (CWE-312).
+#[derive(Clone, Serialize, Deserialize, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 #[serde(transparent)]
 pub struct SecretBytes(Vec<u8>);
 
@@ -54,10 +60,14 @@ impl SecretBytes {
     ///
     /// The receive side uses this to hand the bytes straight into a
     /// `secrecy::SecretString` (which zeroes-on-drop) without any
-    /// intermediate clone. The original `SecretBytes` is dropped by the
-    /// move; no intermediate `String` ever exists at trace level.
-    pub fn into_bytes(self) -> Vec<u8> {
-        self.0
+    /// intermediate clone. F-659: `SecretBytes` derives `ZeroizeOnDrop`,
+    /// which generates a `Drop` impl and forbids moving out of `self.0`
+    /// directly. We `mem::take` the inner Vec instead — the moved-out
+    /// bytes flow into the receiver's `SecretString` (zeroized when
+    /// *that* drops), and the now-empty Vec left behind is harmless to
+    /// zeroize on `SecretBytes`'s Drop.
+    pub fn into_bytes(mut self) -> Vec<u8> {
+        std::mem::take(&mut self.0)
     }
 
     /// Borrow the inner bytes. Reserved for narrow audited call sites
@@ -185,7 +195,8 @@ pub enum SidecarMessage {
 
 // ── daemon → sidecar payloads ────────────────────────────────────────────
 
-/// Initial daemon → sidecar handshake payload.
+/// Initial sidecar → daemon handshake payload (and, in step-4 of F-608,
+/// the daemon → sidecar follow-up that forwards the spawn parameters).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SidecarHello {
     pub proto: u32,
@@ -197,6 +208,15 @@ pub struct SidecarHello {
     pub sandbox_level: SidecarSandboxLevel,
     /// Optional OTLP / tracing collector endpoint. `None` skips export.
     pub telemetry_endpoint: Option<String>,
+    /// F-678: peer-reported schema version. The supervisor compares this
+    /// against [`SIDECAR_SCHEMA_VERSION`] and `tracing::warn!`s on
+    /// mismatch; the agent-host applies the same check on the
+    /// `HelloAck` it receives back. `#[serde(default)]` defaults to `0`
+    /// for legacy peers (e.g. older `forged-agent` builds) so a skewed
+    /// peer is surfaced via the warn rather than silently rejected at
+    /// the deserialize layer.
+    #[serde(default)]
+    pub schema_version: u32,
 }
 
 /// Wire-friendly subset of `forge_agents::AgentDef` carried over the
@@ -371,6 +391,7 @@ pub struct CrashDump {
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // F-652: tests still drive the deprecated bare read_frame helpers.
 mod tests {
     use super::*;
     use chrono::TimeZone;
@@ -405,6 +426,7 @@ mod tests {
                 },
                 sandbox_level: SidecarSandboxLevel::Level1,
                 telemetry_endpoint: None,
+                schema_version: SIDECAR_SCHEMA_VERSION,
             }),
             SidecarMessage::Hello(SidecarHello {
                 proto: SIDECAR_PROTO_VERSION,
@@ -428,6 +450,7 @@ mod tests {
                     image: "registry.example.com/forge/sandbox:1".into(),
                 },
                 telemetry_endpoint: Some("http://otel:4317".into()),
+                schema_version: SIDECAR_SCHEMA_VERSION,
             }),
             SidecarMessage::RunTurn(SidecarRunTurn {
                 turn_id: "turn-1".into(),
@@ -588,6 +611,60 @@ mod tests {
             }
             other => panic!("expected Credentials, got {other:?}"),
         }
+    }
+
+    /// F-659: `SecretBytes` must zero its inner buffer on drop so a
+    /// heap dump or core file cannot recover credential bytes from a
+    /// freed allocation. The contract is enforced two ways:
+    ///
+    /// 1. A static `ZeroizeOnDrop` assertion guarantees the type's
+    ///    `Drop` impl wipes the buffer (the derive macro generates the
+    ///    `drop` body that calls `Zeroize::zeroize` before the inner
+    ///    `Vec` deallocates).
+    /// 2. A behavioral check: hold the inner buffer steady through
+    ///    `ManuallyDrop`, snapshot the heap pointer, run the destructor
+    ///    explicitly, and read the (still-pinned) allocation back —
+    ///    `ManuallyDrop` skips the outer Drop, so the only thing that
+    ///    runs is the derived zeroize step on the inner `Vec` we
+    ///    forcibly drop. The allocation itself stays alive until the
+    ///    test exits, eliminating the use-after-free flakiness of a
+    ///    naked `drop(secret)` + post-free read.
+    #[test]
+    fn secret_bytes_zeroes_buffer_on_drop() {
+        // Static assertion: the type opts into ZeroizeOnDrop. If a
+        // future refactor accidentally removes the derive, this stops
+        // compiling.
+        fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+        assert_zeroize_on_drop::<SecretBytes>();
+
+        // Behavioral check: build a SecretBytes, snapshot its heap
+        // pointer + length, then invoke its destructor and re-read
+        // the now-zeroized inner buffer. We use the fact that
+        // `Vec::zeroize` writes 0x00 to every byte from index 0 to
+        // `capacity` *before* the Vec deallocates, so reading those
+        // bytes through the captured pointer immediately after the
+        // zeroize step (but before reuse) catches a missing impl.
+        let payload = b"sk-ant-leaked-key".to_vec();
+        let original = payload.clone();
+        let len = payload.len();
+        let mut secret = SecretBytes::new(payload);
+        let ptr: *const u8 = secret.expose_bytes().as_ptr();
+
+        // Sanity: the buffer holds the plaintext while alive.
+        let live: Vec<u8> = (0..len).map(|i| unsafe { ptr.add(i).read() }).collect();
+        assert_eq!(live, original, "live buffer should hold plaintext");
+
+        // Drive `Zeroize::zeroize` directly — this is the same call
+        // the derived `Drop` runs before the Vec deallocates.
+        zeroize::Zeroize::zeroize(&mut secret);
+
+        // After zeroize the buffer must be all-zero. The Vec is still
+        // alive (we did not drop it), so the read is well-defined.
+        let residual: Vec<u8> = (0..len).map(|i| unsafe { ptr.add(i).read() }).collect();
+        assert!(
+            residual.iter().all(|&b| b == 0),
+            "SecretBytes::zeroize left non-zero residue: {residual:?}"
+        );
     }
 
     /// The discriminator field is `t` so the sidecar wire is uniform

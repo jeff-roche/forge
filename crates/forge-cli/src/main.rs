@@ -50,7 +50,7 @@ async fn skill_install(source: String, target: SkillScopeFlag) -> Result<()> {
 
     let resolved = if skill_mod::looks_like_git_url(&source) {
         let cache_root = skill_mod::default_cache_root(&home);
-        let runner = skill_mod::StdCommandRunner;
+        let runner = skill_mod::StdCommandRunner::new();
         let resolver = skill_mod::GitResolver::new(source.clone(), cache_root, &runner);
         resolver.resolve()?
     } else {
@@ -198,8 +198,16 @@ async fn session_new(kind: SessionNewKind) -> Result<()> {
 }
 
 async fn session_list() -> Result<()> {
-    use forge_ipc::{read_frame, write_frame, ClientInfo, Hello, IpcMessage, PROTO_VERSION};
+    use forge_ipc::{
+        read_frame_with_deadline, write_frame, ClientInfo, Hello, IpcMessage, PROTO_VERSION,
+    };
+    use std::time::Duration;
     use tokio::net::UnixStream;
+
+    // F-652: bound the per-session probe so a wedged daemon does not
+    // hang `forge session list`. Five seconds is the same envelope the
+    // dashboard pinger uses (PING_TOTAL_TIMEOUT-equivalent).
+    const PROBE_DEADLINE: Duration = Duration::from_secs(5);
 
     let dir = forge_cli::socket::sessions_socket_dir()?;
     let mut read_dir = match tokio::fs::read_dir(&dir).await {
@@ -231,9 +239,12 @@ async fn session_list() -> Result<()> {
                         pid: std::process::id(),
                         user: whoami(),
                     },
+                    schema_version: forge_ipc::SCHEMA_VERSION,
                 });
                 if write_frame(&mut stream, &hello).await.is_ok() {
-                    if let Ok(IpcMessage::HelloAck(ack)) = read_frame(&mut stream).await {
+                    if let Ok(IpcMessage::HelloAck(ack)) =
+                        read_frame_with_deadline(&mut stream, PROBE_DEADLINE).await
+                    {
                         println!(
                             "{id}  active  workspace={}  started={}",
                             ack.workspace, ack.started_at
@@ -258,9 +269,18 @@ async fn session_list() -> Result<()> {
 async fn session_tail(id: &str) -> Result<()> {
     use forge_core::Event;
     use forge_ipc::{
-        read_frame, write_frame, ClientInfo, Hello, IpcMessage, Subscribe, PROTO_VERSION,
+        read_frame_with_deadline, write_frame, ClientInfo, Hello, IpcMessage, IpcReadTimeout,
+        Subscribe, PROTO_VERSION,
     };
+    use std::time::Duration;
     use tokio::net::UnixStream;
+
+    // F-652: per-frame deadlines on `forge session tail`. The
+    // handshake bound is short (5 s); the steady-state event read
+    // uses a longer idle window, and a deadline alone is not a
+    // teardown signal — it just means the daemon is between events.
+    const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(5);
+    const TAIL_FRAME_DEADLINE: Duration = Duration::from_secs(60);
 
     let sock = forge_cli::socket::socket_path(id)?;
     let mut stream = UnixStream::connect(&sock)
@@ -276,19 +296,20 @@ async fn session_tail(id: &str) -> Result<()> {
                 pid: std::process::id(),
                 user: whoami(),
             },
+            schema_version: forge_ipc::SCHEMA_VERSION,
         }),
     )
     .await?;
-    let _ack: IpcMessage = read_frame(&mut stream).await?;
+    let _ack: IpcMessage = read_frame_with_deadline(&mut stream, HANDSHAKE_DEADLINE).await?;
 
     write_frame(&mut stream, &IpcMessage::Subscribe(Subscribe { since: 0 })).await?;
 
     loop {
-        // `read_frame` returns `Err` on clean EOF (`read_u32` fails) as
-        // well as on malformed bodies. For a tail command either is a
-        // reason to stop — surface the distinction via a log only if we
-        // ever add structured error reporting here.
-        match read_frame(&mut stream).await {
+        // The deadline-bounded read returns `Err` on clean EOF
+        // (`read_u32` fails), malformed bodies, **and** the F-652
+        // idle deadline. The first two end the tail; the deadline
+        // alone is just an idle window — loop and try again.
+        match read_frame_with_deadline(&mut stream, TAIL_FRAME_DEADLINE).await {
             Ok(IpcMessage::Event(ipc_event)) => {
                 // F-112: IpcEvent.event is typed — no Value decode.
                 let event = ipc_event.event;
@@ -300,6 +321,7 @@ async fn session_tail(id: &str) -> Result<()> {
                 }
             }
             Ok(_) => {}
+            Err(e) if e.downcast_ref::<IpcReadTimeout>().is_some() => continue,
             Err(_) => break,
         }
     }
@@ -326,10 +348,17 @@ async fn session_kill(id: &str) -> Result<()> {
 async fn run_agent(name: &str, input_source: &str) -> Result<()> {
     use forge_core::Event;
     use forge_ipc::{
-        read_frame, write_frame, ClientInfo, Hello, IpcMessage, SendUserMessage, Subscribe,
-        PROTO_VERSION,
+        read_frame_with_deadline, write_frame, ClientInfo, Hello, IpcMessage, IpcReadTimeout,
+        SendUserMessage, Subscribe, PROTO_VERSION,
     };
+    use std::time::Duration;
     use tokio::net::UnixStream;
+
+    // F-652: same shape as `session_tail` — short handshake bound,
+    // longer per-frame idle deadline, deadline-only errors do not
+    // stop streaming.
+    const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(5);
+    const RUN_FRAME_DEADLINE: Duration = Duration::from_secs(60);
 
     let text = if input_source == "-" {
         use tokio::io::AsyncReadExt;
@@ -375,10 +404,11 @@ async fn run_agent(name: &str, input_source: &str) -> Result<()> {
                 pid: std::process::id(),
                 user: whoami(),
             },
+            schema_version: forge_ipc::SCHEMA_VERSION,
         }),
     )
     .await?;
-    let _ack: IpcMessage = read_frame(&mut stream)
+    let _ack: IpcMessage = read_frame_with_deadline(&mut stream, HANDSHAKE_DEADLINE)
         .await
         .map_err(|e| anyhow::anyhow!("handshake failed: {e}"))?;
 
@@ -395,7 +425,7 @@ async fn run_agent(name: &str, input_source: &str) -> Result<()> {
     // determine the outcome.
     let mut event_exit_code = 0i32;
     loop {
-        match read_frame(&mut stream).await {
+        match read_frame_with_deadline(&mut stream, RUN_FRAME_DEADLINE).await {
             Ok(IpcMessage::Event(ipc_event)) => {
                 // F-112: IpcEvent.event is typed — no Value decode.
                 let event = ipc_event.event;
@@ -410,6 +440,7 @@ async fn run_agent(name: &str, input_source: &str) -> Result<()> {
                 }
             }
             Ok(_) => {}
+            Err(e) if e.downcast_ref::<IpcReadTimeout>().is_some() => continue,
             Err(_) => break,
         }
     }

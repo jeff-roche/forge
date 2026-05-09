@@ -58,6 +58,21 @@ pub const DEFAULT_COMPACT_FRACTION: f64 = 0.5;
 /// at which the orchestrator auto-triggers compaction.
 pub const AUTO_COMPACT_THRESHOLD: f64 = 0.98;
 
+/// F-657: hard ceiling on the summary text [`compact`] will accept from the
+/// privileged provider call. Streams that would produce more than this are
+/// truncated at a UTF-8 char boundary and accompanied by an
+/// [`Event::CompactionTruncated`] marker.
+///
+/// 64 KiB matches the `MEMORY_WRITE_CONTENT_CAP` precedent
+/// (F-650, in `forge-agents`): a model-emitted blob meant to live in the recurring system
+/// prompt should never approach this size. A pathological or hostile
+/// summary provider that emits megabytes of text would otherwise push the
+/// post-compaction transcript back over the auto-trigger threshold and
+/// re-enter compaction on the next turn — a feedback loop that may not
+/// terminate. Capping below the freed-bytes target (50% of total
+/// transcript) closes that loop.
+pub const SUMMARY_CAP_BYTES: usize = 64 * 1024;
+
 /// System prompt used for the privileged summary call.
 ///
 /// Kept terse so the provider has the maximum budget for the actual
@@ -342,12 +357,40 @@ pub async fn compact<P: Provider>(
     // ignored because the request advertises no tools (any provider that
     // emits one is misbehaving and we treat it as a soft failure that
     // still produces whatever text accumulated so far).
+    //
+    // F-657: hard byte cap on the accumulated summary. Once we cross
+    // `SUMMARY_CAP_BYTES`, drop further deltas and continue draining so
+    // the upstream stream completes cleanly (otherwise the provider task
+    // can be left holding a half-read response). `accumulated_bytes` is
+    // the unfiltered post-cap total — used to tell the caller how much was
+    // discarded via the [`Event::CompactionTruncated`] marker emitted below.
     let req = build_summary_request(&excerpt);
     let mut stream = provider.chat(req).await?;
     let mut summary_text = String::new();
+    let mut truncated = false;
+    let mut accumulated_bytes: u64 = 0;
     while let Some(chunk) = stream.next().await {
         match chunk {
-            ChatChunk::TextDelta(d) => summary_text.push_str(&d),
+            ChatChunk::TextDelta(d) => {
+                accumulated_bytes = accumulated_bytes.saturating_add(d.len() as u64);
+                if truncated {
+                    continue;
+                }
+                if summary_text.len().saturating_add(d.len()) <= SUMMARY_CAP_BYTES {
+                    summary_text.push_str(&d);
+                } else {
+                    // Take only enough of this delta to land exactly at
+                    // (or just under) the cap, sliced on a UTF-8 char
+                    // boundary so the accumulated string stays valid.
+                    let remaining = SUMMARY_CAP_BYTES.saturating_sub(summary_text.len());
+                    let mut take = remaining.min(d.len());
+                    while take > 0 && !d.is_char_boundary(take) {
+                        take -= 1;
+                    }
+                    summary_text.push_str(&d[..take]);
+                    truncated = true;
+                }
+            }
             ChatChunk::Done(_) => break,
             ChatChunk::ToolCall { .. } => {
                 // Privileged summary call must not invoke tools — ignore.
@@ -402,6 +445,29 @@ pub async fn compact<P: Provider>(
             trigger: trigger.clone(),
         })
         .await?;
+
+    // F-657: surface the cap hit AFTER the marker so observability
+    // consumers can correlate the truncation back to the same
+    // `summary_msg_id` they already saw on the `ContextCompacted`. We
+    // also log here so a runaway summary provider is visible in daemon
+    // logs without needing an event subscriber.
+    if truncated {
+        tracing::warn!(
+            target: "forge_session::compaction",
+            summary_msg_id = %summary_msg_id,
+            cap_bytes = SUMMARY_CAP_BYTES,
+            original_bytes = accumulated_bytes,
+            "compaction summary truncated at byte cap",
+        );
+        session
+            .emit(Event::CompactionTruncated {
+                at: Utc::now(),
+                summary_msg_id: summary_msg_id.clone(),
+                cap_bytes: SUMMARY_CAP_BYTES as u64,
+                original_bytes: accumulated_bytes,
+            })
+            .await?;
+    }
 
     Ok(CompactionResult {
         summary_msg_id,
@@ -761,6 +827,173 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.to_string().contains("non-pinned"));
+    }
+
+    #[tokio::test]
+    async fn compact_truncates_oversized_summary_and_emits_marker() {
+        // F-657: a pathological provider emitting a summary larger than the
+        // configured cap must be truncated in place, must emit a
+        // `CompactionTruncated` event, and the resulting summary message
+        // must be at most `SUMMARY_CAP_BYTES` bytes — small enough that a
+        // freshly seeded transcript would not immediately re-trigger
+        // compaction on the next turn.
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("events.jsonl");
+        let session = Arc::new(Session::create(log_path).await.unwrap());
+
+        // Seed three full turns so compaction has enough to chew on.
+        for i in 0..3 {
+            session
+                .emit(user_event(&MessageId::new(), &format!("q{i}")))
+                .await
+                .unwrap();
+            session
+                .emit(assistant_event(&MessageId::new(), &format!("a{i}")))
+                .await
+                .unwrap();
+        }
+
+        // Build a script whose single text delta is twice the cap. Use a
+        // multi-byte char ('ß' = 2 bytes UTF-8) to force the truncation
+        // logic to land on a char boundary rather than mid-codepoint.
+        let oversized = "ß".repeat(SUMMARY_CAP_BYTES); // 2 * cap bytes
+        let oversized_len = oversized.len() as u64;
+        let script = format!(
+            "{{\"delta\":{}}}\n{{\"done\":\"end_turn\"}}\n",
+            serde_json::to_string(&oversized).unwrap()
+        );
+        let provider = Arc::new(MockProvider::from_responses(vec![script]).unwrap());
+
+        let mut rx = session.event_tx.subscribe();
+
+        let res = compact(
+            Arc::clone(&session),
+            Arc::clone(&provider),
+            ProviderId::new(),
+            "active-model".to_string(),
+            DEFAULT_COMPACT_FRACTION,
+            &HashSet::new(),
+            CompactTrigger::AutoAt98Pct,
+        )
+        .await
+        .unwrap();
+
+        // Drain emissions and capture the relevant ones.
+        let mut summary_text_bytes: usize = 0;
+        let mut saw_marker = false;
+        let mut saw_truncated_event = false;
+        let mut truncated_cap: u64 = 0;
+        let mut truncated_original: u64 = 0;
+        while let Ok((_, ev)) = rx.try_recv() {
+            match ev {
+                Event::AssistantMessage { id, text, .. } if id == res.summary_msg_id => {
+                    summary_text_bytes = text.len();
+                }
+                Event::ContextCompacted { summary_msg_id, .. } => {
+                    assert_eq!(summary_msg_id, res.summary_msg_id);
+                    saw_marker = true;
+                }
+                Event::CompactionTruncated {
+                    summary_msg_id,
+                    cap_bytes,
+                    original_bytes,
+                    ..
+                } => {
+                    assert_eq!(summary_msg_id, res.summary_msg_id);
+                    truncated_cap = cap_bytes;
+                    truncated_original = original_bytes;
+                    saw_truncated_event = true;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(
+            saw_marker,
+            "ContextCompacted must still fire when truncated"
+        );
+        assert!(
+            saw_truncated_event,
+            "CompactionTruncated event must fire when the cap is hit"
+        );
+        assert!(
+            summary_text_bytes > 0 && summary_text_bytes <= SUMMARY_CAP_BYTES,
+            "summary text must be capped: {summary_text_bytes} > {SUMMARY_CAP_BYTES}",
+        );
+        assert_eq!(truncated_cap, SUMMARY_CAP_BYTES as u64);
+        assert!(
+            truncated_original >= oversized_len,
+            "original_bytes ({truncated_original}) should reflect the unfiltered \
+             stream length (>= {oversized_len})"
+        );
+    }
+
+    #[tokio::test]
+    async fn capped_summary_byte_size_is_bounded_regardless_of_provider_output() {
+        // F-657 regression: the *amplification* mechanism the bug describes
+        // is "summary larger than the freed bytes re-triggers compaction".
+        // The defensive property we lock down here is the upper bound on
+        // the summary AssistantMessage's text length: capped summary text
+        // length is `<= SUMMARY_CAP_BYTES`, no matter how big the provider
+        // stream gets. Without that cap, this test would observe a summary
+        // text size proportional to whatever the (hostile) provider sent.
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("events.jsonl");
+        let session = Arc::new(Session::create(log_path).await.unwrap());
+
+        for i in 0..3 {
+            session
+                .emit(user_event(&MessageId::new(), &format!("q{i}")))
+                .await
+                .unwrap();
+            session
+                .emit(assistant_event(&MessageId::new(), &format!("a{i}")))
+                .await
+                .unwrap();
+        }
+
+        // Stream 4× the cap as a single delta — guarantees the truncation
+        // path runs and that "without the cap" the summary would be 4×
+        // larger than the cap.
+        let oversized_text = "z".repeat(SUMMARY_CAP_BYTES * 4);
+        let script = format!(
+            "{{\"delta\":{}}}\n{{\"done\":\"end_turn\"}}\n",
+            serde_json::to_string(&oversized_text).unwrap()
+        );
+        let provider = Arc::new(MockProvider::from_responses(vec![script]).unwrap());
+
+        let mut rx = session.event_tx.subscribe();
+        let res = compact(
+            Arc::clone(&session),
+            Arc::clone(&provider),
+            ProviderId::new(),
+            "active-model".to_string(),
+            DEFAULT_COMPACT_FRACTION,
+            &HashSet::new(),
+            CompactTrigger::AutoAt98Pct,
+        )
+        .await
+        .unwrap();
+
+        let mut summary_bytes = 0usize;
+        while let Ok((_, ev)) = rx.try_recv() {
+            if let Event::AssistantMessage { id, text, .. } = ev {
+                if id == res.summary_msg_id {
+                    summary_bytes = text.len();
+                }
+            }
+        }
+
+        assert!(
+            summary_bytes > 0,
+            "summary must contain at least the partial truncated content"
+        );
+        assert!(
+            summary_bytes <= SUMMARY_CAP_BYTES,
+            "capped summary text ({summary_bytes}B) must not exceed cap ({SUMMARY_CAP_BYTES}B); \
+             without F-657 the provider's {oversized}B stream would land verbatim",
+            oversized = oversized_text.len(),
+        );
     }
 
     #[tokio::test]

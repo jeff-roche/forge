@@ -31,35 +31,9 @@
   gap: var(--sp-2);
 }
 
-.usage-pane__range {
-  background: var(--color-surface-2);
-  border: 1px solid var(--color-border-2);
-  border-radius: var(--r-sm);
-  color: var(--color-text-secondary);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  padding: var(--sp-2) var(--sp-3);
-  cursor: pointer;
-  transition: border-color var(--ease), color var(--ease);
-}
-
-.usage-pane__range:hover:not(:disabled) {
-  color: var(--color-text-primary);
-  border-color: var(--color-border-2);
-}
-
-.usage-pane__range[aria-pressed='true'] {
-  background: var(--color-surface-3);
-  border-color: var(--color-ember-400);
-  color: var(--color-text-primary);
-}
-
-.usage-pane__range:focus-visible {
-  outline: 2px solid var(--color-ember-400);
-  outline-offset: 2px;
-}
+/* Range selector + Retry render as `@forge/design` Button primitives —
+ * styling lives in `forge-button.css`. The legacy `.usage-pane__range`
+ * rule was retired with F-693. */
 
 .usage-pane__cross {
   display: inline-flex;
@@ -104,13 +78,28 @@
  * State copy
  * ------------------------------------------------------------------------ */
 
-.usage-pane__loading,
 .usage-pane__empty {
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--color-text-secondary);
   letter-spacing: 0.2em;
   margin: 0;
+}
+
+/* F-684: usage loading state — chart-then-rows skeleton matching the
+ * post-resolve layout (chart card on top, three table rows beneath). */
+.usage-pane__skeletons {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+.usage-pane__skeleton-chart .forge-skeleton {
+  height: var(--sp-12);
+}
+
+.usage-pane__skeleton-rows .forge-skeleton {
+  height: var(--sp-6);
 }
 
 .usage-pane__error {

@@ -102,6 +102,13 @@ These tokens should be defined at `:root` and used throughout. Never use raw val
   --font-body:    'Barlow', sans-serif;
   --font-mono:    'Fira Code', monospace;
 
+  /* Type scale — exported sizes from docs/design/typography.md.
+   * Use these in component CSS instead of bare `font-size: Npx`. */
+  --type-body-sm: 12px;
+  --type-mono-md: 13px;
+  --type-mono-sm: 11px;
+  --type-mono-xs: 9px;
+
   /* Provider accent colors */
   --color-provider-anthropic: #ff4a12;
   --color-provider-openai:    #ffaa33;

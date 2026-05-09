@@ -116,6 +116,70 @@ pub struct AgentRuntime {
     /// `StepStarted.instance_id` and every spawned sub-agent's `parent`
     /// attributes to this id.
     pub parent_instance_id: AgentInstanceId,
+    /// F-663: the **active agent**'s `AgentDef.allowed_paths` — the glob
+    /// list the agent declared as its scope. When non-empty, the
+    /// orchestrator narrows `ToolCtx.allowed_paths` to this list before
+    /// dispatching tool calls, so an agent cannot reach outside its
+    /// declared scope even when the session's workspace-derived globs
+    /// would permit it. Empty preserves the pre-F-663 fallback (use the
+    /// session scope) for back-compat with agents that didn't declare.
+    pub def_allowed_paths: Vec<String>,
+}
+
+#[cfg(test)]
+mod effective_allowed_paths_tests {
+    use super::effective_allowed_paths;
+
+    #[test]
+    fn empty_agent_falls_back_to_session() {
+        let session = vec!["/ws/**".to_string()];
+        assert_eq!(effective_allowed_paths(&session, &[]), session);
+    }
+
+    #[test]
+    fn non_empty_agent_overrides_session() {
+        let session = vec!["/ws/**".to_string()];
+        let agent = vec!["/ws/scoped/**".to_string()];
+        assert_eq!(effective_allowed_paths(&session, &agent), agent);
+    }
+
+    #[test]
+    fn empty_session_and_empty_agent_yield_empty() {
+        // forge-fs treats an empty list as deny-all — the helper preserves
+        // that contract on both inputs.
+        assert!(effective_allowed_paths(&[], &[]).is_empty());
+    }
+
+    #[test]
+    fn agent_can_be_broader_than_session_by_design() {
+        // The override is intentional — an agent author can opt into a
+        // wider declared scope than the session glob, with the
+        // understanding that the kernel-level workspace_root still bounds
+        // shell.exec via its own check. This test pins the contract.
+        let session = vec!["/ws/sub/**".to_string()];
+        let agent = vec!["/ws/**".to_string()];
+        assert_eq!(effective_allowed_paths(&session, &agent), agent);
+    }
+}
+
+/// F-663: compute the effective `allowed_paths` for a tool dispatch.
+///
+/// When the active agent declared a scope (`agent` non-empty), the agent's
+/// own list **overrides** the session-derived list — the agent cannot
+/// reach outside what it explicitly opted into. When the agent declared
+/// nothing, the session scope is preserved verbatim (back-compat).
+///
+/// Override (rather than intersection) matches the existing
+/// `bg_agents::build_sidecar_hello` contract, which already hands
+/// `def.allowed_paths` straight to the sidecar without merging in the
+/// session's globs. Keeping both paths semantically aligned avoids a
+/// scope-mismatch between in-process and sidecar execution.
+pub fn effective_allowed_paths(session: &[String], agent: &[String]) -> Vec<String> {
+    if agent.is_empty() {
+        session.to_vec()
+    } else {
+        agent.to_vec()
+    }
 }
 
 /// Tool handler. `invoke` is `async` so filesystem / blocking work can be

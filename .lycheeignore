@@ -1,0 +1,5 @@
+# Per-URL allowlist for the lychee link checker (F-705).
+#
+# Each entry is a regex matched against the full URL. Add a comment
+# above every entry explaining why the URL is exempt — drift here is
+# how a real broken link silently slips through.

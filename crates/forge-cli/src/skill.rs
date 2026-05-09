@@ -39,6 +39,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     process::Command,
+    time::Duration,
 };
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -101,6 +102,16 @@ impl fmt::Display for SkillScope {
 ///
 /// `source_dir` is what the install step copies; `skill` is the validated
 /// shape used to derive the target folder name (`skill.id`).
+///
+/// # F-656 — TOCTOU between resolve and install
+///
+/// `source_dir` is canonicalized at resolve time, but the install step that
+/// follows runs later and re-opens the path from a string. Without a pinned
+/// fingerprint, an attacker who can write inside `source_dir`'s parent could
+/// rename the validated tree away and replace it with a symlink to an
+/// attacker-controlled tree between the two calls. `source_fingerprint`
+/// records the validated directory's `(dev, ino)` so [`install_resolved`]
+/// can detect the substitution and refuse.
 #[derive(Debug)]
 pub struct ResolvedSkill {
     /// Parsed skill (validated via F-589).
@@ -108,6 +119,94 @@ pub struct ResolvedSkill {
     /// Folder containing the `SKILL.md` file. Whatever sits next to it
     /// (`scripts/`, `references/`, etc.) is copied along.
     pub source_dir: PathBuf,
+    /// Filesystem identity of `source_dir` at resolve time. The installer
+    /// re-stats the path and refuses on mismatch — see F-656.
+    pub(crate) source_fingerprint: SourceFingerprint,
+}
+
+/// Filesystem identity of a directory at a specific point in time, used to
+/// detect TOCTOU substitution between resolve and install (F-656).
+///
+/// On Unix this is `(st_dev, st_ino)` from `symlink_metadata`. On other
+/// platforms the fingerprint degrades to a structural check (the path must
+/// still resolve to a real directory, not a symlink) since stable inodes are
+/// not portably available through `std`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SourceFingerprint {
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+}
+
+impl SourceFingerprint {
+    /// Capture the fingerprint of `path`. Caller has already verified
+    /// `path` points at a real directory (post-canonicalize).
+    fn capture(path: &Path) -> Result<Self> {
+        // `symlink_metadata` does not follow a final-component symlink. Since
+        // `path` came out of `fs::canonicalize`, no component should be a
+        // symlink — but stat-ing without follow is the right primitive here:
+        // it pins exactly the inode we validated.
+        let meta = fs::symlink_metadata(path)
+            .with_context(|| format!("capturing source fingerprint for {}", path.display()))?;
+        if meta.file_type().is_symlink() {
+            bail!(
+                "source path {} is a symlink after canonicalize — refusing",
+                path.display()
+            );
+        }
+        if !meta.is_dir() {
+            bail!(
+                "source path {} is not a directory — refusing",
+                path.display()
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Ok(Self {
+                dev: meta.dev(),
+                ino: meta.ino(),
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(Self {})
+        }
+    }
+
+    /// Re-stat `path` and verify it still names the directory captured at
+    /// resolve time. Returns an error if the path is now missing, a symlink,
+    /// not a directory, or a different inode.
+    fn verify(&self, path: &Path) -> Result<()> {
+        let meta = fs::symlink_metadata(path)
+            .with_context(|| format!("re-stating source root {} (TOCTOU check)", path.display()))?;
+        if meta.file_type().is_symlink() {
+            bail!(
+                "source root {} became a symlink between resolve and install \
+                 (TOCTOU; refusing)",
+                path.display()
+            );
+        }
+        if !meta.is_dir() {
+            bail!(
+                "source root {} is no longer a directory (TOCTOU; refusing)",
+                path.display()
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if meta.dev() != self.dev || meta.ino() != self.ino {
+                bail!(
+                    "source root {} dev/ino changed between resolve and install \
+                     (TOCTOU; refusing)",
+                    path.display()
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Anything that produces a [`ResolvedSkill`] from a CLI-supplied source.
@@ -172,9 +271,14 @@ impl Resolver for LocalPathResolver {
         let skill = parse_skill_file(&skill_md)
             .map_err(|e| anyhow!("skill at {} failed validation: {e}", skill_md.display()))?;
 
+        // F-656: pin (dev, ino) so `install_resolved` can detect a swap of
+        // the source root between now and the copy.
+        let source_fingerprint = SourceFingerprint::capture(&canonical)?;
+
         Ok(ResolvedSkill {
             skill,
             source_dir: canonical,
+            source_fingerprint,
         })
     }
 }
@@ -188,7 +292,114 @@ pub trait CommandRunner {
 }
 
 /// Default [`CommandRunner`] that shells out via `std::process::Command`.
-pub struct StdCommandRunner;
+///
+/// # F-665 — Hardened git invocation environment
+///
+/// Every spawn goes through three layers of hardening:
+///
+/// 1. **Env scrub.** The parent process environment is *not* inherited.
+///    Only an allowlist of well-known vars (`PATH`, `HOME`, `LANG`, `LC_*`,
+///    `SSH_AUTH_SOCK`, `TERM`) passes through; everything else — including
+///    every `GIT_*` the parent might be carrying (`GIT_TRACE`, malicious
+///    `GIT_SSH_COMMAND`, `GIT_CONFIG_NOSYSTEM=0`, etc.) — is dropped before
+///    Forge sets its own. This blocks both data exfiltration (a hostile
+///    parent enabling git's tracing to leak credentials) and behavior
+///    redirection (a parent overriding our SSH/system-config policy).
+///
+/// 2. **Forge-controlled git knobs.** After scrubbing, we set
+///    `GIT_TERMINAL_PROMPT=0` (no stdin credential prompts that would hang
+///    a non-TTY install), `GIT_SSH_COMMAND` with `BatchMode=yes` and
+///    `StrictHostKeyChecking=accept-new` (never wait on TTY confirmation,
+///    enforce TOFU instead of blanket-accepting host keys), and
+///    `GIT_CONFIG_NOSYSTEM=1` (ignore `/etc/gitconfig` so a tampered
+///    system config cannot redirect the clone).
+///
+/// 3. **Wall-clock timeout.** Each spawn runs under a finite deadline (60s
+///    by default). A non-responsive remote that would otherwise hang
+///    `git clone` forever is killed and surfaces as an error so the CLI
+///    can return control to the user.
+pub struct StdCommandRunner {
+    timeout: Duration,
+}
+
+/// Names of parent-process env vars the runner allows through to the child.
+/// Anything not on this list is dropped. `GIT_*` is intentionally absent —
+/// Forge controls git's environment exclusively (see field docs above).
+const ENV_ALLOWLIST: &[&str] = &[
+    "PATH",
+    "HOME",
+    "LANG",
+    "TERM",
+    // SSH-based clones depend on the agent socket; dropping this would
+    // break legitimate dev flows that rely on `ssh-agent`.
+    "SSH_AUTH_SOCK",
+    // `LC_*` is a family — handled by prefix below in addition to this
+    // umbrella entry.
+    "LC_ALL",
+];
+
+/// Locked-down SSH options for `GIT_SSH_COMMAND`:
+/// - `BatchMode=yes` — never prompt on the TTY (no passphrase / yes-no).
+/// - `StrictHostKeyChecking=accept-new` — TOFU: trust on first use, then
+///   pin. This is stricter than `no` (which accepts any key silently) and
+///   safer than `yes` (which would refuse first-time hosts and break
+///   legitimate clones).
+/// - `ConnectTimeout=5` — fail fast on unresponsive endpoints; the outer
+///   wall-clock timeout still backstops this.
+const HARDENED_SSH_COMMAND: &str =
+    "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5";
+
+/// Default per-spawn timeout. Sized so a healthy network call to a
+/// well-known host completes comfortably; an unresponsive endpoint trips
+/// the kill path long before a human user notices.
+const DEFAULT_GIT_TIMEOUT: Duration = Duration::from_secs(60);
+
+impl StdCommandRunner {
+    /// Construct a runner with the default 60s spawn timeout.
+    pub fn new() -> Self {
+        Self {
+            timeout: DEFAULT_GIT_TIMEOUT,
+        }
+    }
+
+    /// Construct a runner with a custom spawn timeout. Primarily for tests
+    /// that need the watchdog to fire quickly.
+    pub fn with_timeout(timeout: Duration) -> Self {
+        Self { timeout }
+    }
+
+    /// Per-spawn wall-clock timeout currently in effect. Exposed so callers
+    /// (and tests) can confirm a finite, non-zero bound is configured.
+    pub fn timeout(&self) -> Duration {
+        self.timeout
+    }
+}
+
+impl Default for StdCommandRunner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Apply the F-665 hardened environment to `cmd`: scrub parent env down to
+/// the allowlist, then set Forge-controlled git knobs. Pulled out of the
+/// trait impl so the policy lives in one place — anyone adding a new
+/// runner gets the same hardening for free by calling this.
+fn apply_hardened_env(cmd: &mut Command) {
+    cmd.env_clear();
+    for (key, value) in std::env::vars_os() {
+        let Some(name) = key.to_str() else {
+            // Non-UTF8 names are not on the allowlist; drop them.
+            continue;
+        };
+        if ENV_ALLOWLIST.contains(&name) || name.starts_with("LC_") {
+            cmd.env(key, value);
+        }
+    }
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
+    cmd.env("GIT_SSH_COMMAND", HARDENED_SSH_COMMAND);
+    cmd.env("GIT_CONFIG_NOSYSTEM", "1");
+}
 
 impl CommandRunner for StdCommandRunner {
     fn run(&self, program: &str, args: &[&str], cwd: Option<&Path>) -> Result<()> {
@@ -197,9 +408,42 @@ impl CommandRunner for StdCommandRunner {
         if let Some(dir) = cwd {
             cmd.current_dir(dir);
         }
-        let status = cmd
-            .status()
+        apply_hardened_env(&mut cmd);
+
+        let mut child = cmd
+            .spawn()
             .with_context(|| format!("spawning {program} {}", args.join(" ")))?;
+
+        // Watchdog: poll `try_wait` until the child exits or the deadline
+        // passes. Polling is simpler than a second thread + channel and
+        // avoids the join overhead — granularity of 50ms is fine because
+        // the timeout is measured in seconds.
+        let deadline = std::time::Instant::now() + self.timeout;
+        let poll = Duration::from_millis(50);
+        let status = loop {
+            match child
+                .try_wait()
+                .with_context(|| format!("waiting on {program} {}", args.join(" ")))?
+            {
+                Some(s) => break s,
+                None => {
+                    if std::time::Instant::now() >= deadline {
+                        // Best-effort kill; if the kill itself fails the
+                        // child is likely already gone, so we still want to
+                        // surface the timeout, not the kill error.
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        bail!(
+                            "{program} {} timed out after {:?}",
+                            args.join(" "),
+                            self.timeout,
+                        );
+                    }
+                    std::thread::sleep(poll);
+                }
+            }
+        };
+
         if !status.success() {
             bail!("{program} {} failed with status {status}", args.join(" "));
         }
@@ -308,9 +552,15 @@ impl Resolver for GitResolver<'_> {
         let skill = parse_skill_file(&skill_md)
             .map_err(|e| anyhow!("cloned skill failed validation: {e}"))?;
 
+        // F-656: clones land in a Forge-owned cache directory, but pin the
+        // fingerprint anyway so `install_resolved`'s TOCTOU check has a
+        // single contract that covers every resolver.
+        let source_fingerprint = SourceFingerprint::capture(&cache_dir)?;
+
         Ok(ResolvedSkill {
             skill,
             source_dir: cache_dir,
+            source_fingerprint,
         })
     }
 }
@@ -322,10 +572,15 @@ pub fn default_cache_root(home: &Path) -> PathBuf {
 
 /// Treat a CLI source string as a git URL when it looks like one.
 ///
-/// The set of recognized prefixes is intentionally narrow — `https://`,
-/// `http://`, `git://`, `ssh://`, plus the `user@host:path` SCP-style form.
-/// Anything else is a local path. We deliberately do not heuristically treat
-/// `<owner>/<repo>` as GitHub shorthand; the user must spell out the full URL.
+/// **F-641 (CVE-2017-1000117 family):** the accepted scheme set is a strict
+/// allowlist of `https://` and `ssh://`. SCP-style URLs (`user@host:path`),
+/// `git://`, and `http://` are *all* refused — SCP because its colon-suffix
+/// path can be smuggled past git's flag parser as `--upload-pack=…`, and the
+/// unauthenticated schemes because they invite MITM-injected payloads. Users
+/// who need SSH must spell out `ssh://git@host/owner/repo`.
+///
+/// We also do not heuristically treat `<owner>/<repo>` as GitHub shorthand;
+/// the user must spell out the full URL.
 pub fn looks_like_git_url(source: &str) -> bool {
     // Defense-in-depth against flag injection (e.g. `--upload-pack=/bin/evil`):
     // a URL that begins with `-` is never a real URL, and even if `--` would
@@ -337,23 +592,7 @@ pub fn looks_like_git_url(source: &str) -> bool {
     if source.starts_with('-') {
         return false;
     }
-    if source.starts_with("https://")
-        || source.starts_with("http://")
-        || source.starts_with("git://")
-        || source.starts_with("ssh://")
-        || source.starts_with("git@")
-    {
-        return true;
-    }
-    // SCP-style: `user@host:owner/repo`. The colon must come *before* any
-    // slash or path separator and the prefix must contain `@`.
-    if let Some(colon) = source.find(':') {
-        let head = &source[..colon];
-        if head.contains('@') && !head.contains('/') && !head.contains('\\') {
-            return true;
-        }
-    }
-    false
+    source.starts_with("https://") || source.starts_with("ssh://")
 }
 
 /// Install a resolved skill into `target`. Returns the destination directory
@@ -361,6 +600,13 @@ pub fn looks_like_git_url(source: &str) -> bool {
 ///
 /// Refuses to overwrite an existing skill with the same id in the same
 /// scope. Callers that want force-replace must first call [`remove_skill`].
+///
+/// # F-656 — TOCTOU guard
+///
+/// Re-validates `resolved.source_dir` against the fingerprint captured by
+/// [`Resolver::resolve`] before copying. If the path was swapped for a
+/// symlink or replaced with a different directory in the interval, the
+/// install refuses rather than copying the attacker tree.
 pub fn install_resolved(
     resolved: &ResolvedSkill,
     scope: SkillScope,
@@ -382,15 +628,36 @@ pub fn install_resolved(
         );
     }
 
+    // F-656: confirm the source root is still the directory we validated.
+    // Without this, an attacker can substitute the tree (or a symlink to
+    // an attacker tree) at the same path between resolve and install.
+    resolved
+        .source_fingerprint
+        .verify(&resolved.source_dir)
+        .with_context(|| {
+            format!(
+                "source root {} changed between resolve and install",
+                resolved.source_dir.display()
+            )
+        })?;
+
     // Copy into the target. On any failure, roll back the partial copy so
     // a refused install (e.g. an escape-symlink) leaves no trace behind.
-    if let Err(err) = copy_dir_recursive(&resolved.source_dir, &target).with_context(|| {
-        format!(
-            "copying {} -> {}",
-            resolved.source_dir.display(),
-            target.display()
-        )
-    }) {
+    //
+    // The traversal treats `resolved.source_dir` as already-canonical (the
+    // resolver validated it) and uses the captured fingerprint as the
+    // anchor for symlink-escape checks — this avoids re-canonicalizing the
+    // root, which would silently re-follow a swap-in symlink.
+    if let Err(err) =
+        copy_dir_recursive(&resolved.source_dir, &target, &resolved.source_fingerprint)
+            .with_context(|| {
+                format!(
+                    "copying {} -> {}",
+                    resolved.source_dir.display(),
+                    target.display()
+                )
+            })
+    {
         // Best-effort cleanup; if removal itself fails (e.g. permissions),
         // surface the original install error rather than the cleanup error.
         let _ = fs::remove_dir_all(&target);
@@ -500,13 +767,23 @@ pub fn render_list(rows: &[InstalledSkillRow], out: &mut impl Write) -> Result<(
 /// Path-traversal hardening (F-590 review): a malicious skill folder could
 /// contain `evil -> /etc/passwd`. Without an explicit escape check, the
 /// copy would happily exfiltrate the linked file into the user's installed
-/// scope. We canonicalize the source root once at the top of the recursion
-/// and pass it through; every symlink is canonicalized and rejected unless
-/// its resolved target stays under that root.
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
-    let source_root = fs::canonicalize(src)
-        .with_context(|| format!("canonicalizing source dir {}", src.display()))?;
-    copy_dir_recursive_inner(src, dst, &source_root)
+/// scope.
+///
+/// `src` is the resolver's already-canonical source directory, used directly
+/// as the symlink-escape boundary — re-canonicalizing here would silently
+/// re-follow a TOCTOU swap-in symlink at the root (F-656). The fingerprint
+/// is verified once more inside this call as defense-in-depth.
+fn copy_dir_recursive(src: &Path, dst: &Path, fingerprint: &SourceFingerprint) -> Result<()> {
+    // F-656 belt-and-suspenders: even though `install_resolved` verified the
+    // fingerprint already, repeating the check here means any future caller
+    // of `copy_dir_recursive` inherits the TOCTOU guard automatically.
+    fingerprint.verify(src).with_context(|| {
+        format!(
+            "source root {} no longer matches resolver fingerprint",
+            src.display()
+        )
+    })?;
+    copy_dir_recursive_inner(src, dst, src)
 }
 
 fn copy_dir_recursive_inner(src: &Path, dst: &Path, source_root: &Path) -> Result<()> {
@@ -560,6 +837,7 @@ fn copy_dir_recursive_inner(src: &Path, dst: &Path, source_root: &Path) -> Resul
 mod tests {
     use super::*;
     use std::cell::RefCell;
+    use std::time::Duration;
     use tempfile::tempdir;
 
     fn write_skill_md(dir: &Path, body: &str) {
@@ -572,12 +850,12 @@ mod tests {
     }
 
     #[test]
-    fn looks_like_git_url_detects_https() {
+    fn looks_like_git_url_accepts_only_https_and_ssh() {
+        // F-641: SCP-style URLs (e.g. `git@host:path`) and unauthenticated
+        // schemes (`http://`, `git://`) are no longer accepted. Only the
+        // authenticated `https://` and `ssh://` schemes pass classification.
         assert!(looks_like_git_url("https://github.com/x/y.git"));
-        assert!(looks_like_git_url("http://example.com/x.git"));
         assert!(looks_like_git_url("ssh://git@github.com/x/y"));
-        assert!(looks_like_git_url("git@github.com:x/y.git"));
-        assert!(looks_like_git_url("git://github.com/x/y.git"));
     }
 
     #[test]
@@ -587,6 +865,35 @@ mod tests {
         assert!(!looks_like_git_url("relative/path"));
         assert!(!looks_like_git_url("C:\\windows\\path"));
         assert!(!looks_like_git_url(""));
+    }
+
+    #[test]
+    fn looks_like_git_url_rejects_scp_style_and_legacy_schemes() {
+        // F-641: SCP-style `user@host:path` form is the carrier for the
+        // CVE-2017-1000117 family (flag injection via `git@host:--upload-pack=`).
+        // We refuse the entire SCP form — users must spell out `ssh://` if
+        // they need SSH-based clones.
+        assert!(!looks_like_git_url("git@github.com:x/y.git"));
+        assert!(!looks_like_git_url("user@host.example:owner/repo"));
+        // Unauthenticated schemes are also out: `git://` is unencrypted and
+        // `http://` is plaintext. Both encourage MITM-injected payloads.
+        assert!(!looks_like_git_url("git://github.com/x/y.git"));
+        assert!(!looks_like_git_url("http://example.com/x.git"));
+    }
+
+    #[test]
+    fn looks_like_git_url_rejects_scp_style_flag_injection_poc() {
+        // F-641 PoC from issue #677. Pre-fix this returned `true`, which
+        // routed the string into `GitResolver` where `git clone` would
+        // interpret `--upload-pack=/tmp/evil_script` as a clone option and
+        // execute the named binary on the local filesystem.
+        assert!(!looks_like_git_url(
+            "git@github.com:--upload-pack=/tmp/evil_script/repo.git"
+        ));
+        // Same threat class with a different SCP host portion.
+        assert!(!looks_like_git_url(
+            "user@host.example:--config=core.gitProxy=http://evil"
+        ));
     }
 
     #[test]
@@ -813,6 +1120,210 @@ mod tests {
             fs::read_to_string(installed.join("latest.txt")).unwrap(),
             "real contents",
         );
+    }
+
+    /// F-656 regression: an attacker who can write inside the source-root's
+    /// parent directory may rename the validated tree away and replace it with
+    /// a symlink pointing at a different tree, between
+    /// `LocalPathResolver::resolve` and `install_resolved`. The installer must
+    /// either still install the originally-validated tree or refuse. It must
+    /// NOT install the attacker's tree.
+    #[cfg(unix)]
+    #[test]
+    fn install_refuses_when_source_root_swapped_for_symlink_after_resolve() {
+        use std::os::unix::fs::symlink;
+
+        let src = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let home = tempdir().unwrap();
+
+        // The benign tree the user intends to install.
+        let skill_dir = src.path().join("planner");
+        write_skill_md(&skill_dir, good_frontmatter());
+        fs::write(skill_dir.join("note.txt"), "BENIGN").unwrap();
+
+        // The attacker tree the swap would silently install instead.
+        let attacker_dir = src.path().join("attacker");
+        write_skill_md(&attacker_dir, good_frontmatter());
+        fs::write(attacker_dir.join("note.txt"), "ATTACKER").unwrap();
+        // A "secret" file the attacker wants smuggled into the install scope.
+        fs::write(attacker_dir.join("loot.txt"), "ATTACKER_OWNED").unwrap();
+
+        let resolver = LocalPathResolver::new(&skill_dir, src.path());
+        let resolved = resolver.resolve().expect("resolve must succeed");
+
+        // Simulate the TOCTOU swap: rename the validated tree away and
+        // replace it with a symlink to the attacker tree at the same path.
+        let stash = src.path().join("planner.stash");
+        fs::rename(&skill_dir, &stash).unwrap();
+        symlink(&attacker_dir, &skill_dir).unwrap();
+
+        let result = install_resolved(&resolved, SkillScope::User, workspace.path(), home.path());
+
+        // Acceptable outcomes: refuse loudly, or install the originally-
+        // validated tree. Installing the attacker tree is the regression.
+        let installed_root = home.path().join(".skills").join("planner");
+        match result {
+            Err(err) => {
+                let msg = format!("{err:#}").to_lowercase();
+                assert!(
+                    msg.contains("toctou")
+                        || msg.contains("changed")
+                        || msg.contains("symlink")
+                        || msg.contains("source root"),
+                    "expected TOCTOU/symlink error, got: {err:#}",
+                );
+                assert!(
+                    !installed_root.exists(),
+                    "refusal must roll back the partial copy",
+                );
+            }
+            Ok(_) => {
+                let installed_note = fs::read_to_string(installed_root.join("note.txt"))
+                    .expect("install claimed success but note.txt missing");
+                assert_eq!(
+                    installed_note, "BENIGN",
+                    "installer copied the attacker tree instead of the validated one",
+                );
+                assert!(
+                    !installed_root.join("loot.txt").exists(),
+                    "attacker file leaked into install scope",
+                );
+            }
+        }
+    }
+
+    /// F-656 regression: even if the swap puts a *real* directory at the
+    /// validated path (rather than a symlink), the inode fingerprint must
+    /// surface the substitution. This is the bare TOCTOU case.
+    #[cfg(unix)]
+    #[test]
+    fn install_refuses_when_source_root_replaced_with_different_real_dir_after_resolve() {
+        let src = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let home = tempdir().unwrap();
+
+        let skill_dir = src.path().join("planner");
+        write_skill_md(&skill_dir, good_frontmatter());
+        fs::write(skill_dir.join("note.txt"), "BENIGN").unwrap();
+
+        let resolved = LocalPathResolver::new(&skill_dir, src.path())
+            .resolve()
+            .expect("resolve must succeed");
+
+        // Swap the validated dir for a different real dir at the same path.
+        let stash = src.path().join("planner.stash");
+        fs::rename(&skill_dir, &stash).unwrap();
+        fs::create_dir_all(&skill_dir).unwrap();
+        write_skill_md(&skill_dir, good_frontmatter());
+        fs::write(skill_dir.join("note.txt"), "ATTACKER").unwrap();
+
+        let result = install_resolved(&resolved, SkillScope::User, workspace.path(), home.path());
+
+        let installed_root = home.path().join(".skills").join("planner");
+        match result {
+            Err(_) => {
+                assert!(
+                    !installed_root.exists(),
+                    "refusal must leave nothing behind",
+                );
+            }
+            Ok(_) => {
+                let installed_note = fs::read_to_string(installed_root.join("note.txt"))
+                    .expect("install claimed success but note.txt missing");
+                assert_eq!(
+                    installed_note, "BENIGN",
+                    "installer must install the originally-validated tree",
+                );
+            }
+        }
+    }
+
+    /// F-656 DoD: race a symlink swap against `install_resolved`. The install
+    /// must either fail or land the originally-validated tree — never the
+    /// attacker tree.
+    #[cfg(unix)]
+    #[test]
+    fn install_race_against_symlink_swap_never_installs_attacker_tree() {
+        use std::os::unix::fs::symlink;
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        for iter in 0..16 {
+            let src = tempdir().unwrap();
+            let workspace = tempdir().unwrap();
+            let home = tempdir().unwrap();
+
+            let skill_dir = src.path().join("racer");
+            write_skill_md(&skill_dir, good_frontmatter());
+            fs::write(skill_dir.join("note.txt"), "BENIGN").unwrap();
+
+            let attacker_dir = src.path().join("attacker");
+            write_skill_md(&attacker_dir, good_frontmatter());
+            fs::write(attacker_dir.join("note.txt"), "ATTACKER").unwrap();
+            fs::write(attacker_dir.join("loot.txt"), "ATTACKER_OWNED").unwrap();
+
+            let resolved = LocalPathResolver::new(&skill_dir, src.path())
+                .resolve()
+                .unwrap();
+
+            let barrier = Arc::new(Barrier::new(2));
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+            let swapper_skill = skill_dir.clone();
+            let swapper_attacker = attacker_dir.clone();
+            let swapper_src = src.path().to_path_buf();
+            let swapper_barrier = Arc::clone(&barrier);
+            let swapper_stop = Arc::clone(&stop);
+            let swapper = thread::spawn(move || {
+                swapper_barrier.wait();
+                let stash = swapper_src.join("racer.stash");
+                let deadline = Instant::now() + Duration::from_millis(50);
+                while !swapper_stop.load(std::sync::atomic::Ordering::SeqCst)
+                    && Instant::now() < deadline
+                {
+                    // Best-effort swap: rename benign away, plant symlink.
+                    if fs::rename(&swapper_skill, &stash).is_ok() {
+                        let _ = symlink(&swapper_attacker, &swapper_skill);
+                        let _ = fs::remove_file(&swapper_skill);
+                        let _ = fs::rename(&stash, &swapper_skill);
+                    }
+                }
+            });
+
+            barrier.wait();
+            let result =
+                install_resolved(&resolved, SkillScope::User, workspace.path(), home.path());
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            swapper.join().unwrap();
+            // Drop the swap symlink/leftover regardless of state.
+            let _ = fs::remove_file(src.path().join("racer.stash"));
+
+            let installed_root = home.path().join(".skills").join("racer");
+            match result {
+                Ok(_) => {
+                    let installed_note =
+                        fs::read_to_string(installed_root.join("note.txt")).unwrap_or_default();
+                    assert_eq!(
+                        installed_note, "BENIGN",
+                        "iter {iter}: race installed wrong note.txt",
+                    );
+                    assert!(
+                        !installed_root.join("loot.txt").exists(),
+                        "iter {iter}: attacker file leaked",
+                    );
+                }
+                Err(_) => {
+                    assert!(
+                        !installed_root.exists(),
+                        "iter {iter}: error must leave no partial copy",
+                    );
+                }
+            }
+            // Avoid colliding "already installed" with the next iteration.
+            let _ = fs::remove_dir_all(&installed_root);
+        }
     }
 
     #[test]
@@ -1083,5 +1594,214 @@ mod tests {
             default_cache_root(&home),
             PathBuf::from("/home/test/.cache/forge/skills")
         );
+    }
+
+    // ----------------------------------------------------------------------
+    // F-665 — Hardened git invocation environment.
+    //
+    // `StdCommandRunner` is the only place git is spawned. Asserting the
+    // hardening at this layer covers every git call (clone, fetch, reset)
+    // without per-call duplication. The tests below use real subprocess
+    // invocations against `/usr/bin/env` and `/usr/bin/sleep` because the
+    // contract is about what reaches the OS-level child process — a mock
+    // runner would defeat the purpose.
+    // ----------------------------------------------------------------------
+
+    /// Spawn `/usr/bin/env` via `StdCommandRunner` and return the child's
+    /// observed environment as a `HashMap`. Caller seeds parent-side env vars
+    /// before invoking; the helper writes them back into a temp file the
+    /// child produces, then parses.
+    #[cfg(unix)]
+    fn capture_child_env(
+        runner: &StdCommandRunner,
+        dump_path: &Path,
+    ) -> std::collections::HashMap<String, String> {
+        // `/usr/bin/env` with no args writes `KEY=VALUE` lines to stdout. We
+        // shell out via `sh -c` so we can redirect to a file the test owns —
+        // capturing stdout via the runner trait is not available.
+        let cmd = format!("/usr/bin/env > {}", dump_path.display());
+        runner
+            .run("sh", &["-c", &cmd], None)
+            .expect("env-capturing child must succeed");
+        let raw = fs::read_to_string(dump_path).expect("env dump should be readable");
+        raw.lines()
+            .filter_map(|l| l.split_once('='))
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    /// F-665 DoD: parent-process `GIT_*` env vars must not reach the git
+    /// child. A hostile or curious parent that sets `GIT_TRACE=1` or any
+    /// other `GIT_*` should be invisible to the spawned process.
+    #[cfg(unix)]
+    #[test]
+    fn std_runner_strips_parent_git_env() {
+        // Set a `GIT_*` and an arbitrary unrelated var in the parent. Both
+        // must be absent from the child's view.
+        //
+        // Safety: env mutation in tests is process-wide; we restore on drop
+        // via a guard so parallel tests do not see leftover state.
+        struct EnvGuard {
+            keys: Vec<&'static str>,
+        }
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                for k in &self.keys {
+                    // SAFETY: see Rust 1.85 docs — env mutation in tests is
+                    // accepted as a known hazard; we serialize via the test
+                    // mutex (see below) so concurrent tests cannot race.
+                    unsafe { std::env::remove_var(k) };
+                }
+            }
+        }
+        let _lock = env_test_lock().lock().unwrap();
+        unsafe {
+            std::env::set_var("GIT_TRACE", "1");
+            std::env::set_var("GIT_CONFIG_NOSYSTEM", "0");
+            std::env::set_var("FORGE_TEST_LEAK", "should-not-reach-child");
+        }
+        let _guard = EnvGuard {
+            keys: vec!["GIT_TRACE", "GIT_CONFIG_NOSYSTEM", "FORGE_TEST_LEAK"],
+        };
+
+        let dir = tempdir().unwrap();
+        let dump = dir.path().join("env.txt");
+        let runner = StdCommandRunner::new();
+        let child_env = capture_child_env(&runner, &dump);
+
+        // The hostile parent values must not reach the child.
+        assert!(
+            !child_env.contains_key("GIT_TRACE"),
+            "GIT_TRACE leaked from parent into git child env: {:?}",
+            child_env.get("GIT_TRACE"),
+        );
+        assert!(
+            !child_env.contains_key("FORGE_TEST_LEAK"),
+            "arbitrary parent var leaked into child: {:?}",
+            child_env.get("FORGE_TEST_LEAK"),
+        );
+        // Forge-controlled hardening must be in effect, overriding any
+        // parent value the user set.
+        assert_eq!(
+            child_env.get("GIT_TERMINAL_PROMPT").map(String::as_str),
+            Some("0")
+        );
+        assert_eq!(
+            child_env.get("GIT_CONFIG_NOSYSTEM").map(String::as_str),
+            Some("1")
+        );
+        let ssh = child_env
+            .get("GIT_SSH_COMMAND")
+            .expect("GIT_SSH_COMMAND must be set");
+        assert!(
+            ssh.contains("BatchMode=yes"),
+            "GIT_SSH_COMMAND missing BatchMode: {ssh}"
+        );
+        assert!(
+            ssh.contains("StrictHostKeyChecking=accept-new"),
+            "GIT_SSH_COMMAND missing StrictHostKeyChecking=accept-new: {ssh}",
+        );
+    }
+
+    /// F-665 DoD: legitimate dev-flow vars in the parent's allowlist
+    /// (`PATH`, `HOME`, `LANG`, `LC_*`, `SSH_AUTH_SOCK`, `TERM`) must pass
+    /// through. SSH-based clones rely on `SSH_AUTH_SOCK` for agent auth and
+    /// breaking that breaks legitimate users.
+    #[cfg(unix)]
+    #[test]
+    fn std_runner_passes_through_allowlisted_parent_env() {
+        let _lock = env_test_lock().lock().unwrap();
+        struct EnvGuard {
+            keys: Vec<&'static str>,
+        }
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                for k in &self.keys {
+                    unsafe { std::env::remove_var(k) };
+                }
+            }
+        }
+        unsafe {
+            std::env::set_var("SSH_AUTH_SOCK", "/tmp/forge-test-ssh-agent.sock");
+            std::env::set_var("LC_ALL", "C.UTF-8");
+        }
+        let _guard = EnvGuard {
+            keys: vec!["SSH_AUTH_SOCK", "LC_ALL"],
+        };
+
+        let dir = tempdir().unwrap();
+        let dump = dir.path().join("env.txt");
+        let runner = StdCommandRunner::new();
+        let child_env = capture_child_env(&runner, &dump);
+
+        // PATH must pass through or `sh` itself would not have been findable
+        // by the runner — but assert it explicitly to pin the contract.
+        assert!(
+            child_env.contains_key("PATH"),
+            "PATH must pass through the env scrub",
+        );
+        assert_eq!(
+            child_env.get("SSH_AUTH_SOCK").map(String::as_str),
+            Some("/tmp/forge-test-ssh-agent.sock"),
+            "SSH_AUTH_SOCK must pass through for agent-based SSH clones",
+        );
+        assert_eq!(
+            child_env.get("LC_ALL").map(String::as_str),
+            Some("C.UTF-8"),
+            "LC_* locale vars must pass through",
+        );
+    }
+
+    /// F-665 DoD: a non-responsive remote must not hang the CLI. Surrogate:
+    /// `sleep 99` exceeds the configured timeout and must be killed.
+    #[cfg(unix)]
+    #[test]
+    fn std_runner_kills_child_after_timeout() {
+        use std::time::Instant;
+        let runner = StdCommandRunner::with_timeout(Duration::from_millis(200));
+        let started = Instant::now();
+        let result = runner.run("sleep", &["99"], None);
+        let elapsed = started.elapsed();
+        assert!(result.is_err(), "expected timeout error, got Ok");
+        let msg = format!("{:#}", result.unwrap_err()).to_lowercase();
+        assert!(
+            msg.contains("timeout") || msg.contains("timed out"),
+            "expected timeout-flavored error, got: {msg}",
+        );
+        // Generous upper bound: a healthy timeout fires well under 5s.
+        // If this trips the suite is hung on the kill path.
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "timeout took {elapsed:?} to fire — kill path is broken",
+        );
+    }
+
+    /// F-665 DoD: `GIT_TERMINAL_PROMPT=0` is set so a clone that would
+    /// otherwise prompt for credentials cannot hang waiting on stdin. The
+    /// previous test asserts the env var is set; this test pins the
+    /// configured timeout default (60s) so a regression that drops the
+    /// timeout entirely surfaces here even if `GIT_TERMINAL_PROMPT` survives.
+    #[test]
+    fn std_runner_default_timeout_is_bounded() {
+        let runner = StdCommandRunner::new();
+        // Inspect via the public timeout accessor — we expose it precisely
+        // so callers and tests can confirm a non-zero, finite bound is in
+        // place, defending against `Duration::ZERO` or `Duration::MAX`
+        // regressions that would defeat the "no infinite hang" property.
+        let t = runner.timeout();
+        assert!(t > Duration::from_secs(0), "default timeout must be > 0");
+        assert!(
+            t <= Duration::from_secs(300),
+            "default timeout must be a sane upper bound (<= 5min), got {t:?}",
+        );
+    }
+
+    /// Process-wide env mutation in `std_runner_strips_parent_git_env` and
+    /// `std_runner_passes_through_allowlisted_parent_env` would race if the
+    /// suite runs them in parallel. Serialize them via a static mutex.
+    fn env_test_lock() -> &'static std::sync::Mutex<()> {
+        use std::sync::OnceLock;
+        static LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
     }
 }

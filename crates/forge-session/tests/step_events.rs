@@ -1,3 +1,4 @@
+#![allow(deprecated)] // F-652: tests/benches still drive the deprecated bare read_frame helpers.
 //! F-139: end-to-end integration test for fine-grained step events.
 //!
 //! Drives a full turn (text delta + tool call + continuation) through
@@ -60,6 +61,7 @@ async fn do_handshake(stream: &mut UnixStream) {
             pid: std::process::id(),
             user: "tester".into(),
         },
+        schema_version: forge_ipc::SCHEMA_VERSION,
     });
     forge_ipc::write_frame(stream, &hello).await.unwrap();
     let response = forge_ipc::read_frame(stream).await.unwrap();

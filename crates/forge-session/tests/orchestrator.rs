@@ -1,3 +1,4 @@
+#![allow(deprecated)] // F-652: tests/benches still drive the deprecated bare read_frame helpers.
 use forge_core::{ApprovalScope, Event};
 use forge_ipc::{
     ClientInfo, Hello, IpcEvent, IpcMessage, SendUserMessage, Subscribe, ToolCallApproved,
@@ -40,6 +41,7 @@ async fn do_handshake(stream: &mut UnixStream) {
             pid: std::process::id(),
             user: "tester".into(),
         },
+        schema_version: forge_ipc::SCHEMA_VERSION,
     });
     forge_ipc::write_frame(stream, &hello).await.unwrap();
     let response = forge_ipc::read_frame(stream).await.unwrap();
@@ -821,6 +823,7 @@ async fn unexpected_post_handshake_frame_is_logged_not_silently_dropped() {
                 pid: std::process::id(),
                 user: "tester".into(),
             },
+            schema_version: forge_ipc::SCHEMA_VERSION,
         }),
     )
     .await

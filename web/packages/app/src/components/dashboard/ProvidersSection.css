@@ -33,12 +33,16 @@
   text-transform: uppercase;
 }
 
-.providers__loading {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--color-text-secondary);
-  letter-spacing: 0.2em;
-  margin: 0;
+/* F-684: provider-grid loading state.
+ *
+ * The skeleton group lays out 4 card-shaped placeholders on the same
+ * `auto-fill, minmax(220px, 1fr)` track that the live `.providers__grid` uses
+ * so the surface does not jump when the resource resolves.
+ */
+.providers__skeleton.forge-skeleton-group {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: var(--sp-3);
 }
 
 .providers__error,
@@ -52,7 +56,7 @@
   border-radius: var(--r-sm);
   margin: 0;
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--type-body-sm);
   color: var(--color-ember-300);
 }
 
@@ -62,13 +66,13 @@
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.1em;
-  font-size: 12px;
+  font-size: var(--type-body-sm);
   color: var(--color-ember-300);
 }
 
 .providers__error-detail {
   margin: 0;
-  font-size: 13px;
+  font-size: var(--type-mono-md);
   color: var(--color-text-secondary);
 }
 
@@ -96,7 +100,7 @@
   text-transform: none;
   letter-spacing: 0;
   font-family: var(--font-body);
-  font-size: 13px;
+  font-size: var(--type-mono-md);
   font-weight: 400;
   border: 1px solid var(--color-border-2);
   background: var(--color-surface-2);
@@ -143,7 +147,7 @@
 
 .provider-card__row--meta {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   color: var(--color-text-secondary);
 }
 
@@ -167,7 +171,7 @@
 
 .provider-card__hint {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   color: var(--color-text-secondary);
   white-space: nowrap;
   overflow: hidden;
@@ -183,7 +187,7 @@
 
 .provider-card__cred {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   padding: 0 var(--sp-1);
   flex-shrink: 0;
 }

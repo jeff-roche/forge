@@ -18,3 +18,8 @@ export {
   type TabsVariant,
 } from './Tab';
 export { MenuItem, type MenuItemProps, type MenuItemVariant } from './MenuItem';
+export {
+  Skeleton,
+  type SkeletonProps,
+  type SkeletonVariant,
+} from './Skeleton';

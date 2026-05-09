@@ -70,6 +70,65 @@ Whitelist scope is **session only** — never persisted across sessions. At sess
 
 Forge ships an OCI manager using `oci-spec-rs` and shelling to `podman` or `docker`. v1 requires the user to have podman or docker installed; bundling a runtime is deferred. Dashboard onboarding detects missing runtimes and surfaces install instructions. Images pulled on first use, layers cached.
 
+### 6.8 Supply-chain model (F-643)
+
+Level 2 executes user code inside images pulled from external registries. Treating those images as trusted on the basis of a tag is unsafe: tags are mutable, and an attacker who gains push access (or a registry compromise / MITM on the pull) can replace the bytes that get pulled and run inside the sandbox.
+
+Two independent gates close that gap. Both must succeed before `podman pull` writes anything to the local store.
+
+#### Gate 1 — Digest pinning at parse time
+
+[`forge_oci::ImageRef::parse`](../../crates/forge-oci/src/lib.rs) accepts three reference shapes:
+
+| Shape | Status |
+|---|---|
+| `[registry/]name@sha256:<hex>` | Always accepted. |
+| `[registry/]name:tag@sha256:<hex>` | Accepted; the digest is what runs. The tag is informational. |
+| `[registry/]name:tag` (no digest) | **Rejected** unless the canonical `[registry]/[namespace]/<name>` matches an entry in `TAG_ONLY_ALLOWLIST`. |
+
+The allowlist is a small first-party-only set (today: `oci.io/forge/`) and exists so the Forge tool images can roll tags during early Phase 3 without forcing every dev sandbox to know the latest digest. **Production deployments should still pin even allowlisted images by digest.**
+
+The rejection path returns `OciError::UntrustedTagOnlyRef` so callers — including `Level2Session::create` and any future config loader — fail loudly rather than silently pulling a mutable reference. Canonicalization (resolving an implicit `docker.io` registry and the `library/` namespace) happens before the allowlist check, so `alpine` cannot bypass it by dropping segments the allowlist would otherwise see.
+
+#### Gate 2 — Signature verification before pull
+
+[`PodmanRuntime::pull`](../../crates/forge-oci/src/podman.rs) invokes a [`SignatureVerifier`](../../crates/forge-oci/src/signature.rs) on the digest-pinned reference *before* `podman pull` runs. `PodmanRuntime::new()` defaults to [`CosignVerifier`] in `SignaturePolicy::Permissive` — operators get identity-pinned verification by default once they configure the daemon environment, and never silently get zero verification. Production deployments call `with_verifier` to switch to `SignaturePolicy::Strict`.
+
+[`CosignVerifier`] shells to `cosign verify` in keyless mode against the configured Fulcio root + Rekor transparency log AND pins the trusted signer identity. Cosign by itself accepts *any* Fulcio-issued certificate, so the verifier reads two env vars at verify time and forwards them as cosign flags:
+
+| Env var | Forwarded to cosign as |
+|---|---|
+| `COSIGN_CERTIFICATE_IDENTITY` | `--certificate-identity=<value>` |
+| `COSIGN_CERTIFICATE_OIDC_ISSUER` | `--certificate-oidc-issuer=<value>` |
+
+The env-var convention is a Forge bridge — cosign itself only reads the equivalent CLI flags. The names match cosign's CLI flag names so operators have one mental model. Forge supports literal-string match only; operators who need regex pinning can wire a custom `SignatureVerifier` impl.
+
+A failed verification surfaces as `OciError::SignatureVerificationFailed` and aborts the pull — `podman` is never invoked.
+
+The `SignaturePolicy` enum governs how an unavailable verifier is handled. "Unavailable" includes both the cosign binary missing from `PATH` AND the identity env vars being unset (because either case means cosign cannot enforce identity pinning):
+
+| Policy | Verifier unavailable | Signature mismatch |
+|---|---|---|
+| `Strict` | hard-fail | hard-fail |
+| `Permissive` (default) | logged warning, pull proceeds | hard-fail |
+
+Permissive is the default so existing dev environments without `cosign` (or without a chosen signer identity) continue to function. Production wiring opts into `Strict` explicitly, after the daemon environment is wired with both identity env vars. **The permissive escape hatch only relaxes the "verifier operational" check** — a real signature mismatch always blocks the pull regardless of policy.
+
+#### Why both gates
+
+A digest alone proves identity (the bytes Forge pulls are the bytes the digest names) but not provenance (those bytes were produced by a trusted signer). A signature alone proves provenance but not identity at the call site (a compromised CI could sign a malicious image at a tag the user knows). Together they close the loop: the user types a digest, signed by a trusted identity, and only then does `podman` see a byte.
+
+#### Tested invariants
+
+The supply-chain story has both unit and integration coverage that runs on every `cargo test -p forge-oci`:
+
+- `image_ref_rejects_tag_only_when_not_allowlisted` — non-allowlisted tag-only refs fail at parse time.
+- `image_ref_accepts_tag_only_for_allowlisted_first_party_source` — first-party allowlist works as documented.
+- `image_ref_parses_digest_pinned_form` — digest-pinned refs round-trip through parse + render with the tag dropped on the wire.
+- `pull_runs_verifier_before_invoking_podman` — verifier is consulted before the runner; a rejection short-circuits the pull.
+- `pull_strict_policy_blocks_on_missing_verifier` / `pull_permissive_policy_proceeds_when_verifier_unavailable` / `pull_permissive_policy_still_blocks_on_signature_mismatch` — the policy matrix.
+- `mismatched_signature_is_rejected` (integration) — end-to-end DoD coverage.
+
 ---
 
 ## 8. Sandboxing implementation
@@ -92,7 +151,27 @@ Implementation:
 
 Implemented in `crates/forge-session/src/sandbox/level2.rs` (F-596),
 backed by the `forge_oci::ContainerRuntime` trait shipped in F-595
-(today: `PodmanRuntime`).
+and broadened in F-680 to host more than one runtime
+(today: `PodmanRuntime`; future: `DockerRuntime` etc.).
+
+#### Trait surface
+
+`ContainerRuntime` is a runtime-agnostic lifecycle contract:
+
+| Method | Role |
+|---|---|
+| `detect()` | Probe the host and classify failure into one of the canonical `OciError` variants (`RuntimeMissing`, `RuntimeBroken`, `RootlessUnavailable`). |
+| `pull(image)` | Idempotent image fetch into the local store. |
+| `create(image, argv: &[&str], opts: &SecurityOpts)` | Create a container with the given in-container command and security-hardening flags. Argv is borrowed `&str` slices so callers don't have to allocate. The `opts` parameter is the F-642 plumbing point — see *Security hardening defaults* below. |
+| `start(handle)` / `stop(handle)` / `remove(handle)` | Lifecycle transitions. |
+| `exec(handle, argv: &[&str])` | Run a command inside a started container. |
+| `stats(handle)` | Snapshot resource usage. Implementations call `parse_stats` after fetching the runtime's stats blob. |
+| `parse_stats(raw)` | Runtime-specific JSON-shape parser. Each runtime owns its own field-name and unit conventions (podman emits `cpu_percent`/`mem_usage`/`pids`; docker would emit different shapes). The trait pins the seam so callers drive parsing through a single method. |
+
+The seam matters most around `detect` and `parse_stats`: both are
+shapes that vary across runtimes, and putting them on the trait
+means a future `DockerRuntime` can ship without callers learning
+the runtime-specific schema.
 
 #### Lifecycle (pre-warm + reuse)
 
@@ -105,14 +184,10 @@ for the duration of the session. The lifecycle, owned by
    `Level2Unavailable` and trigger auto-fallback (see below):
    `RuntimeMissing`, `RuntimeBroken`, `RootlessUnavailable`.
 2. **Pull** — `runtime.pull(image)`. Idempotent; layers cached.
-3. **Create** — `runtime.create(image, ["sleep", "infinity"])`. The
-   `sleep infinity` init keeps the container alive between `exec`
-   calls. Resource limits attach at this step in the long-term
-   design (see below) — **deferred to follow-up #631**; containers
-   currently run with the host slice's default limits, and
-   `Level2Session::create` emits a `tracing::warn!` whenever a
-   non-default `ContainerLimits` is passed so operators are not
-   surprised at runtime.
+3. **Create** — `runtime.create(image, ["sleep", "infinity"], &opts)`.
+   The `sleep infinity` init keeps the container alive between `exec`
+   calls. The `opts` carry both the F-642 security flags and the F-654
+   cgroup caps; both apply at create time (see below).
 4. **Start** — `runtime.start(handle)`. Container is now ready for
    `exec`.
 5. **Exec, repeated** — every step in the session runs through
@@ -138,18 +213,75 @@ delegates to `session.exec_step(argv)`. The unified return shape is
 > same pre-warmed container, and `Box` cannot be cloned across those
 > handles.
 
+#### Security hardening defaults
+
+Rootless podman alone is not sufficient — the container's effective
+capability set, `NoNewPrivs` flag, network namespace, rootfs writability,
+and user namespace mapping all default to permissive values that leave
+escape-class CVEs in the kernel, podman, or `runc` exploitable from
+inside the sandbox (NIST SP 800-190 §4.5; CWE-269). F-642 closes that
+gap by routing every Level 2 `create` through `forge_oci::SecurityOpts`,
+applied as `podman create` flags between the verb and the IMAGE
+positional. The strict preset returned by `SecurityOpts::hardened_default`
+is what `Level2Session::create` ships, and what every production caller
+should reach for.
+
+| Flag rendered | Field | Default | Threat addressed |
+|---|---|---|---|
+| `--security-opt no-new-privileges` | `no_new_privileges: bool` | `true` | setuid binaries / file-cap escalation inside the container |
+| `--cap-drop ALL` | `cap_drop: Vec<String>` | `["ALL"]` | rootless-default capability set (`CAP_SETUID`, `CAP_NET_RAW`, etc.) |
+| `--cap-add <CAP>` (none) | `cap_add: Vec<String>` | `[]` (empty allow-list) | adds capabilities back after `cap-drop`. The `sleep infinity` init and `podman exec`'d agent commands need none; future tools requiring a capability must add it explicitly here, not by shrinking `cap_drop`. |
+| `--read-only` | `read_only_rootfs: bool` | `true` | persistence and anti-forensic writes to `/usr`, `/etc`, `/lib`, and the tmpfs-style runtime state directories |
+| `--network none` | `network: NetworkPolicy` | `NetworkPolicy::None` | data exfiltration / lateral movement / SSRF from inside the sandbox |
+| `--userns keep-id` | `userns: UserNsPolicy` | `UserNsPolicy::KeepId` | nested rootless mapping that turns workspace mounts hostile in either direction |
+
+The flag rendering is deterministic (pinned by
+`SecurityOpts::to_create_flags` and asserted by both unit and
+integration tests); ordering is `--security-opt` → `--cap-drop` →
+`--cap-add` → `--read-only` → `--network` → `--userns`. Operators
+auditing the daemon's `tracing` log can grep for the same fixed shape.
+
+> **Capability allow-list is intentionally empty.** Phase 3 Level 2
+> only ships a `sleep infinity` init and runs caller argv through
+> `podman exec`. Neither needs a non-zero capability, so the strict
+> default drops everything and adds nothing back. When a future
+> tool genuinely needs a capability (e.g. `CAP_NET_BIND_SERVICE` for
+> a privileged-port MCP server), the call site adds it explicitly to
+> `SecurityOpts::cap_add`. The rule: `cap_drop` stays at `["ALL"]`
+> forever — relaxations live in `cap_add`.
+
+> **Mounts and tmpfs.** `--read-only` makes the rootfs immutable,
+> but most agent tooling needs *some* writable scratch space.
+> Wiring named tmpfs / volume mounts (`/workspace`, `/tmp`,
+> `~/.config/forge/certs/`) is downstream work — see *Mounts (future
+> work)* below, and the F-642 follow-ups in the Phase 3 audit batch.
+> Until those land, agents that need to write fall back to Level 1
+> via the auto-fallback path or fail loudly inside the container.
+
+> **Drop-cleanup path.** The synchronous panic-safety net
+> (`Level2Session::drop`) shells out to `podman rm -f <id>`, not
+> `podman create`, so security flags don't apply there — the only
+> work the cleanup does is reap the already-created container.
+> If a future runtime grows its own teardown shape, the safety-net
+> argv abstraction would inherit the same "no `create` flags here"
+> property.
+
 #### Resource limits
 
 Per-step caps land on the container's cgroup v2 leaf at **create
 time**, not exec time — `podman exec` does not accept resource
-flags. `ContainerLimits` captures the three caps Phase 1 cares
+flags. F-654 routes them through `forge_oci::SecurityOpts::limits`
+so the same `runtime.create(...)` call applies both the security
+flags and the cgroup caps. `forge_oci::ContainerLimits` (re-exported
+as `level2::ContainerLimits`) captures the four caps Phase 3 cares
 about:
 
-| Field | podman flag | Maps to |
-|---|---|---|
-| `cpus: Option<f32>` | `--cpus <N>` | cgroup v2 `cpu.max` |
-| `memory_bytes: Option<u64>` | `--memory <bytes>` | cgroup v2 `memory.max` |
-| `pids_max: Option<u64>` | `--pids-limit <N>` | cgroup v2 `pids.max` |
+| Field | podman flag | Unit | Maps to |
+|---|---|---|---|
+| `cpus: Option<f32>` | `--cpus <N>` | float CPU shares | cgroup v2 `cpu.max` |
+| `memory_bytes: Option<u64>` | `--memory <bytes>` | bytes | cgroup v2 `memory.max` |
+| `memory_swap_bytes: Option<u64>` | `--memory-swap <bytes>` | bytes; equal to `memory_bytes` disables swap | cgroup v2 `memory.swap.max` |
+| `pids_max: Option<u64>` | `--pids-limit <N>` | process count | cgroup v2 `pids.max` |
 
 These map directly onto the same intent as the Level-1
 `SandboxConfig` — `cpu_seconds` ↔ `--cpus`, `address_space_bytes`
@@ -157,16 +289,24 @@ These map directly onto the same intent as the Level-1
 enforcement (per-container) instead of `setrlimit` (per-process /
 per-uid).
 
-> **Known gap, tracked as a follow-up (issue #631).** F-595's
-> `ContainerRuntime::create` signature accepts only
-> `(image, argv)`. To preserve the F-595 public API (per F-596's
-> constraints), `Level2Session::create` currently stores the
-> `ContainerLimits` on the session for observability rather than
-> passing them through to `podman create`. The argv-shaping helper
-> `level2::limits_to_create_flags` pins the canonical podman flag
-> rendering (verified by unit test) so the eventual wiring — once
-> the trait grows a `create_with_limits` method — is a one-line
-> change.
+The hardened preset
+(`SecurityOpts::hardened_default`) ships
+`ContainerLimits::conservative_default()` — **2 cpus, 4 GiB memory
+with swap disabled, 1024 pids**. `Level2Session::create`
+substitutes the conservative preset whenever the caller passes
+`ContainerLimits::default()` (every field `None`), so a config
+without explicit overrides still gets bounded; an explicit
+non-default `ContainerLimits` reaches the runtime verbatim. This
+closes CWE-770: a fork-bomb (`:(){ :|:& };:`) or memory-exhaust
+workload inside a Level 2 sandbox now hits the cgroup `pids.max` /
+`memory.max` ceiling instead of starving the host.
+
+> **Why `--memory-swap` defaults to `--memory`.** Without
+> `--memory-swap`, podman lets the container use `2 ×
+> memory_bytes` of swap, which makes `--memory` advisory rather
+> than enforced. Setting them equal disables swap and pins the
+> total memory budget to the headline number. Operators that need
+> swap explicitly opt in by overriding `memory_swap_bytes`.
 
 #### Auto-fallback to Level 1
 
@@ -248,10 +388,18 @@ level.
 - `~/.config/forge/certs/` mounted at `/etc/forge/certs/` for provider access.
 - No home dir, no `/tmp` cross-mount.
 
-#### Network (future work)
+#### Network
 
-- Default: no network.
+- **Default: `--network none`** (F-642). The container has only loopback
+  inside its own namespace; no inbound or outbound traffic is
+  reachable. This is the strictest interpretation of the F-642 DoD's
+  "restricted network" requirement and the same default Phase 3
+  ships unless a tool declares otherwise.
 - Declared hosts (for MCP or tools): CNI policy allows only those.
+  Tracked as future work — until it lands, tools that need network
+  must run at Level 1 or be wrapped in a Level 2 session whose
+  `SecurityOpts::network` is explicitly relaxed by the call site
+  (rare; document the relaxation).
 
 #### Trade-offs vs Level 1
 
@@ -260,7 +408,7 @@ level.
 | Blast radius of a compromised tool | Process tree of one sandbox | Container rootfs + namespace |
 | Cold-start cost | Microseconds (fork+exec) | Image pull (one-off) + container create+start (~hundreds of ms, once per session) |
 | Per-step cost | fork+exec | `podman exec` (~tens of ms) |
-| Network containment | None (open network) | CNI policy (future); default-deny once mounts are wired |
+| Network containment | None (open network) | `--network none` by default (F-642); CNI policy for declared hosts is future work |
 | Filesystem containment | `forge-fs` path checks | Container rootfs by construction |
 | Resource limits | `setrlimit` (per-process / per-uid) + cgroup v2 `pids.max` (per-sandbox) | cgroup v2 `cpu.max` / `memory.max` / `pids.max` (per-container) |
 | Operator burden | Linux + cgroup v2 | Linux + cgroup v2 + rootless `podman` |

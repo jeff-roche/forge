@@ -15,6 +15,6 @@ The Forge design-token package. Ships a single static CSS file (`src/tokens.css`
 
 ## Further reading
 
-- [Token pipeline](../../../docs/frontend/token-pipeline.md)
+- [Token pipeline](../../../docs/frontend/architecture.md#94-design-token-pipeline)
 - [Frontend architecture](../../../docs/frontend/architecture.md)
 - [Crate architecture overview](../../../docs/architecture/crate-architecture.md)

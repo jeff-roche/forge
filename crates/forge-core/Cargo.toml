@@ -25,6 +25,13 @@ secrecy = "0.10"
 # F-346) lifted here so both forge-mcp and forge-providers can reuse the SSRF
 # guard without forge-providers gaining a wrong-direction dep on forge-mcp.
 url = "2"
+# F-644: `http::secure_client_builder` houses a `reqwest::dns::Resolve` impl
+# that re-checks every resolved IP against `url_safety` policy, closing the
+# DNS-rebinding gap between `check_url` and the actual TCP connect. We pull
+# reqwest with only the rustls-tls backend — no `json`, `stream`, or other
+# feature flags — because callers compose their own builders on top of this
+# helper and bring their own feature requirements.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
 # F-587: Platform-gated keyring backends. Linux uses Secret Service over
 # DBus directly; macOS uses the system Keychain via `security-framework`;

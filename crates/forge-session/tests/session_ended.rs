@@ -1,3 +1,4 @@
+#![allow(deprecated)] // F-652: tests/benches still drive the deprecated bare read_frame helpers.
 //! Integration tests: SessionEnded emission for ephemeral sessions.
 //!
 //! Verifies that forged emits `SessionEnded { reason: Completed }` after a
@@ -72,6 +73,7 @@ async fn ephemeral_session_emits_session_ended_with_completed_reason() {
                 pid: std::process::id(),
                 user: "tester".into(),
             },
+            schema_version: forge_ipc::SCHEMA_VERSION,
         }),
     )
     .await

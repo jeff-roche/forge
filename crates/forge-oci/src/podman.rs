@@ -6,9 +6,12 @@
 //! logic without a real binary.
 
 use crate::runner::{CommandOutcome, CommandRunner, TokioCommandRunner};
+use crate::signature::{
+    enforce_policy, CosignVerifier, NoopVerifier, SignaturePolicy, SignatureVerifier,
+};
 use crate::{
     ContainerHandle, ContainerLogs, ContainerRuntime, ExecResult, ImageRef, LogLine, OciError,
-    Stats,
+    SecurityOpts, Stats,
 };
 use async_trait::async_trait;
 
@@ -16,23 +19,97 @@ use async_trait::async_trait;
 const PODMAN: &str = "podman";
 
 /// `ContainerRuntime` backed by the rootless `podman` CLI.
+///
+/// Every [`Self::pull`] call runs the configured [`SignatureVerifier`]
+/// before invoking `podman pull`. This is the F-643 supply-chain story:
+/// even with digest pinning enforced by [`ImageRef`](crate::ImageRef),
+/// signature verification gives operators an attestation that the bytes
+/// behind the digest were produced by a trusted signer.
 pub struct PodmanRuntime {
     runner: Box<dyn CommandRunner>,
+    verifier: Box<dyn SignatureVerifier>,
+    policy: SignaturePolicy,
 }
 
 impl PodmanRuntime {
-    /// Build a runtime that shells out via `tokio::process::Command`.
+    /// Build a runtime that shells out via `tokio::process::Command`. The
+    /// runtime starts in [`SignaturePolicy::Permissive`] mode with a
+    /// [`CosignVerifier`] — operators get identity-pinned signature
+    /// verification by default once they set
+    /// [`crate::signature::IDENTITY_ENV`] /
+    /// [`crate::signature::OIDC_ENV`]; until then the permissive policy
+    /// logs a warning and lets the pull through so dev environments still
+    /// function. Production deployments call [`Self::with_verifier`] to
+    /// switch to [`SignaturePolicy::Strict`] (or to swap in a custom
+    /// verifier).
+    ///
+    /// **Why CosignVerifier and not NoopVerifier**: a previous default of
+    /// [`NoopVerifier`] gave silent zero verification — operators who
+    /// forgot to call [`Self::with_verifier`] got no signature gate AND
+    /// no warning, ever. The new default ensures every pull either
+    /// consults cosign or emits a warning explaining what was skipped.
     pub fn new() -> Self {
         Self {
             runner: Box::new(TokioCommandRunner),
+            verifier: Box::new(CosignVerifier::new(SignaturePolicy::Permissive)),
+            policy: SignaturePolicy::Permissive,
         }
     }
 
     /// Build a runtime backed by a custom [`CommandRunner`] — for tests.
+    /// Defaults to a no-op verifier so tests that don't care about the
+    /// supply-chain gate stay simple; tests that exercise the verification
+    /// path call [`Self::with_verifier`] afterwards.
     pub fn with_runner(runner: Box<dyn CommandRunner>) -> Self {
-        Self { runner }
+        Self {
+            runner,
+            verifier: Box::new(NoopVerifier),
+            policy: SignaturePolicy::Permissive,
+        }
     }
 
+    /// Wire a signature verifier and the policy that governs how its
+    /// failures are handled. Returning `self` keeps the call site
+    /// composable with [`Self::new`] / [`Self::with_runner`].
+    pub fn with_verifier(
+        mut self,
+        verifier: Box<dyn SignatureVerifier>,
+        policy: SignaturePolicy,
+    ) -> Self {
+        self.verifier = verifier;
+        self.policy = policy;
+        self
+    }
+
+    async fn run_or_fail(&self, args: &[&str]) -> Result<CommandOutcome, OciError> {
+        let outcome = self
+            .runner
+            .run(PODMAN, args)
+            .await
+            .map_err(|source| OciError::Io {
+                tool: PODMAN,
+                source,
+            })?;
+        if !outcome.success() {
+            return Err(OciError::CommandFailed {
+                tool: PODMAN,
+                args: args.iter().map(|s| s.to_string()).collect(),
+                exit_code: outcome.exit_code,
+                stderr: String::from_utf8_lossy(&outcome.stderr).to_string(),
+            });
+        }
+        Ok(outcome)
+    }
+}
+
+impl Default for PodmanRuntime {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl ContainerRuntime for PodmanRuntime {
     /// Probe the host: confirm `podman --version` works AND `podman info`
     /// reports rootless mode is available.
     ///
@@ -46,7 +123,7 @@ impl PodmanRuntime {
     /// - [`OciError::RootlessUnavailable`] if `podman info` JSON parsed and
     ///   explicitly reports `host.security.rootless = false`.
     /// - [`OciError::InvalidJson`] if `podman info` JSON didn't parse.
-    pub async fn detect(&self) -> Result<(), OciError> {
+    async fn detect(&self) -> Result<(), OciError> {
         let version = self
             .runner
             .run(PODMAN, &["--version"])
@@ -99,42 +176,26 @@ impl PodmanRuntime {
         Ok(())
     }
 
-    async fn run_or_fail(&self, args: &[&str]) -> Result<CommandOutcome, OciError> {
-        let outcome = self
-            .runner
-            .run(PODMAN, args)
-            .await
-            .map_err(|source| OciError::Io {
-                tool: PODMAN,
-                source,
-            })?;
-        if !outcome.success() {
-            return Err(OciError::CommandFailed {
-                tool: PODMAN,
-                args: args.iter().map(|s| s.to_string()).collect(),
-                exit_code: outcome.exit_code,
-                stderr: String::from_utf8_lossy(&outcome.stderr).to_string(),
-            });
-        }
-        Ok(outcome)
-    }
-}
-
-impl Default for PodmanRuntime {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait]
-impl ContainerRuntime for PodmanRuntime {
     async fn pull(&self, image: &ImageRef) -> Result<(), OciError> {
+        // F-643: verify the image's signature *before* podman is allowed to
+        // write any bytes to the local store. A failed verification under a
+        // strict policy aborts the pull entirely; under a permissive policy
+        // a missing verifier degrades to a logged warning while a real
+        // mismatch still aborts. See `signature::enforce_policy`.
+        if let Err(verr) = self.verifier.verify(image).await {
+            enforce_policy(image, self.policy, verr)?;
+        }
         let img = image.to_image_string();
         self.run_or_fail(&["pull", &img]).await?;
         Ok(())
     }
 
-    async fn create(&self, image: &ImageRef, argv: &[String]) -> Result<ContainerHandle, OciError> {
+    async fn create(
+        &self,
+        image: &ImageRef,
+        argv: &[&str],
+        opts: &SecurityOpts,
+    ) -> Result<ContainerHandle, OciError> {
         let img = image.to_image_string();
         // `podman create [options] IMAGE [COMMAND [ARG...]]` — podman's
         // argument grammar terminates flag parsing at the IMAGE positional, so
@@ -145,8 +206,20 @@ impl ContainerRuntime for PodmanRuntime {
         // "executable file `--` not found"). The flag-injection regression
         // test in this module pins that behaviour by feeding `--privileged`
         // through and asserting podman does not apply it as a runtime flag.
-        let mut args: Vec<&str> = vec!["create", &img];
-        args.extend(argv.iter().map(String::as_str));
+        //
+        // F-642: SecurityOpts flags are inserted between `create` and the
+        // IMAGE positional so podman parses them as runtime options. Order
+        // is pinned by `SecurityOpts::to_create_flags` and asserted by both
+        // unit tests in this module and the integration test in
+        // `tests/podman_integration.rs`.
+        let security_flags = opts.to_create_flags();
+        let mut args: Vec<&str> = Vec::with_capacity(2 + security_flags.len() + argv.len());
+        args.push("create");
+        for flag in &security_flags {
+            args.push(flag.as_str());
+        }
+        args.push(&img);
+        args.extend_from_slice(argv);
         let outcome = self.run_or_fail(&args).await?;
         let id = String::from_utf8_lossy(&outcome.stdout).trim().to_string();
         if id.is_empty() {
@@ -165,11 +238,7 @@ impl ContainerRuntime for PodmanRuntime {
         Ok(())
     }
 
-    async fn exec(
-        &self,
-        handle: &ContainerHandle,
-        argv: &[String],
-    ) -> Result<ExecResult, OciError> {
+    async fn exec(&self, handle: &ContainerHandle, argv: &[&str]) -> Result<ExecResult, OciError> {
         // `podman exec [options] CONTAINER COMMAND [ARG...]` — same positional
         // grammar as `create`: podman stops parsing flags at the CONTAINER
         // positional, so caller-supplied argv elements that begin with `--`
@@ -178,7 +247,7 @@ impl ContainerRuntime for PodmanRuntime {
         // it would be passed verbatim to crun as the command. The
         // flag-injection regression test pins this.
         let mut args: Vec<&str> = vec!["exec", &handle.id];
-        args.extend(argv.iter().map(String::as_str));
+        args.extend_from_slice(argv);
         // exec captures the inner program's stdout/stderr/exit even on a
         // non-zero exit — that's a meaningful signal, not a runtime failure.
         // So we go around `run_or_fail` here.
@@ -212,8 +281,26 @@ impl ContainerRuntime for PodmanRuntime {
         let outcome = self
             .run_or_fail(&["stats", "--no-stream", "--format", "json", &handle.id])
             .await?;
+        // Delegate parsing to the trait method so the podman-specific JSON
+        // schema (`cpu_percent`, `mem_usage`, `pids`) is not baked into the
+        // lifecycle code. A future runtime emitting different field names or
+        // unit conventions would supply its own `parse_stats`; the lifecycle
+        // shape (run command → parse blob) stays the same.
+        self.parse_stats(&outcome.stdout)
+    }
+
+    fn parse_stats(&self, raw: &[u8]) -> Result<Stats, OciError> {
+        // Podman emits a JSON array; the first entry is the requested
+        // container. Field names and unit conventions are podman's:
+        //   - `cpu_percent`: string like `"1.35%"`
+        //   - `mem_usage`: string like `"178.3MB / 67.31GB"` (we surface only
+        //     the first number)
+        //   - `pids`: string or integer
+        // Missing/transitional fields are surfaced as `None` rather than
+        // failing the call — see `parse_size_first` for the `"-- / --"`
+        // placeholder podman emits while a container is mid-state.
         let parsed: serde_json::Value =
-            serde_json::from_slice(&outcome.stdout).map_err(|source| OciError::InvalidJson {
+            serde_json::from_slice(raw).map_err(|source| OciError::InvalidJson {
                 tool: PODMAN,
                 subcommand: "stats",
                 source,
@@ -373,9 +460,23 @@ mod tests {
     use super::*;
     use crate::runner::{RecordingRunner, StubResponse};
 
+    /// 64-char lowercase hex literal — a syntactically valid sha256 digest
+    /// for tests that need a digest-pinned [`ImageRef`].
+    const SHA: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
     fn rt(runner: RecordingRunner) -> PodmanRuntime {
         PodmanRuntime::with_runner(Box::new(runner))
     }
+
+    /// Helper: a digest-pinned alpine reference that satisfies the F-643
+    /// supply-chain check.
+    fn alpine_pinned() -> ImageRef {
+        ImageRef::parse(&format!("docker.io/library/alpine@sha256:{SHA}")).unwrap()
+    }
+
+    // `ContainerRuntime` is already in scope via `use super::*;` — tests
+    // call detect/create/exec/parse_stats through that trait surface so any
+    // accidental migration back to inherent methods would fail to link.
 
     #[tokio::test]
     async fn detect_succeeds_when_version_and_rootless_ok() {
@@ -450,13 +551,16 @@ mod tests {
         let calls = runner.calls.clone();
 
         let runtime = rt(runner);
-        let img = ImageRef::parse("docker.io/library/alpine:3.19").unwrap();
+        let img = alpine_pinned();
         runtime.pull(&img).await.unwrap();
 
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, "podman");
-        assert_eq!(calls[0].1, vec!["pull", "docker.io/library/alpine:3.19"]);
+        assert_eq!(
+            calls[0].1,
+            vec!["pull", &format!("docker.io/library/alpine@sha256:{SHA}"),]
+        );
     }
 
     #[tokio::test]
@@ -466,15 +570,25 @@ mod tests {
         let calls = runner.calls.clone();
 
         let runtime = rt(runner);
-        let img = ImageRef::parse("alpine:3.19").unwrap();
+        let img = alpine_pinned();
         let h = runtime
-            .create(&img, &["echo".into(), "hi".into()])
+            .create(&img, &["echo", "hi"], &SecurityOpts::permissive())
             .await
             .unwrap();
         assert_eq!(h.id, "abc1234deadbeef");
 
         let calls = calls.lock().unwrap();
-        assert_eq!(calls[0].1, vec!["create", "alpine:3.19", "echo", "hi"]);
+        // SecurityOpts::permissive emits zero flags, keeping the
+        // historical argv shape for tests that pre-date F-642.
+        assert_eq!(
+            calls[0].1,
+            vec![
+                "create",
+                &format!("docker.io/library/alpine@sha256:{SHA}"),
+                "echo",
+                "hi",
+            ]
+        );
     }
 
     #[tokio::test]
@@ -492,16 +606,17 @@ mod tests {
         let calls = runner.calls.clone();
 
         let runtime = rt(runner);
-        let img = ImageRef::parse("alpine:3.19").unwrap();
+        let img = alpine_pinned();
         runtime
-            .create(&img, &["--privileged".into(), "sh".into()])
+            .create(&img, &["--privileged", "sh"], &SecurityOpts::permissive())
             .await
             .unwrap();
 
         let argv = calls.lock().unwrap()[0].1.clone();
+        let image_str = format!("docker.io/library/alpine@sha256:{SHA}");
         let image_idx = argv
             .iter()
-            .position(|a| a == "alpine:3.19")
+            .position(|a| a == &image_str)
             .expect("argv must contain image positional");
         let first_caller_idx = argv
             .iter()
@@ -527,8 +642,12 @@ mod tests {
         let runner = RecordingRunner::new();
         runner.push(StubResponse::ok_stdout(b"".to_vec()));
         let runtime = rt(runner);
-        let img = ImageRef::parse("alpine:3.19").unwrap();
-        let err = runtime.create(&img, &[]).await.unwrap_err();
+        let img = alpine_pinned();
+        let argv: [&str; 0] = [];
+        let err = runtime
+            .create(&img, &argv, &SecurityOpts::permissive())
+            .await
+            .unwrap_err();
         assert!(matches!(err, OciError::CommandFailed { .. }));
     }
 
@@ -559,10 +678,7 @@ mod tests {
 
         let runtime = rt(runner);
         let res = runtime
-            .exec(
-                &ContainerHandle::new("xyz"),
-                &["echo".into(), "hello".into()],
-            )
+            .exec(&ContainerHandle::new("xyz"), &["echo", "hello"])
             .await
             .unwrap();
         assert_eq!(res.stdout, "hello\n");
@@ -595,10 +711,7 @@ mod tests {
 
         let runtime = rt(runner);
         runtime
-            .exec(
-                &ContainerHandle::new("xyz"),
-                &["--user".into(), "root".into(), "id".into()],
-            )
+            .exec(&ContainerHandle::new("xyz"), &["--user", "root", "id"])
             .await
             .unwrap();
 
@@ -637,7 +750,7 @@ mod tests {
         });
 
         let res = rt(runner)
-            .exec(&ContainerHandle::new("xyz"), &["false".into()])
+            .exec(&ContainerHandle::new("xyz"), &["false"])
             .await
             .unwrap();
         assert_eq!(res.exit_code, Some(2));
@@ -708,16 +821,272 @@ mod tests {
         assert!(matches!(err, OciError::InvalidJson { .. }));
     }
 
+    // ── F-680: trait-level stats parsing ─────────────────────────────
+
+    #[test]
+    fn parse_stats_handles_podman_json_payload() {
+        // F-680: `parse_stats` is a trait method — the podman-specific
+        // schema (`cpu_percent`, `mem_usage`, `pids` plus their string
+        // formats) is owned by `PodmanRuntime`'s impl, not by free
+        // helpers in the lifecycle path. Future runtimes will supply
+        // their own `parse_stats` translating their own JSON shape into
+        // the same `Stats` struct.
+        let runtime = PodmanRuntime::new();
+        let json = br#"[{"id":"xyz","cpu_percent":"2.5%","mem_usage":"64MB / 1GB","pids":"7"}]"#;
+        let stats = runtime.parse_stats(json).unwrap();
+        assert_eq!(stats.cpu_percent, Some(2.5));
+        assert_eq!(stats.memory_bytes, Some(64_000_000));
+        assert_eq!(stats.pids, Some(7));
+    }
+
+    #[test]
+    fn parse_stats_callable_through_trait_object() {
+        // Pinning the dyn-trait callability separately so a future
+        // refactor cannot accidentally make `parse_stats` an inherent
+        // method — that would defeat the whole abstraction.
+        let runtime: Box<dyn ContainerRuntime> = Box::new(PodmanRuntime::new());
+        let json = br#"[{"id":"x"}]"#;
+        let stats = runtime.parse_stats(json).unwrap();
+        assert!(stats.cpu_percent.is_none());
+    }
+
+    #[test]
+    fn parse_stats_surfaces_invalid_json_as_typed_error() {
+        let runtime = PodmanRuntime::new();
+        let err = runtime.parse_stats(b"not json").unwrap_err();
+        assert!(matches!(err, OciError::InvalidJson { tool: "podman", .. }));
+    }
+
+    // ── F-680: detect on the trait surface ───────────────────────────
+
+    #[tokio::test]
+    async fn detect_callable_through_trait_object() {
+        // F-680: `detect` is part of the trait. Callers that want to
+        // probe a runtime without knowing the concrete type call it
+        // through `&dyn ContainerRuntime`.
+        let runner = RecordingRunner::new();
+        runner.push(StubResponse::ok_stdout(b"podman version 5.0\n".to_vec()));
+        runner.push(StubResponse::ok_stdout(
+            br#"{"host":{"security":{"rootless":true}}}"#.to_vec(),
+        ));
+        let runtime: Box<dyn ContainerRuntime> = Box::new(rt(runner));
+        runtime.detect().await.unwrap();
+    }
+
     #[tokio::test]
     async fn command_failure_surfaces_typed_error() {
         let runner = RecordingRunner::new();
         runner.push(StubResponse::err(b"image not found\n".to_vec()));
-        let img = ImageRef::parse("does/not:exist").unwrap();
+        // Use a digest-pinned ref so the pull reaches `podman pull`; the
+        // failure under test is the runtime's exit, not the supply-chain
+        // gate.
+        let img = alpine_pinned();
         let err = rt(runner).pull(&img).await.unwrap_err();
         assert!(matches!(
             err,
             OciError::CommandFailed { tool: "podman", .. }
         ));
+    }
+
+    // ── F-643: signature verification wired into pull ────────────────
+
+    /// Test verifier that always rejects with a configurable variant.
+    struct RejectingVerifier(crate::signature::VerificationError);
+
+    #[async_trait]
+    impl SignatureVerifier for RejectingVerifier {
+        async fn verify(
+            &self,
+            _image: &ImageRef,
+        ) -> Result<(), crate::signature::VerificationError> {
+            Err(match &self.0 {
+                crate::signature::VerificationError::Mismatch(s) => {
+                    crate::signature::VerificationError::Mismatch(s.clone())
+                }
+                crate::signature::VerificationError::VerifierUnavailable(s) => {
+                    crate::signature::VerificationError::VerifierUnavailable(s.clone())
+                }
+                crate::signature::VerificationError::Io(s) => {
+                    crate::signature::VerificationError::Io(s.clone())
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn pull_runs_verifier_before_invoking_podman() {
+        // Load-bearing: verification must happen *before* podman writes
+        // anything to the local store. We assert ordering by checking the
+        // verifier observed a call and the rejection short-circuits the
+        // runner — no `podman pull` invocation reaches the recording stub.
+        struct CountingVerifier {
+            count: std::sync::atomic::AtomicUsize,
+        }
+        #[async_trait]
+        impl SignatureVerifier for CountingVerifier {
+            async fn verify(
+                &self,
+                _image: &ImageRef,
+            ) -> Result<(), crate::signature::VerificationError> {
+                self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err(crate::signature::VerificationError::Mismatch(
+                    "no signature".to_string(),
+                ))
+            }
+        }
+        let verifier = Box::new(CountingVerifier {
+            count: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let runner = RecordingRunner::new();
+        // Push a happy-path response to prove it would have been used if
+        // the verifier had not blocked — the test then asserts the runner
+        // was *not* invoked.
+        runner.push(StubResponse::ok_stdout(b"".to_vec()));
+        let calls = runner.calls.clone();
+        let runtime = rt(runner).with_verifier(verifier, SignaturePolicy::Strict);
+
+        let err = runtime.pull(&alpine_pinned()).await.unwrap_err();
+        assert!(
+            matches!(err, OciError::SignatureVerificationFailed { .. }),
+            "expected SignatureVerificationFailed, got {err:?}"
+        );
+        assert_eq!(
+            calls.lock().unwrap().len(),
+            0,
+            "podman pull must not run when signature verification fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_strict_policy_blocks_on_missing_verifier() {
+        // F-643: in strict mode, even a missing cosign binary blocks the
+        // pull. Operators must install the verifier to opt into Level 2.
+        let verifier = Box::new(RejectingVerifier(
+            crate::signature::VerificationError::VerifierUnavailable("missing".to_string()),
+        ));
+        let runner = RecordingRunner::new();
+        runner.push(StubResponse::ok_stdout(b"".to_vec()));
+        let runtime = rt(runner).with_verifier(verifier, SignaturePolicy::Strict);
+        let err = runtime.pull(&alpine_pinned()).await.unwrap_err();
+        assert!(matches!(err, OciError::SignatureVerificationFailed { .. }));
+    }
+
+    #[tokio::test]
+    async fn pull_permissive_policy_proceeds_when_verifier_unavailable() {
+        // F-643: permissive mode permits the pull when cosign is not
+        // installed, so dev environments still function. A real signature
+        // mismatch is still fatal — covered by the next test.
+        let verifier = Box::new(RejectingVerifier(
+            crate::signature::VerificationError::VerifierUnavailable("missing".to_string()),
+        ));
+        let runner = RecordingRunner::new();
+        runner.push(StubResponse::ok_stdout(b"".to_vec()));
+        let calls = runner.calls.clone();
+        let runtime = rt(runner).with_verifier(verifier, SignaturePolicy::Permissive);
+        runtime.pull(&alpine_pinned()).await.unwrap();
+        assert_eq!(
+            calls.lock().unwrap().len(),
+            1,
+            "podman pull must run when permissive policy lets the missing verifier through"
+        );
+    }
+
+    /// Test verifier that records every call so we can assert the
+    /// default-constructed runtime actually wires a verifier in.
+    struct CountingNoopVerifier {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl SignatureVerifier for CountingNoopVerifier {
+        async fn verify(
+            &self,
+            _image: &ImageRef,
+        ) -> Result<(), crate::signature::VerificationError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn new_defaults_to_a_real_verifier_not_noop() {
+        // Regression for F-643 follow-up: `PodmanRuntime::new()` previously
+        // wired `NoopVerifier`, so an operator who forgot to call
+        // `with_verifier` got ZERO signature verification and no warning
+        // ever logged. The new default is `CosignVerifier::new(Permissive)`
+        // — pulls without identity env vars set are warned about, not
+        // silently waved through.
+        //
+        // Asserting this through behaviour: the type-level default must
+        // not return `Ok(())` for an arbitrary pull without producing
+        // either a verification call or a permissive warning. We can't
+        // assert tracing output cheaply, so we instead pin the
+        // construction by checking the verifier is NOT a `NoopVerifier`
+        // — concretely, by exercising the env-missing path which a real
+        // CosignVerifier rejects with `VerifierUnavailable`.
+        //
+        // Use a SINGLE-threaded runtime for this test so the env mutation
+        // doesn't race with sibling tests.
+        use crate::signature::{IDENTITY_ENV, OIDC_ENV};
+        // Snapshot/restore env to be polite to other tests.
+        let prev_id = std::env::var(IDENTITY_ENV).ok();
+        let prev_oidc = std::env::var(OIDC_ENV).ok();
+        std::env::remove_var(IDENTITY_ENV);
+        std::env::remove_var(OIDC_ENV);
+
+        let runtime = PodmanRuntime::new();
+        // Delegate verification through the public verifier accessor: we
+        // call the verifier directly so the test doesn't need a real
+        // podman on PATH.
+        let img = alpine_pinned();
+        let res = runtime.verifier.verify(&img).await;
+
+        // Restore env.
+        match prev_id {
+            Some(v) => std::env::set_var(IDENTITY_ENV, v),
+            None => std::env::remove_var(IDENTITY_ENV),
+        }
+        match prev_oidc {
+            Some(v) => std::env::set_var(OIDC_ENV, v),
+            None => std::env::remove_var(OIDC_ENV),
+        }
+
+        match res {
+            Err(crate::signature::VerificationError::VerifierUnavailable(_)) => {}
+            other => panic!(
+                "expected default verifier to be CosignVerifier (returns VerifierUnavailable when \
+                 identity env is unset); got {other:?} — has the default regressed back to NoopVerifier?"
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn with_verifier_noop_is_still_available_for_tests() {
+        // NoopVerifier must remain a valid override so tests that don't
+        // care about the signature gate stay terse. The new default for
+        // production is CosignVerifier — but `.with_verifier(NoopVerifier)`
+        // explicitly opts out, making the test intent visible.
+        let counter = Box::new(CountingNoopVerifier {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let runner = RecordingRunner::new();
+        runner.push(StubResponse::ok_stdout(b"".to_vec()));
+        let runtime = rt(runner).with_verifier(counter, SignaturePolicy::Permissive);
+        runtime.pull(&alpine_pinned()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pull_permissive_policy_still_blocks_on_signature_mismatch() {
+        // The permissive escape hatch is for *missing tooling*, not for
+        // bad signatures. A real mismatch must always block.
+        let verifier = Box::new(RejectingVerifier(
+            crate::signature::VerificationError::Mismatch("bad sig".to_string()),
+        ));
+        let runner = RecordingRunner::new();
+        runner.push(StubResponse::ok_stdout(b"".to_vec()));
+        let runtime = rt(runner).with_verifier(verifier, SignaturePolicy::Permissive);
+        let err = runtime.pull(&alpine_pinned()).await.unwrap_err();
+        assert!(matches!(err, OciError::SignatureVerificationFailed { .. }));
     }
 
     #[test]
@@ -836,6 +1205,144 @@ mod tests {
         assert_eq!(l.stream, "stdout");
         assert_eq!(l.line, "hello world");
         assert_eq!(l.timestamp.as_deref(), Some("2025-04-26T10:00:00Z"));
+    }
+
+    // ── F-642: SecurityOpts plumbed through `create` ─────────────────
+
+    #[tokio::test]
+    async fn create_emits_every_hardened_default_flag_before_image() {
+        // Load-bearing: the F-642 DoD says PodmanRuntime::create must
+        // inject no-new-privileges + cap-drop ALL + restricted network
+        // + read-only rootfs by default. This test pins the exact argv
+        // shape so a regression that drops a flag (or moves it past
+        // the IMAGE positional, where podman would treat it as the
+        // in-container command) fails the test loudly.
+        let runner = RecordingRunner::new();
+        runner.push(StubResponse::ok_stdout(b"abc1234\n".to_vec()));
+        let calls = runner.calls.clone();
+
+        let runtime = rt(runner);
+        let img = alpine_pinned();
+        runtime
+            .create(
+                &img,
+                &["sleep", "infinity"],
+                &SecurityOpts::hardened_default(),
+            )
+            .await
+            .unwrap();
+
+        let calls = calls.lock().unwrap();
+        let argv = &calls[0].1;
+        // Every hardening flag must be present before the IMAGE positional.
+        let image_str = format!("docker.io/library/alpine@sha256:{SHA}");
+        let image_idx = argv
+            .iter()
+            .position(|a| a == &image_str)
+            .expect("argv must contain image positional");
+        let prefix = &argv[..image_idx];
+        for required in [
+            "--security-opt",
+            "no-new-privileges",
+            "--cap-drop",
+            "ALL",
+            "--read-only",
+            "--network",
+            "none",
+            "--userns",
+            "keep-id",
+        ] {
+            assert!(
+                prefix.iter().any(|a| a == required),
+                "missing hardening flag {required:?} in {argv:?}"
+            );
+        }
+        // Caller argv lands strictly after IMAGE.
+        let suffix = &argv[image_idx + 1..];
+        assert_eq!(suffix, &["sleep".to_string(), "infinity".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn create_renders_security_flags_in_canonical_order() {
+        // Pinning the exact rendered prefix so operators reading the
+        // audit log see a stable shape and so reorderings can't sneak
+        // through review. The order is documented on
+        // `SecurityOpts::to_create_flags`.
+        let runner = RecordingRunner::new();
+        runner.push(StubResponse::ok_stdout(b"abc1234\n".to_vec()));
+        let calls = runner.calls.clone();
+
+        let runtime = rt(runner);
+        let img = alpine_pinned();
+        runtime
+            .create(
+                &img,
+                &["sleep", "infinity"],
+                &SecurityOpts::hardened_default(),
+            )
+            .await
+            .unwrap();
+
+        let calls = calls.lock().unwrap();
+        let argv = &calls[0].1;
+        // F-654: hardened_default carries the conservative cgroup
+        // caps (2 cpus, 4 GiB, 1024 pids, no swap) which render after
+        // the security flags and before the IMAGE positional.
+        const FOUR_GIB_STR: &str = "4294967296";
+        assert_eq!(
+            argv,
+            &vec![
+                "create".to_string(),
+                "--security-opt".to_string(),
+                "no-new-privileges".to_string(),
+                "--cap-drop".to_string(),
+                "ALL".to_string(),
+                "--read-only".to_string(),
+                "--network".to_string(),
+                "none".to_string(),
+                "--userns".to_string(),
+                "keep-id".to_string(),
+                "--cpus".to_string(),
+                "2".to_string(),
+                "--memory".to_string(),
+                FOUR_GIB_STR.to_string(),
+                "--memory-swap".to_string(),
+                FOUR_GIB_STR.to_string(),
+                "--pids-limit".to_string(),
+                "1024".to_string(),
+                format!("docker.io/library/alpine@sha256:{SHA}"),
+                "sleep".to_string(),
+                "infinity".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn create_with_permissive_opts_emits_no_security_flags() {
+        // Regression guard for the test-only `permissive` preset:
+        // every test in this module that calls `create` with
+        // SecurityOpts::permissive expects a clean argv with no
+        // hardening flags interleaved.
+        let runner = RecordingRunner::new();
+        runner.push(StubResponse::ok_stdout(b"abc1234\n".to_vec()));
+        let calls = runner.calls.clone();
+
+        let runtime = rt(runner);
+        let img = alpine_pinned();
+        runtime
+            .create(&img, &["sh"], &SecurityOpts::permissive())
+            .await
+            .unwrap();
+
+        let calls = calls.lock().unwrap();
+        assert_eq!(
+            calls[0].1,
+            vec![
+                "create",
+                &format!("docker.io/library/alpine@sha256:{SHA}"),
+                "sh",
+            ]
+        );
     }
 
     #[test]

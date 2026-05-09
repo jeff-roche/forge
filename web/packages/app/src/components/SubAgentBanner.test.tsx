@@ -92,6 +92,18 @@ describe('SubAgentBanner — expand/collapse', () => {
     );
   });
 
+  // F-696: header is a `role="button"` disclosure — must announce its
+  // collapsed/expanded state via aria-expanded for assistive tech.
+  it('header reports aria-expanded=false when collapsed and true when expanded', () => {
+    const { getByTestId } = render(() => <SubAgentBanner turn={makeTurn()} />);
+    const header = getByTestId('sub-agent-banner-header-child-1');
+    expect(header.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(header);
+    expect(header.getAttribute('aria-expanded')).toBe('true');
+    fireEvent.click(header);
+    expect(header.getAttribute('aria-expanded')).toBe('false');
+  });
+
   it('expands when Enter is pressed on the focused header', () => {
     const { getByTestId } = render(() => <SubAgentBanner turn={makeTurn()} />);
     const header = getByTestId('sub-agent-banner-header-child-1');
@@ -145,7 +157,7 @@ describe('SubAgentBanner — nested rendering for sub-of-sub', () => {
     expect(nestedHeader).toHaveTextContent('deep-helper');
   });
 
-  it('replaces nested inline children with an "OPEN MONITOR" button past max depth (3)', () => {
+  it('replaces nested inline children with an "OPEN IN NEW WINDOW" button past max depth (3)', () => {
     const grandchild: Extract<ChatTurn, { type: 'sub_agent_banner' }> = {
       type: 'sub_agent_banner',
       child_instance_id: 'too-deep-1',
@@ -222,7 +234,7 @@ describe('SubAgentBanner — double-click to Agent Monitor (F-140)', () => {
     expect(open).toHaveBeenCalledWith('child-1');
   });
 
-  it('invokes the "OPEN MONITOR" button when depth exceeds the inline cap', () => {
+  it('invokes the "OPEN IN NEW WINDOW" button when depth exceeds the inline cap', () => {
     const open = vi.fn();
     const grandchild: Extract<ChatTurn, { type: 'sub_agent_banner' }> = {
       type: 'sub_agent_banner',
@@ -241,10 +253,11 @@ describe('SubAgentBanner — double-click to Agent Monitor (F-140)', () => {
     ));
     fireEvent.click(getByTestId('sub-agent-banner-header-child-1'));
     const openBtn = getByTestId('sub-agent-banner-open-monitor-child-1');
-    // F-411: button label must be the sanctioned verb+noun display-caps form
-    // (voice-terminology.md §8).
-    expect(openBtn).toHaveTextContent('OPEN MONITOR');
-    expect(openBtn.textContent).not.toMatch(/Open in new window/);
+    // F-695: spec (`sub-agent-banner.md` §6) is authoritative — the button
+    // copy must be the verbatim phrase the spec sanctions, rendered in
+    // voice-terminology.md §8 display caps.
+    expect(openBtn).toHaveTextContent('OPEN IN NEW WINDOW');
+    expect(openBtn.textContent).not.toMatch(/OPEN MONITOR/);
     fireEvent.click(openBtn);
     expect(open).toHaveBeenCalledWith('child-1');
   });
@@ -365,6 +378,16 @@ describe('SubAgentBanner — state-chip popover (F-448 Phase 3)', () => {
     expect(getByTestId('sub-agent-banner-popover-child-1')).toBeInTheDocument();
     fireEvent.mouseDown(getByTestId('outside'));
     expect(queryByTestId('sub-agent-banner-popover-child-1')).not.toBeInTheDocument();
+  });
+
+  // F-696: APG menu pattern — opening the popover must move focus into it
+  // (first interactive descendant) so AT can announce its contents and Tab
+  // navigates the popover instead of skipping it.
+  it('moves focus into the popover (first interactive child) on open', () => {
+    const { getByTestId } = render(() => <SubAgentBanner turn={makeTurn()} />);
+    fireEvent.click(getByTestId('sub-agent-banner-state-child-1'));
+    const monitorBtn = getByTestId('sub-agent-banner-popover-monitor-child-1');
+    expect(document.activeElement).toBe(monitorBtn);
   });
 
   it('"Open in Agent Monitor" link inside the popover calls onOpenInMonitor', () => {

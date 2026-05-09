@@ -642,6 +642,29 @@ fn context_compacted_wire_shape() {
 }
 
 #[test]
+fn compaction_truncated_wire_shape() {
+    // F-657: emitted when the privileged summary stream exceeds the cap.
+    // Locks the wire shape so dashboards / observability consumers can
+    // surface the "summary truncated" pill without relying on optional
+    // fields that drift between releases.
+    assert_wire_eq(
+        Event::CompactionTruncated {
+            at: fixed_time(),
+            summary_msg_id: msg_id("summary-1"),
+            cap_bytes: 65_536,
+            original_bytes: 131_072,
+        },
+        json!({
+            "type": "compaction_truncated",
+            "at": "2026-04-18T10:00:00Z",
+            "summary_msg_id": "summary-1",
+            "cap_bytes": 65_536,
+            "original_bytes": 131_072,
+        }),
+    );
+}
+
+#[test]
 fn session_ended_wire_shape() {
     // Completed session — the dashboard shows "ended cleanly".
     assert_wire_eq(
@@ -1017,6 +1040,7 @@ fn variant_label(e: &Event) -> &'static str {
         Event::BackgroundAgentCompleted { .. } => "background_agent_completed",
         Event::UsageTick { .. } => "usage_tick",
         Event::ContextCompacted { .. } => "context_compacted",
+        Event::CompactionTruncated { .. } => "compaction_truncated",
         Event::SessionEnded { .. } => "session_ended",
         Event::StepStarted { .. } => "step_started",
         Event::StepFinished { .. } => "step_finished",
