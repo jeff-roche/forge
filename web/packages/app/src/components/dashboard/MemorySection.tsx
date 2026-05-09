@@ -33,6 +33,7 @@ import {
 } from '../../ipc/memory';
 import { setSetting } from '../../stores/settings';
 import { useFocusTrap } from '../../lib/useFocusTrap';
+import { pushToast } from '../toast';
 import { MEMORY_SECRETS_WARNING, MemoryEditor } from './MemoryEditor';
 import './MemorySection.css';
 
@@ -87,13 +88,26 @@ export const MemorySection: Component<MemorySectionProps> = (props) => {
   const [pendingClear, setPendingClear] = createSignal<AgentMemoryEntry | null>(null);
   const [error, setError] = createSignal<string | null>(null);
 
+  // F-685 — every error surfacing must dispatch a persistent toast carrying
+  // the verbatim technical identifier (per ai-patterns.md §Interaction
+  // states). Toast kind 'error' persists until actioned per
+  // component-principles.md §Toasts; no extra "persistent" flag is needed
+  // because the toast queue carries no auto-dismiss for error kind.
+  // Centralising this keeps every failure path identical — adding a new
+  // failure path (rename, import, etc.) cannot drop the toast by accident.
+  const surfaceError = (err: unknown): void => {
+    const message = err instanceof Error ? err.message : String(err);
+    setError(message);
+    pushToast('error', message);
+  };
+
   const onToggle = async (entry: AgentMemoryEntry, next: boolean): Promise<void> => {
     setError(null);
     try {
       await setSetting(`memory.enabled.${entry.agent_id}`, next, 'workspace', props.workspaceRoot);
       await refetch();
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
+      surfaceError(err);
     }
   };
 
@@ -102,7 +116,7 @@ export const MemorySection: Component<MemorySectionProps> = (props) => {
     try {
       await clearAgentMemory(entry.agent_id);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
+      surfaceError(err);
     } finally {
       setPendingClear(null);
       // Refresh always — a partial-failure clear may have left the file in
