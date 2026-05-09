@@ -239,7 +239,7 @@ export const SubAgentBanner: Component<SubAgentBannerProps> = (props) => {
                 data-testid={`sub-agent-banner-open-monitor-${props.turn.child_instance_id}`}
                 onClick={openInMonitor}
               >
-                OPEN MONITOR
+                OPEN IN NEW WINDOW
               </Button>
             }
           >
