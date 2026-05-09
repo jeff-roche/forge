@@ -375,13 +375,26 @@ where
 /// the type via turbofish (`read_frame::<IpcMessage>(&mut r)`) or via
 /// the surrounding bind annotation. Same JSON-decoded body, same
 /// length-prefix shape.
+///
+/// F-652 (SEC-12): deprecated in favour of [`read_frame_with_deadline`].
+/// A bare `read_frame` lets a same-uid attacker open a UDS connection,
+/// send zero bytes, and pin a daemon worker until shutdown
+/// (CWE-400 / CWE-770). Production code paths must enforce a deadline;
+/// this helper is retained `#[doc(hidden)]` for tests that drive both
+/// halves of an in-process `UnixStream::pair` and are uninterested in
+/// timing semantics.
+#[doc(hidden)]
+#[deprecated(
+    since = "0.3.0",
+    note = "use `read_frame_with_deadline` — bare `read_frame` is a slowloris vector (F-652)"
+)]
 pub async fn read_frame<R, T>(reader: &mut R) -> anyhow::Result<T>
 where
     R: AsyncRead + Unpin,
     T: DeserializeOwned,
 {
     let mut buf = Vec::new();
-    read_frame_into(reader, &mut buf).await
+    read_frame_into_undeadlined(reader, &mut buf).await
 }
 
 /// F-565: read a single IPC frame into the caller-owned `buf`, reusing
@@ -396,7 +409,30 @@ where
 ///
 /// F-608: generic so the framing helpers serve both `IpcMessage` and
 /// the new [`sidecar::SidecarMessage`] without duplicating the body.
+///
+/// F-652 (SEC-12): deprecated in favour of
+/// [`read_frame_into_with_deadline`]. See [`read_frame`] for the
+/// full rationale; `read_frame_into` is the buffer-reusing variant
+/// of the same vulnerable shape.
+#[doc(hidden)]
+#[deprecated(
+    since = "0.3.0",
+    note = "use `read_frame_into_with_deadline` — bare `read_frame_into` is a slowloris vector (F-652)"
+)]
 pub async fn read_frame_into<R, T>(reader: &mut R, buf: &mut Vec<u8>) -> anyhow::Result<T>
+where
+    R: AsyncRead + Unpin,
+    T: DeserializeOwned,
+{
+    read_frame_into_undeadlined(reader, buf).await
+}
+
+/// Internal worker shared by every public `read_frame*` entry point.
+/// Kept private so the deprecation on the public bare variants
+/// surfaces at every external call site, but the deadline-bounded
+/// helpers can still drive the actual read without tripping their
+/// own deprecation warning.
+async fn read_frame_into_undeadlined<R, T>(reader: &mut R, buf: &mut Vec<u8>) -> anyhow::Result<T>
 where
     R: AsyncRead + Unpin,
     T: DeserializeOwned,
@@ -445,13 +481,34 @@ where
     R: AsyncRead + Unpin,
     T: DeserializeOwned,
 {
-    match tokio::time::timeout(deadline, read_frame_into::<R, T>(reader, buf)).await {
+    match tokio::time::timeout(deadline, read_frame_into_undeadlined::<R, T>(reader, buf)).await {
         Ok(inner) => inner,
-        Err(_) => bail!("ipc read timed out after {:?}", deadline),
+        Err(_) => Err(IpcReadTimeout(deadline).into()),
     }
 }
 
+/// F-652: typed marker error returned by [`read_frame_with_deadline`] /
+/// [`read_frame_into_with_deadline`] when the deadline elapses.
+///
+/// Callers that drive a long-lived pump (e.g. the shell-side event
+/// reader) can downcast on this variant to distinguish "no frame
+/// arrived in this window — keep waiting" from a real I/O / decode
+/// error that should tear the connection down. Callers that treat
+/// every error path as fatal (handshakes, one-shot reads) can ignore
+/// the type and rely on the boxed `anyhow::Error`'s `Display`.
+#[derive(Debug)]
+pub struct IpcReadTimeout(pub Duration);
+
+impl std::fmt::Display for IpcReadTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ipc read timed out after {:?}", self.0)
+    }
+}
+
+impl std::error::Error for IpcReadTimeout {}
+
 #[cfg(test)]
+#[allow(deprecated)] // F-652: tests still drive the deprecated bare read_frame to pin its shape.
 mod tests {
     use super::*;
     use tokio::net::UnixStream;
@@ -551,6 +608,34 @@ mod tests {
             IpcMessage::SwitchProvider(s) => assert_eq!(s.provider_id, "custom_openai:vllm"),
             other => panic!("expected SwitchProvider, got {other:?}"),
         }
+    }
+
+    /// F-652: the buffer-reusing `read_frame_into_with_deadline` must
+    /// also fire promptly on a silent peer. The hot streaming pump
+    /// uses this entry point, so a regression that drops the deadline
+    /// from the pump path would let an idle UDS connection pin the
+    /// task indefinitely (CWE-770).
+    #[tokio::test]
+    async fn read_frame_into_with_deadline_fires_on_silent_peer() {
+        let (a, _b) = UnixStream::pair().unwrap();
+        let mut reader = a;
+        let mut buf = Vec::new();
+
+        let started = std::time::Instant::now();
+        let result = read_frame_into_with_deadline::<_, IpcMessage>(
+            &mut reader,
+            &mut buf,
+            Duration::from_millis(100),
+        )
+        .await;
+        let elapsed = started.elapsed();
+
+        assert!(result.is_err(), "expected deadline error, got {:?}", result);
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "deadline did not fire promptly: {:?}",
+            elapsed
+        );
     }
 
     /// F-354: the deadline wrapper must succeed when the peer writes a
