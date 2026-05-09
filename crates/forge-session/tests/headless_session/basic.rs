@@ -1,3 +1,4 @@
+#![allow(deprecated)] // F-652: tests/benches still drive the deprecated bare read_frame helpers.
 //! Integration test: full headless turn via UDS.
 //!
 //! Spawns `forged`, connects via Unix domain socket, sends a `SendUserMessage`,

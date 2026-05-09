@@ -96,12 +96,329 @@ impl std::fmt::Display for SseError {
             SseError::LineTooLong => write!(f, "sse line exceeded max bytes"),
             SseError::IdleTimeout => write!(f, "sse idle timeout"),
             SseError::WallClockTimeout => write!(f, "sse wall-clock timeout"),
-            SseError::Transport(msg) => write!(f, "sse transport: {msg}"),
+            // Defense-in-depth: redact again on render even though the
+            // construction sites already redact. Any future code path that
+            // builds a `Transport` from non-redacted text still gets scrubbed
+            // before it reaches a caller, the webview, or the event log.
+            SseError::Transport(msg) => write!(f, "sse transport: {}", redact(msg)),
         }
     }
 }
 
 impl std::error::Error for SseError {}
+
+/// F-648 — strip credential-shaped tokens from error text before it surfaces
+/// to a caller, the webview, the event log, or an exported transcript.
+///
+/// Threat model: lower-level reqwest / std::io errors include the request
+/// URL and (occasionally) echoed request headers in their `Display` output.
+/// On a custom OpenAI endpoint that authenticates via `?api_key=` query
+/// param, that URL carries the API key. This function scrubs known
+/// credential shapes before the text becomes the `String` payload of
+/// [`SseError::Transport`].
+///
+/// Patterns redacted:
+/// - `Bearer <token>` (case-insensitive)
+/// - `Authorization: <value>` / `X-Api-Key: <value>` / `Api-Key: <value>`
+/// - `?<credential-name>=<value>` and `&<credential-name>=<value>` query
+///   params, where `credential-name` is one of `api_key`, `apikey`, `key`,
+///   `access_token`, `token`, `auth`
+/// - Userinfo in URLs: `scheme://user:password@host`
+/// - Standalone provider-shaped tokens (`sk-ant-...`, `sk-proj-...`, `sk-...`)
+///   as a final defense-in-depth pass
+///
+/// Non-secret diagnostic text (`connection reset by peer (os error 104)`,
+/// timeouts, etc.) passes through unchanged.
+pub(crate) fn redact(input: &str) -> String {
+    // Hand-rolled scanner — avoids pulling a regex crate into the workspace
+    // for a problem with a small, fixed pattern set. Each pass scans
+    // case-insensitively for a credential keyword, then replaces the
+    // following value (token, header value, query value) with `<redacted>`.
+    let mut out = input.to_string();
+    out = redact_keyword_value(&out, "bearer ", KeywordSep::Whitespace, TokenChars::Bearer);
+    out = redact_keyword_value(
+        &out,
+        "authorization",
+        KeywordSep::ColonOrEquals,
+        TokenChars::Header,
+    );
+    out = redact_keyword_value(
+        &out,
+        "x-api-key",
+        KeywordSep::ColonOrEquals,
+        TokenChars::Header,
+    );
+    out = redact_keyword_value(
+        &out,
+        "x-api_key",
+        KeywordSep::ColonOrEquals,
+        TokenChars::Header,
+    );
+    out = redact_keyword_value(
+        &out,
+        "api-key",
+        KeywordSep::ColonOrEquals,
+        TokenChars::Header,
+    );
+    out = redact_keyword_value(
+        &out,
+        "api_key",
+        KeywordSep::ColonOrEquals,
+        TokenChars::Header,
+    );
+    out = redact_query_param(&out, "api_key");
+    out = redact_query_param(&out, "api-key");
+    out = redact_query_param(&out, "apikey");
+    out = redact_query_param(&out, "access_token");
+    out = redact_query_param(&out, "access-token");
+    out = redact_query_param(&out, "token");
+    out = redact_query_param(&out, "key");
+    out = redact_query_param(&out, "auth");
+    out = redact_url_userinfo(&out);
+    out = redact_provider_tokens(&out);
+    out
+}
+
+#[derive(Clone, Copy)]
+enum KeywordSep {
+    /// Keyword followed directly by whitespace then the value (`Bearer xxx`).
+    Whitespace,
+    /// Keyword followed by `:` or `=` (optional whitespace), then the value.
+    ColonOrEquals,
+}
+
+#[derive(Clone, Copy)]
+enum TokenChars {
+    /// Token characters acceptable in an HTTP `Bearer` value (RFC 6750
+    /// b64token: alnum + `-._~+/=`).
+    Bearer,
+    /// Header value runs to next whitespace.
+    Header,
+}
+
+impl TokenChars {
+    fn is_value_char(self, c: char) -> bool {
+        match self {
+            TokenChars::Bearer => {
+                c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '~' | '+' | '/' | '=')
+            }
+            // Header values run to whitespace. Strip a trailing `,` or `;`
+            // so common log delimiters don't get pulled into the redaction.
+            TokenChars::Header => !c.is_whitespace() && !matches!(c, ',' | ';'),
+        }
+    }
+}
+
+/// Find each case-insensitive occurrence of `keyword` and redact the value
+/// that follows it (delimiter rules per `sep`, value chars per `value`).
+fn redact_keyword_value(input: &str, keyword: &str, sep: KeywordSep, value: TokenChars) -> String {
+    let lower = input.to_ascii_lowercase();
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    let mut cursor = 0;
+
+    while cursor < input.len() {
+        let Some(rel) = lower[cursor..].find(keyword) else {
+            out.push_str(&input[cursor..]);
+            break;
+        };
+        let kw_start = cursor + rel;
+        let kw_end = kw_start + keyword.len();
+
+        // Reject mid-word matches so `authorization` doesn't fire inside
+        // `unauthorization-foo`. Allow start-of-string or non-alnum prefix.
+        let prev_ok = kw_start == 0
+            || !input.as_bytes()[kw_start - 1].is_ascii_alphanumeric()
+                && input.as_bytes()[kw_start - 1] != b'_';
+        if !prev_ok {
+            out.push_str(&input[cursor..kw_end]);
+            cursor = kw_end;
+            continue;
+        }
+
+        // Walk the separator.
+        let mut value_start = kw_end;
+        match sep {
+            KeywordSep::Whitespace => {
+                if value_start >= bytes.len() || !bytes[value_start].is_ascii_whitespace() {
+                    out.push_str(&input[cursor..kw_end]);
+                    cursor = kw_end;
+                    continue;
+                }
+                while value_start < bytes.len() && bytes[value_start].is_ascii_whitespace() {
+                    value_start += 1;
+                }
+            }
+            KeywordSep::ColonOrEquals => {
+                while value_start < bytes.len() && bytes[value_start].is_ascii_whitespace() {
+                    value_start += 1;
+                }
+                if value_start >= bytes.len()
+                    || (bytes[value_start] != b':' && bytes[value_start] != b'=')
+                {
+                    out.push_str(&input[cursor..kw_end]);
+                    cursor = kw_end;
+                    continue;
+                }
+                value_start += 1;
+                while value_start < bytes.len() && bytes[value_start].is_ascii_whitespace() {
+                    value_start += 1;
+                }
+            }
+        }
+
+        // Walk the value.
+        let mut value_end = value_start;
+        while value_end < input.len() {
+            // Index char-by-char to honour UTF-8 boundaries.
+            let c = input[value_end..].chars().next().unwrap();
+            if !value.is_value_char(c) {
+                break;
+            }
+            value_end += c.len_utf8();
+        }
+
+        if value_end == value_start {
+            // Keyword present but no value after the separator — pass through.
+            out.push_str(&input[cursor..value_end]);
+            cursor = value_end;
+            continue;
+        }
+
+        out.push_str(&input[cursor..value_start]);
+        out.push_str("<redacted>");
+        cursor = value_end;
+    }
+
+    out
+}
+
+/// Redact `?<name>=<value>` and `&<name>=<value>` query parameters.
+fn redact_query_param(input: &str, name: &str) -> String {
+    let lower = input.to_ascii_lowercase();
+    let mut out = String::with_capacity(input.len());
+    let mut cursor = 0;
+
+    while cursor < input.len() {
+        // Match either `?name=` or `&name=` case-insensitively.
+        let needle_q = format!("?{name}=");
+        let needle_a = format!("&{name}=");
+        let q = lower[cursor..].find(&needle_q);
+        let a = lower[cursor..].find(&needle_a);
+        let Some((rel, prefix_len)) = (match (q, a) {
+            (Some(q), Some(a)) if q < a => Some((q, needle_q.len())),
+            (Some(_), Some(a)) => Some((a, needle_a.len())),
+            (Some(q), None) => Some((q, needle_q.len())),
+            (None, Some(a)) => Some((a, needle_a.len())),
+            (None, None) => None,
+        }) else {
+            out.push_str(&input[cursor..]);
+            break;
+        };
+        let value_start = cursor + rel + prefix_len;
+        let bytes = input.as_bytes();
+        let mut value_end = value_start;
+        while value_end < bytes.len() {
+            let b = bytes[value_end];
+            if b == b'&' || b.is_ascii_whitespace() || b == b'#' {
+                break;
+            }
+            value_end += 1;
+        }
+        if value_end == value_start {
+            out.push_str(&input[cursor..value_end]);
+            cursor = value_end;
+            continue;
+        }
+        out.push_str(&input[cursor..value_start]);
+        out.push_str("<redacted>");
+        cursor = value_end;
+    }
+
+    out
+}
+
+/// Redact userinfo in URL form: `scheme://user:password@host`. The userinfo
+/// pair (everything between `://` and the first `@`) is replaced with the
+/// fixed marker. We only fire when both `://` and `@` are present and the
+/// span between them is short enough to plausibly be userinfo (< 256 chars,
+/// no whitespace, no `/`).
+fn redact_url_userinfo(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut cursor = 0;
+    while cursor < input.len() {
+        let Some(rel) = input[cursor..].find("://") else {
+            out.push_str(&input[cursor..]);
+            break;
+        };
+        let scheme_end = cursor + rel + 3;
+        out.push_str(&input[cursor..scheme_end]);
+        // Look for `@` before the next `/`, whitespace, or 256 chars.
+        let bytes = input.as_bytes();
+        let mut probe = scheme_end;
+        let mut at_pos: Option<usize> = None;
+        while probe < bytes.len() && probe - scheme_end < 256 {
+            let b = bytes[probe];
+            if b == b'@' {
+                at_pos = Some(probe);
+                break;
+            }
+            if b == b'/' || b.is_ascii_whitespace() {
+                break;
+            }
+            probe += 1;
+        }
+        if let Some(at) = at_pos {
+            // Only redact if a `:` exists in the userinfo span — otherwise
+            // it's just a username without a credential. (We could redact
+            // anyway; bare-username URLs are uncommon enough that leaving
+            // them alone preserves diagnostic value.)
+            if input[scheme_end..at].contains(':') {
+                out.push_str("<redacted>@");
+                cursor = at + 1;
+                continue;
+            }
+        }
+        cursor = scheme_end;
+    }
+    out
+}
+
+/// Redact provider-shaped standalone tokens (`sk-ant-...`, `sk-proj-...`,
+/// `sk-...`) anywhere in the input. Defense-in-depth in case a credential
+/// appears outside any of the keyword/header/query-param contexts above.
+fn redact_provider_tokens(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        // Anchor on a non-alnum boundary (or string start) followed by `sk-`.
+        let prev_boundary = cursor == 0
+            || (!bytes[cursor - 1].is_ascii_alphanumeric() && bytes[cursor - 1] != b'_');
+        if prev_boundary && cursor + 3 <= bytes.len() && &bytes[cursor..cursor + 3] == b"sk-" {
+            // Find the end of the token — alnum + `-_.`.
+            let mut end = cursor + 3;
+            while end < bytes.len() {
+                let b = bytes[end];
+                if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' {
+                    end += 1;
+                } else {
+                    break;
+                }
+            }
+            // Require at least 6 characters of body to avoid false positives
+            // on short identifiers like `sk-test`.
+            if end - cursor >= 9 {
+                out.push_str("<redacted>");
+                cursor = end;
+                continue;
+            }
+        }
+        out.push(bytes[cursor] as char);
+        cursor += 1;
+    }
+    out
+}
 
 /// Decode a byte stream of SSE-framed messages into typed events.
 ///
@@ -117,7 +434,13 @@ where
     S: futures::Stream<Item = Result<Bytes, E>> + Send + 'static,
     E: std::error::Error + Send + Sync + 'static,
 {
-    let pinned = Box::pin(byte_stream.map(|r| r.map_err(std::io::Error::other)));
+    // F-648: scrub credentials from upstream-error text before it enters
+    // the io::Error chain. The reqwest error for a custom OpenAI endpoint
+    // that authenticates via `?api_key=` query param includes the URL with
+    // the key in its Display output; if we let it through the SSE adapter
+    // would surface that key in `SseError::Transport`.
+    let pinned =
+        Box::pin(byte_stream.map(|r| r.map_err(|e| std::io::Error::other(redact(&e.to_string())))));
     let reader = StreamReader::new(pinned);
     let framed = FramedRead::new(reader, SseLineCodec::new(cfg.max_line_bytes));
 
@@ -161,7 +484,12 @@ where
                     s.terminated = true;
                     let err = match e {
                         SseLineError::MaxLineLengthExceeded => SseError::LineTooLong,
-                        SseLineError::Io(io) => SseError::Transport(io.to_string()),
+                        // Already redacted at the byte-stream boundary
+                        // above, but re-apply at the SseError construction
+                        // site as belt-and-suspenders against a future caller
+                        // that constructs `SseLineError::Io` from a non-redacted
+                        // source (e.g. a different transport adapter).
+                        SseLineError::Io(io) => SseError::Transport(redact(&io.to_string())),
                     };
                     return Some((Err(err), s));
                 }
@@ -573,6 +901,171 @@ mod tests {
         assert!(
             out.next().await.is_none(),
             "stream must close after terminal error"
+        );
+    }
+
+    // ── Credential redaction (F-648) ──────────────────────────────────────
+    //
+    // `SseError::Transport` previously carried free-form `std::io::Error`
+    // text. On a TLS handshake / connection-reset error against a custom
+    // OpenAI endpoint that authenticates via `?api_key=` query param, the
+    // reqwest error's `Display` includes the request URL — so the API key
+    // landed in the error message, then in `ChatChunk::Error`, the webview,
+    // the event log, and the exported transcript.
+    //
+    // The fix is a `redact()` pass at the construction sites (and the
+    // `Display` impl as a defense-in-depth final filter). Each test below
+    // asserts a specific credential shape is scrubbed before the text
+    // reaches a caller.
+
+    #[test]
+    fn redact_strips_bearer_token() {
+        let input = "error sending request to https://api.example.com/v1: Authorization: Bearer sk-proj-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+        let out = redact(input);
+        assert!(
+            !out.contains("sk-proj-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"),
+            "bearer token must be redacted, got: {out}"
+        );
+        assert!(
+            !out.to_lowercase().contains("bearer sk-"),
+            "bearer prefix + key must be scrubbed, got: {out}"
+        );
+    }
+
+    #[test]
+    fn redact_strips_authorization_header_value() {
+        let input = "header authorization: sk-ant-api03-secretvalue123 caused 401";
+        let out = redact(input);
+        assert!(
+            !out.contains("sk-ant-api03-secretvalue123"),
+            "authorization header value must be redacted, got: {out}"
+        );
+    }
+
+    #[test]
+    fn redact_strips_x_api_key_header() {
+        let input = "request header x-api-key: my-secret-key-xyz failed";
+        let out = redact(input);
+        assert!(
+            !out.contains("my-secret-key-xyz"),
+            "x-api-key header value must be redacted, got: {out}"
+        );
+    }
+
+    #[test]
+    fn redact_strips_api_key_query_param() {
+        let input =
+            "request to https://example.com/v1/chat?api_key=sk-leak-12345&model=gpt-4 failed";
+        let out = redact(input);
+        assert!(
+            !out.contains("sk-leak-12345"),
+            "api_key query param must be redacted, got: {out}"
+        );
+    }
+
+    #[test]
+    fn redact_strips_apikey_query_param_no_underscore() {
+        let input = "https://host/path?apikey=topsecret reset by peer";
+        let out = redact(input);
+        assert!(!out.contains("topsecret"), "apikey value redacted: {out}");
+    }
+
+    #[test]
+    fn redact_strips_access_token_query_param() {
+        let input = "https://host/?access_token=abc123def456 timed out";
+        let out = redact(input);
+        assert!(
+            !out.contains("abc123def456"),
+            "access_token redacted: {out}"
+        );
+    }
+
+    #[test]
+    fn redact_strips_url_userinfo() {
+        let input = "connection refused for https://user:hunter2@host.example.com:443/v1";
+        let out = redact(input);
+        assert!(
+            !out.contains("hunter2"),
+            "url userinfo password must be redacted, got: {out}"
+        );
+        assert!(
+            !out.contains("user:hunter2"),
+            "url userinfo pair must be redacted, got: {out}"
+        );
+    }
+
+    #[test]
+    fn redact_strips_anthropic_sk_ant_token() {
+        let input = "io error: tls handshake failed for token sk-ant-api03-AbCdEfGhIjKlMnOp";
+        let out = redact(input);
+        assert!(
+            !out.contains("sk-ant-api03-AbCdEfGhIjKlMnOp"),
+            "anthropic-shaped token must be redacted, got: {out}"
+        );
+    }
+
+    #[test]
+    fn redact_preserves_non_secret_diagnostics() {
+        let input = "connection reset by peer (os error 104)";
+        let out = redact(input);
+        assert_eq!(
+            out, input,
+            "non-secret diagnostic text must pass through unchanged"
+        );
+    }
+
+    #[test]
+    fn sse_error_transport_display_redacts_secrets() {
+        // Defense-in-depth: even if an upstream wrapping path forgets to
+        // redact at the construction site, the Display impl scrubs.
+        let leaky = SseError::Transport(
+            "io error to https://api.example.com/v1?api_key=sk-LEAK-9999".to_string(),
+        );
+        let rendered = leaky.to_string();
+        assert!(
+            !rendered.contains("sk-LEAK-9999"),
+            "Display must redact secrets as a final safety net, got: {rendered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn transport_error_text_does_not_leak_api_key() {
+        // DoD checkbox: regression test that injects an error with
+        // credential-shaped content and asserts the surfaced error string
+        // contains no secret. Drives the full SSE pipeline so we catch a
+        // leak from any of the construction sites.
+        #[derive(Debug)]
+        struct LeakyIo;
+        impl std::fmt::Display for LeakyIo {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(
+                    f,
+                    "io error sending request to https://api.example.com/v1?api_key=sk-leak-9876543210 caused by tls handshake failure"
+                )
+            }
+        }
+        impl std::error::Error for LeakyIo {}
+
+        let stream = stream::iter(vec![
+            Ok::<Bytes, LeakyIo>(Bytes::from_static(b"data: ok\n\n")),
+            Err(LeakyIo),
+        ]);
+
+        let mut out = decode_sse_stream(stream, StreamConfig::DEFAULT);
+        let _first = out.next().await.expect("first event").expect("ok event");
+
+        let second = out.next().await.expect("transport error");
+        let surfaced = match second {
+            Err(ref e) => {
+                let display = format!("{e}");
+                let debug = format!("{e:?}");
+                format!("{display} || {debug}")
+            }
+            Ok(_) => panic!("expected error, got ok"),
+        };
+        assert!(
+            !surfaced.contains("sk-leak-9876543210"),
+            "API key must not leak through SseError, got: {surfaced}"
         );
     }
 

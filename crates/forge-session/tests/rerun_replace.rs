@@ -1,3 +1,4 @@
+#![allow(deprecated)] // F-652: tests/benches still drive the deprecated bare read_frame helpers.
 //! F-143: Re-run Replace variant — truncate and regenerate.
 //!
 //! Scenario:
