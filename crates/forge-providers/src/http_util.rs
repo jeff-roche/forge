@@ -11,7 +11,7 @@
 //! both diverge from the SSE-streaming providers and were intentionally left
 //! untouched by the F-679 refactor.
 //!
-//! ## SSRF posture (F-647)
+//! ## SSRF posture (F-647 / F-646)
 //!
 //! [`build_stream_client`] is the single construction site for the
 //! `reqwest::Client` used by `AnthropicProvider`, `OpenAiProvider`, and
@@ -21,12 +21,13 @@
 //!   — every resolved `SocketAddr` is re-validated against `url_safety`,
 //!   so a TTL=0 DNS rebinding answer of `169.254.169.254` cannot reach the
 //!   socket layer even if `check_url` originally accepted the hostname.
-//! - **No-redirect policy** (`reqwest::redirect::Policy::none`) — a
-//!   misconfigured proxy or BGP-hijack injecting `302 Location: <internal>`
-//!   surfaces to the caller as an HTTP error rather than being silently
-//!   followed. The official-vendor APIs (Anthropic, OpenAI) do not redirect
-//!   on `/v1/messages` or `/v1/chat/completions`, so disabling redirects
-//!   has no behavioural cost.
+//! - **Caller-supplied redirect policy** — the official-vendor providers
+//!   (Anthropic, OpenAI) pass [`reqwest::redirect::Policy::none`] because
+//!   their streaming endpoints do not return 3xx and a redirect there can
+//!   only be a misconfigured proxy or a hijack. `CustomOpenAiProvider`
+//!   passes a per-hop policy that re-runs `forge_core::url_safety::check_url`
+//!   so a user-supplied base URL can legitimately redirect (e.g. through a
+//!   gateway) without losing SSRF coverage on the redirect target.
 
 use std::time::Duration;
 
@@ -62,16 +63,23 @@ impl Default for HttpClientConfig {
 
 /// Build a streaming `reqwest::Client` with the SSE provider hardening
 /// posture: per-connect / per-read / TCP keepalive timeouts, the F-644
-/// SSRF-safe DNS resolver, and a no-redirect policy (F-647). The official
-/// Anthropic and OpenAI endpoints do not return 3xx on the streaming
-/// chat paths, so refusing to follow redirects costs nothing in normal
-/// operation while closing the redirect-to-internal-IP smuggling vector.
-pub(crate) fn build_stream_client(cfg: &HttpClientConfig) -> reqwest::Client {
+/// SSRF-safe DNS resolver, and the caller-supplied redirect policy.
+///
+/// Anthropic and OpenAI pass [`reqwest::redirect::Policy::none`] — their
+/// streaming endpoints do not return 3xx, so any redirect there is a
+/// misconfigured proxy or a hijack and surfacing it as an error is the
+/// safer default. `CustomOpenAiProvider` passes a per-hop policy that
+/// re-runs `forge_core::url_safety::check_url` (F-646) so user-supplied
+/// base URLs can legitimately redirect without losing SSRF coverage.
+pub(crate) fn build_stream_client(
+    cfg: &HttpClientConfig,
+    redirect: reqwest::redirect::Policy,
+) -> reqwest::Client {
     forge_core::http::secure_client_builder()
         .connect_timeout(cfg.connect_timeout)
         .read_timeout(cfg.read_timeout)
         .tcp_keepalive(Some(cfg.tcp_keepalive))
-        .redirect(reqwest::redirect::Policy::none())
+        .redirect(redirect)
         .build()
         .expect("reqwest stream client builder — only fails if no TLS backend is available")
 }
@@ -120,7 +128,10 @@ mod tests {
     fn build_stream_client_succeeds_with_default_config() {
         // Smoke test — the only failure mode is "no TLS backend available",
         // which would already break every other test in the workspace.
-        let _ = build_stream_client(&HttpClientConfig::DEFAULT);
+        let _ = build_stream_client(
+            &HttpClientConfig::DEFAULT,
+            reqwest::redirect::Policy::none(),
+        );
     }
 
     #[test]
