@@ -103,6 +103,11 @@ fn shared_client() -> &'static reqwest::Client {
 /// MCP notifications and small enough to keep the worst-case resident set
 /// bounded. Over-cap accumulators surface as [`HttpEvent::Malformed`] and
 /// force a backoff + reconnect via the sse-reader-loop's error path.
+///
+/// F-661: also reused as the cap for POST response bodies in [`Http::send`]
+/// so a hostile MCP server cannot exhaust daemon memory by replying with a
+/// multi-GiB JSON-RPC response. Same threat shape as F-347, same parity
+/// limit — JSON-RPC responses don't legitimately exceed an SSE frame.
 pub const MAX_SSE_FRAME_BYTES: usize = 4 * 1024 * 1024;
 
 /// Events emitted on [`Http::recv`].
@@ -254,20 +259,27 @@ impl Http {
 
         let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
+            let body = read_body_capped(resp, MAX_SSE_FRAME_BYTES)
+                .await
+                .unwrap_or_default();
             return Err(anyhow!(
                 "POST {} returned HTTP {}: {}",
                 redacted(&self.url),
                 status,
-                truncate(&body, 512),
+                truncate(&String::from_utf8_lossy(&body), 512),
             ));
         }
 
         // MCP HTTP responses are JSON-RPC objects; empty 2xx bodies (e.g.
         // 202 Accepted for a fire-and-forget notification) are legal and
         // we silently skip them — there's nothing to forward.
-        let body = resp
-            .bytes()
+        //
+        // F-661: stream the body through a counting accumulator that
+        // aborts on cap overflow. A hostile MCP server could otherwise
+        // answer one JSON-RPC POST with a multi-GiB body (or an unbounded
+        // chunked stream) and exhaust daemon memory. The cap mirrors
+        // `MAX_SSE_FRAME_BYTES` for parity with the SSE GET path.
+        let body = read_body_capped(resp, MAX_SSE_FRAME_BYTES)
             .await
             .with_context(|| format!("reading POST {} response body", redacted(&self.url)))?;
         if body.is_empty() {
@@ -359,6 +371,45 @@ fn apply_headers(mut req: reqwest::RequestBuilder, headers: &HeaderMap) -> reqwe
         req = req.header(name, value);
     }
     req
+}
+
+/// Read a `reqwest::Response` body into a `Vec<u8>` with a hard size cap.
+///
+/// F-661: closes the DoS surface where `Http::send` previously called
+/// `resp.bytes().await` without an upper bound. A hostile (or misconfigured)
+/// MCP HTTP server could answer a JSON-RPC POST with a multi-GiB response
+/// body — or an unbounded `Transfer-Encoding: chunked` stream — and exhaust
+/// daemon memory. We defend in two layers:
+///
+/// 1. If `Content-Length` is advertised and exceeds `cap`, fail fast before
+///    pulling any body bytes.
+/// 2. Otherwise stream chunks via `bytes_stream()` and abort the moment the
+///    accumulator passes `cap`. This catches the chunked-without-Content-
+///    Length attack shape that the early check can't see.
+///
+/// The error message names the cap so operators can correlate with the
+/// `MAX_SSE_FRAME_BYTES` constant during incident triage.
+async fn read_body_capped(resp: reqwest::Response, cap: usize) -> Result<Vec<u8>> {
+    if let Some(advertised) = resp.content_length() {
+        if advertised > cap as u64 {
+            return Err(anyhow!(
+                "response body advertised {advertised} bytes, exceeds cap of {cap} bytes"
+            ));
+        }
+    }
+
+    let mut stream = resp.bytes_stream();
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("reading response body chunk")?;
+        if buf.len().saturating_add(chunk.len()) > cap {
+            return Err(anyhow!(
+                "response body exceeds cap of {cap} bytes; aborting to avoid OOM"
+            ));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
 }
 
 /// Drive the SSE reader indefinitely. Each iteration opens a GET and
