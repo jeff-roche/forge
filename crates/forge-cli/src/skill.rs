@@ -1804,4 +1804,203 @@ mod tests {
         static LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| std::sync::Mutex::new(()))
     }
+    // ── F-681: GitResolver + cache-FS failure paths ──────────────────
+    //
+    // These tests pin error propagation on the four uncovered paths
+    // identified in the audit: `git clone` failure, `git fetch` failure
+    // on cache-hit refresh, `fs::remove_dir_all` failure on stale cache,
+    // and `fs::create_dir_all` failure on read-only parent. Pattern
+    // mirrors F-655 (MockRuntime → fail_start) — a configurable test
+    // double that returns a caller-supplied error on the matching call.
+
+    /// Decision for a single `(program, args)` invocation: `Some(msg)`
+    /// fails the call with `msg`, `None` lets it succeed.
+    type FailurePredicate = dyn Fn(&str, &[&str]) -> Option<String>;
+
+    /// `CommandRunner` test double that fails commands matching a
+    /// caller-supplied predicate. Reusable across every git
+    /// failure-path test so each test only spells out the failure shape
+    /// it cares about.
+    struct FailingRunner {
+        should_fail: Box<FailurePredicate>,
+        log: RefCell<Vec<String>>,
+    }
+
+    impl FailingRunner {
+        fn new<F>(should_fail: F) -> Self
+        where
+            F: Fn(&str, &[&str]) -> Option<String> + 'static,
+        {
+            Self {
+                should_fail: Box::new(should_fail),
+                log: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl CommandRunner for FailingRunner {
+        fn run(&self, program: &str, args: &[&str], cwd: Option<&Path>) -> Result<()> {
+            self.log.borrow_mut().push(format!(
+                "{program} {} (cwd={:?})",
+                args.join(" "),
+                cwd.map(|p| p.display().to_string())
+            ));
+            if let Some(msg) = (self.should_fail)(program, args) {
+                bail!("{msg}");
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn git_clone_failure_propagates_with_context() {
+        // `git clone` exiting non-zero must surface the resolver's
+        // "cloning <url>" context — without it, callers see a bare
+        // command-failed message and cannot tell which URL failed.
+        let cache = tempdir().unwrap();
+        let url = "https://example.com/skills/planner.git";
+        let runner = FailingRunner::new(|program, args| {
+            (program == "git" && args.first() == Some(&"clone"))
+                .then(|| "git clone exited 128: repository not found".to_string())
+        });
+        let resolver = GitResolver::new(url, cache.path(), &runner);
+
+        let err = resolver.resolve().unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(url),
+            "expected URL in clone-failure context, got: {msg}",
+        );
+        assert!(
+            msg.contains("cloning"),
+            "expected `cloning` context, got: {msg}",
+        );
+        assert!(
+            msg.contains("repository not found"),
+            "expected underlying runner error to propagate, got: {msg}",
+        );
+    }
+
+    #[test]
+    fn git_fetch_failure_on_cache_hit_propagates() {
+        // Cache hit path: a populated cache dir triggers `git fetch`
+        // followed by `git reset`. A `fetch` failure (e.g. transient
+        // network blip) must surface the "refreshing cached skill
+        // clone" context so users can distinguish refresh failures
+        // from initial-clone failures.
+        let cache = tempdir().unwrap();
+        let url = "https://example.com/skills/planner.git";
+        // Pre-populate the cache so the resolver takes the cache-hit
+        // branch.
+        let cache_dir = cache.path().join(GitResolver::cache_subdir(url));
+        fs::create_dir_all(cache_dir.join(".git")).unwrap();
+        fs::write(cache_dir.join(SKILL_FILENAME), good_frontmatter()).unwrap();
+
+        let runner = FailingRunner::new(|program, args| {
+            (program == "git" && args.first() == Some(&"fetch"))
+                .then(|| "git fetch exited 1: network unreachable".to_string())
+        });
+        let resolver = GitResolver::new(url, cache.path(), &runner);
+
+        let err = resolver.resolve().unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("refreshing cached skill clone"),
+            "expected refresh context, got: {msg}",
+        );
+        assert!(
+            msg.contains("network unreachable"),
+            "expected underlying runner error to propagate, got: {msg}",
+        );
+        // Reset must not have been called once fetch failed.
+        let log = runner.log.borrow();
+        assert_eq!(log.len(), 1, "expected only fetch attempt, got: {log:?}");
+        assert!(log[0].contains("fetch"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn cache_dir_remove_failure_propagates() {
+        // Stale cache cleanup: if a cache subdir exists *without* a
+        // `.git` (interrupted prior clone, manual mess, etc.), the
+        // resolver wipes it before re-cloning. If the wipe fails — e.g.
+        // the parent is read-only so directory entries can't be
+        // unlinked — the resolver must surface the
+        // "removing stale cache directory" context rather than silently
+        // continuing into a broken clone.
+        use std::os::unix::fs::PermissionsExt;
+
+        let cache = tempdir().unwrap();
+        let url = "https://example.com/skills/planner.git";
+        let cache_dir = cache.path().join(GitResolver::cache_subdir(url));
+        // Stale dir without `.git` — triggers the remove path. Drop a
+        // file inside so `remove_dir_all` actually has to unlink an
+        // entry (whose unlink will be denied by the read-only parent).
+        fs::create_dir_all(&cache_dir).unwrap();
+        fs::write(cache_dir.join("stale.txt"), "stale").unwrap();
+
+        // Make the cache parent read-only so unlinking entries inside
+        // `cache_dir` fails. We restore permissions in a guard so the
+        // tempdir cleanup at end-of-test still works.
+        let parent = cache_dir.parent().unwrap().to_path_buf();
+        let original = fs::metadata(&parent).unwrap().permissions();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o500)).unwrap();
+        struct RestorePerms(PathBuf, fs::Permissions);
+        impl Drop for RestorePerms {
+            fn drop(&mut self) {
+                let _ = fs::set_permissions(&self.0, self.1.clone());
+            }
+        }
+        let _guard = RestorePerms(parent.clone(), original);
+
+        // The runner shouldn't be reached — remove_dir_all fails first.
+        let runner =
+            FailingRunner::new(|_, _| panic!("git must not be invoked once cache cleanup fails"));
+        let resolver = GitResolver::new(url, cache.path(), &runner);
+
+        let err = resolver.resolve().unwrap_err();
+        let msg = format!("{err:#}").to_lowercase();
+        assert!(
+            msg.contains("removing stale cache directory"),
+            "expected stale-cache context, got: {msg}",
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn cache_dir_create_failure_propagates() {
+        // Cache parent creation: when the cache root is rooted under a
+        // read-only directory, `fs::create_dir_all(parent)` fails. The
+        // resolver must surface the "creating cache parent" context so
+        // users see *what* couldn't be created rather than a generic
+        // permission-denied error.
+        use std::os::unix::fs::PermissionsExt;
+
+        let outer = tempdir().unwrap();
+        // Read-only outer dir → cache_root inside it cannot be created.
+        let original = fs::metadata(outer.path()).unwrap().permissions();
+        fs::set_permissions(outer.path(), fs::Permissions::from_mode(0o500)).unwrap();
+        struct RestorePerms(PathBuf, fs::Permissions);
+        impl Drop for RestorePerms {
+            fn drop(&mut self) {
+                let _ = fs::set_permissions(&self.0, self.1.clone());
+            }
+        }
+        let _guard = RestorePerms(outer.path().to_path_buf(), original);
+
+        let cache_root = outer.path().join("cache");
+        let url = "https://example.com/skills/planner.git";
+
+        let runner = FailingRunner::new(|_, _| {
+            panic!("git must not be invoked once cache-parent creation fails")
+        });
+        let resolver = GitResolver::new(url, &cache_root, &runner);
+
+        let err = resolver.resolve().unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("creating cache parent"),
+            "expected cache-parent context, got: {msg}",
+        );
+    }
 }
