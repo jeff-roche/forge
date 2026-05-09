@@ -133,7 +133,7 @@ pub async fn export_transcript<R: Runtime>(
 ) -> Result<Vec<u8>, String> {
     // Authorization: dashboard window OR exactly the matching session window.
     // We deliberately do not delegate to `require_window_label_in` because
-    // that helper's `allow_session_prefix=true` mode lets *any* `session-*`
+    // that helper's `allow_any_session=true` mode lets *any* `session-*`
     // label through — we need to bind the caller to the *specific*
     // `session-{session_id}` it claims to export.
     let caller_label = webview.label();

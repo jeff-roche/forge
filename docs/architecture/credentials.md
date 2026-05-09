@@ -88,7 +88,7 @@ The mapping is configurable — `EnvFallbackStore::with_mapping` lets a downstre
 
 ## Tauri commands
 
-Three commands, all dashboard-scoped (the `authz_check` rejects any window label other than `"dashboard"`):
+Three commands, all dashboard-scoped (`require_window_label(&webview, "dashboard", ...)` rejects any window label other than `"dashboard"`):
 
 | Command            | Args                              | Returns        |
 | ------------------ | --------------------------------- | -------------- |
