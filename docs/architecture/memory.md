@@ -143,6 +143,21 @@ boundary the model sees. The envelope tags are exposed as
 The session does the assembly **once** per session start and stores the
 result as `Arc<str>` so per-turn cost stays at the existing refcount bump.
 
+#### F-650 follow-up: close-tag substitution
+
+Before wrapping, every literal `</memory>` token in the body is replaced
+with the HTML-encoded form `&lt;/memory&gt;`
+(`forge_agents::MEMORY_ENVELOPE_CLOSE_SUBSTITUTION`). Without this
+substitution a jailbroken model that learned the envelope marker could
+write a memory body containing `</memory>` followed by an injection
+payload — on the next assemble that literal close would terminate the
+envelope early and expose the trailing bytes as outside-envelope
+context. The substitution guarantees that the only `</memory>` in the
+assembled prompt is the genuine envelope terminator. The HTML-encoded
+form is preferred over a zero-width-joiner insertion because it remains
+visible in logs and diffs, contains no invisible characters, and
+round-trips through every text transport without mojibake risk.
+
 ## Dashboard Memory editor (F-602)
 
 The Dashboard surfaces a Memory section that lists every loaded agent
