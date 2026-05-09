@@ -39,6 +39,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     process::Command,
+    time::Duration,
 };
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -291,7 +292,114 @@ pub trait CommandRunner {
 }
 
 /// Default [`CommandRunner`] that shells out via `std::process::Command`.
-pub struct StdCommandRunner;
+///
+/// # F-665 — Hardened git invocation environment
+///
+/// Every spawn goes through three layers of hardening:
+///
+/// 1. **Env scrub.** The parent process environment is *not* inherited.
+///    Only an allowlist of well-known vars (`PATH`, `HOME`, `LANG`, `LC_*`,
+///    `SSH_AUTH_SOCK`, `TERM`) passes through; everything else — including
+///    every `GIT_*` the parent might be carrying (`GIT_TRACE`, malicious
+///    `GIT_SSH_COMMAND`, `GIT_CONFIG_NOSYSTEM=0`, etc.) — is dropped before
+///    Forge sets its own. This blocks both data exfiltration (a hostile
+///    parent enabling git's tracing to leak credentials) and behavior
+///    redirection (a parent overriding our SSH/system-config policy).
+///
+/// 2. **Forge-controlled git knobs.** After scrubbing, we set
+///    `GIT_TERMINAL_PROMPT=0` (no stdin credential prompts that would hang
+///    a non-TTY install), `GIT_SSH_COMMAND` with `BatchMode=yes` and
+///    `StrictHostKeyChecking=accept-new` (never wait on TTY confirmation,
+///    enforce TOFU instead of blanket-accepting host keys), and
+///    `GIT_CONFIG_NOSYSTEM=1` (ignore `/etc/gitconfig` so a tampered
+///    system config cannot redirect the clone).
+///
+/// 3. **Wall-clock timeout.** Each spawn runs under a finite deadline (60s
+///    by default). A non-responsive remote that would otherwise hang
+///    `git clone` forever is killed and surfaces as an error so the CLI
+///    can return control to the user.
+pub struct StdCommandRunner {
+    timeout: Duration,
+}
+
+/// Names of parent-process env vars the runner allows through to the child.
+/// Anything not on this list is dropped. `GIT_*` is intentionally absent —
+/// Forge controls git's environment exclusively (see field docs above).
+const ENV_ALLOWLIST: &[&str] = &[
+    "PATH",
+    "HOME",
+    "LANG",
+    "TERM",
+    // SSH-based clones depend on the agent socket; dropping this would
+    // break legitimate dev flows that rely on `ssh-agent`.
+    "SSH_AUTH_SOCK",
+    // `LC_*` is a family — handled by prefix below in addition to this
+    // umbrella entry.
+    "LC_ALL",
+];
+
+/// Locked-down SSH options for `GIT_SSH_COMMAND`:
+/// - `BatchMode=yes` — never prompt on the TTY (no passphrase / yes-no).
+/// - `StrictHostKeyChecking=accept-new` — TOFU: trust on first use, then
+///   pin. This is stricter than `no` (which accepts any key silently) and
+///   safer than `yes` (which would refuse first-time hosts and break
+///   legitimate clones).
+/// - `ConnectTimeout=5` — fail fast on unresponsive endpoints; the outer
+///   wall-clock timeout still backstops this.
+const HARDENED_SSH_COMMAND: &str =
+    "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5";
+
+/// Default per-spawn timeout. Sized so a healthy network call to a
+/// well-known host completes comfortably; an unresponsive endpoint trips
+/// the kill path long before a human user notices.
+const DEFAULT_GIT_TIMEOUT: Duration = Duration::from_secs(60);
+
+impl StdCommandRunner {
+    /// Construct a runner with the default 60s spawn timeout.
+    pub fn new() -> Self {
+        Self {
+            timeout: DEFAULT_GIT_TIMEOUT,
+        }
+    }
+
+    /// Construct a runner with a custom spawn timeout. Primarily for tests
+    /// that need the watchdog to fire quickly.
+    pub fn with_timeout(timeout: Duration) -> Self {
+        Self { timeout }
+    }
+
+    /// Per-spawn wall-clock timeout currently in effect. Exposed so callers
+    /// (and tests) can confirm a finite, non-zero bound is configured.
+    pub fn timeout(&self) -> Duration {
+        self.timeout
+    }
+}
+
+impl Default for StdCommandRunner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Apply the F-665 hardened environment to `cmd`: scrub parent env down to
+/// the allowlist, then set Forge-controlled git knobs. Pulled out of the
+/// trait impl so the policy lives in one place — anyone adding a new
+/// runner gets the same hardening for free by calling this.
+fn apply_hardened_env(cmd: &mut Command) {
+    cmd.env_clear();
+    for (key, value) in std::env::vars_os() {
+        let Some(name) = key.to_str() else {
+            // Non-UTF8 names are not on the allowlist; drop them.
+            continue;
+        };
+        if ENV_ALLOWLIST.contains(&name) || name.starts_with("LC_") {
+            cmd.env(key, value);
+        }
+    }
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
+    cmd.env("GIT_SSH_COMMAND", HARDENED_SSH_COMMAND);
+    cmd.env("GIT_CONFIG_NOSYSTEM", "1");
+}
 
 impl CommandRunner for StdCommandRunner {
     fn run(&self, program: &str, args: &[&str], cwd: Option<&Path>) -> Result<()> {
@@ -300,9 +408,42 @@ impl CommandRunner for StdCommandRunner {
         if let Some(dir) = cwd {
             cmd.current_dir(dir);
         }
-        let status = cmd
-            .status()
+        apply_hardened_env(&mut cmd);
+
+        let mut child = cmd
+            .spawn()
             .with_context(|| format!("spawning {program} {}", args.join(" ")))?;
+
+        // Watchdog: poll `try_wait` until the child exits or the deadline
+        // passes. Polling is simpler than a second thread + channel and
+        // avoids the join overhead — granularity of 50ms is fine because
+        // the timeout is measured in seconds.
+        let deadline = std::time::Instant::now() + self.timeout;
+        let poll = Duration::from_millis(50);
+        let status = loop {
+            match child
+                .try_wait()
+                .with_context(|| format!("waiting on {program} {}", args.join(" ")))?
+            {
+                Some(s) => break s,
+                None => {
+                    if std::time::Instant::now() >= deadline {
+                        // Best-effort kill; if the kill itself fails the
+                        // child is likely already gone, so we still want to
+                        // surface the timeout, not the kill error.
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        bail!(
+                            "{program} {} timed out after {:?}",
+                            args.join(" "),
+                            self.timeout,
+                        );
+                    }
+                    std::thread::sleep(poll);
+                }
+            }
+        };
+
         if !status.success() {
             bail!("{program} {} failed with status {status}", args.join(" "));
         }
@@ -696,6 +837,7 @@ fn copy_dir_recursive_inner(src: &Path, dst: &Path, source_root: &Path) -> Resul
 mod tests {
     use super::*;
     use std::cell::RefCell;
+    use std::time::Duration;
     use tempfile::tempdir;
 
     fn write_skill_md(dir: &Path, body: &str) {
@@ -1452,5 +1594,214 @@ mod tests {
             default_cache_root(&home),
             PathBuf::from("/home/test/.cache/forge/skills")
         );
+    }
+
+    // ----------------------------------------------------------------------
+    // F-665 — Hardened git invocation environment.
+    //
+    // `StdCommandRunner` is the only place git is spawned. Asserting the
+    // hardening at this layer covers every git call (clone, fetch, reset)
+    // without per-call duplication. The tests below use real subprocess
+    // invocations against `/usr/bin/env` and `/usr/bin/sleep` because the
+    // contract is about what reaches the OS-level child process — a mock
+    // runner would defeat the purpose.
+    // ----------------------------------------------------------------------
+
+    /// Spawn `/usr/bin/env` via `StdCommandRunner` and return the child's
+    /// observed environment as a `HashMap`. Caller seeds parent-side env vars
+    /// before invoking; the helper writes them back into a temp file the
+    /// child produces, then parses.
+    #[cfg(unix)]
+    fn capture_child_env(
+        runner: &StdCommandRunner,
+        dump_path: &Path,
+    ) -> std::collections::HashMap<String, String> {
+        // `/usr/bin/env` with no args writes `KEY=VALUE` lines to stdout. We
+        // shell out via `sh -c` so we can redirect to a file the test owns —
+        // capturing stdout via the runner trait is not available.
+        let cmd = format!("/usr/bin/env > {}", dump_path.display());
+        runner
+            .run("sh", &["-c", &cmd], None)
+            .expect("env-capturing child must succeed");
+        let raw = fs::read_to_string(dump_path).expect("env dump should be readable");
+        raw.lines()
+            .filter_map(|l| l.split_once('='))
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    /// F-665 DoD: parent-process `GIT_*` env vars must not reach the git
+    /// child. A hostile or curious parent that sets `GIT_TRACE=1` or any
+    /// other `GIT_*` should be invisible to the spawned process.
+    #[cfg(unix)]
+    #[test]
+    fn std_runner_strips_parent_git_env() {
+        // Set a `GIT_*` and an arbitrary unrelated var in the parent. Both
+        // must be absent from the child's view.
+        //
+        // Safety: env mutation in tests is process-wide; we restore on drop
+        // via a guard so parallel tests do not see leftover state.
+        struct EnvGuard {
+            keys: Vec<&'static str>,
+        }
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                for k in &self.keys {
+                    // SAFETY: see Rust 1.85 docs — env mutation in tests is
+                    // accepted as a known hazard; we serialize via the test
+                    // mutex (see below) so concurrent tests cannot race.
+                    unsafe { std::env::remove_var(k) };
+                }
+            }
+        }
+        let _lock = env_test_lock().lock().unwrap();
+        unsafe {
+            std::env::set_var("GIT_TRACE", "1");
+            std::env::set_var("GIT_CONFIG_NOSYSTEM", "0");
+            std::env::set_var("FORGE_TEST_LEAK", "should-not-reach-child");
+        }
+        let _guard = EnvGuard {
+            keys: vec!["GIT_TRACE", "GIT_CONFIG_NOSYSTEM", "FORGE_TEST_LEAK"],
+        };
+
+        let dir = tempdir().unwrap();
+        let dump = dir.path().join("env.txt");
+        let runner = StdCommandRunner::new();
+        let child_env = capture_child_env(&runner, &dump);
+
+        // The hostile parent values must not reach the child.
+        assert!(
+            !child_env.contains_key("GIT_TRACE"),
+            "GIT_TRACE leaked from parent into git child env: {:?}",
+            child_env.get("GIT_TRACE"),
+        );
+        assert!(
+            !child_env.contains_key("FORGE_TEST_LEAK"),
+            "arbitrary parent var leaked into child: {:?}",
+            child_env.get("FORGE_TEST_LEAK"),
+        );
+        // Forge-controlled hardening must be in effect, overriding any
+        // parent value the user set.
+        assert_eq!(
+            child_env.get("GIT_TERMINAL_PROMPT").map(String::as_str),
+            Some("0")
+        );
+        assert_eq!(
+            child_env.get("GIT_CONFIG_NOSYSTEM").map(String::as_str),
+            Some("1")
+        );
+        let ssh = child_env
+            .get("GIT_SSH_COMMAND")
+            .expect("GIT_SSH_COMMAND must be set");
+        assert!(
+            ssh.contains("BatchMode=yes"),
+            "GIT_SSH_COMMAND missing BatchMode: {ssh}"
+        );
+        assert!(
+            ssh.contains("StrictHostKeyChecking=accept-new"),
+            "GIT_SSH_COMMAND missing StrictHostKeyChecking=accept-new: {ssh}",
+        );
+    }
+
+    /// F-665 DoD: legitimate dev-flow vars in the parent's allowlist
+    /// (`PATH`, `HOME`, `LANG`, `LC_*`, `SSH_AUTH_SOCK`, `TERM`) must pass
+    /// through. SSH-based clones rely on `SSH_AUTH_SOCK` for agent auth and
+    /// breaking that breaks legitimate users.
+    #[cfg(unix)]
+    #[test]
+    fn std_runner_passes_through_allowlisted_parent_env() {
+        let _lock = env_test_lock().lock().unwrap();
+        struct EnvGuard {
+            keys: Vec<&'static str>,
+        }
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                for k in &self.keys {
+                    unsafe { std::env::remove_var(k) };
+                }
+            }
+        }
+        unsafe {
+            std::env::set_var("SSH_AUTH_SOCK", "/tmp/forge-test-ssh-agent.sock");
+            std::env::set_var("LC_ALL", "C.UTF-8");
+        }
+        let _guard = EnvGuard {
+            keys: vec!["SSH_AUTH_SOCK", "LC_ALL"],
+        };
+
+        let dir = tempdir().unwrap();
+        let dump = dir.path().join("env.txt");
+        let runner = StdCommandRunner::new();
+        let child_env = capture_child_env(&runner, &dump);
+
+        // PATH must pass through or `sh` itself would not have been findable
+        // by the runner — but assert it explicitly to pin the contract.
+        assert!(
+            child_env.contains_key("PATH"),
+            "PATH must pass through the env scrub",
+        );
+        assert_eq!(
+            child_env.get("SSH_AUTH_SOCK").map(String::as_str),
+            Some("/tmp/forge-test-ssh-agent.sock"),
+            "SSH_AUTH_SOCK must pass through for agent-based SSH clones",
+        );
+        assert_eq!(
+            child_env.get("LC_ALL").map(String::as_str),
+            Some("C.UTF-8"),
+            "LC_* locale vars must pass through",
+        );
+    }
+
+    /// F-665 DoD: a non-responsive remote must not hang the CLI. Surrogate:
+    /// `sleep 99` exceeds the configured timeout and must be killed.
+    #[cfg(unix)]
+    #[test]
+    fn std_runner_kills_child_after_timeout() {
+        use std::time::Instant;
+        let runner = StdCommandRunner::with_timeout(Duration::from_millis(200));
+        let started = Instant::now();
+        let result = runner.run("sleep", &["99"], None);
+        let elapsed = started.elapsed();
+        assert!(result.is_err(), "expected timeout error, got Ok");
+        let msg = format!("{:#}", result.unwrap_err()).to_lowercase();
+        assert!(
+            msg.contains("timeout") || msg.contains("timed out"),
+            "expected timeout-flavored error, got: {msg}",
+        );
+        // Generous upper bound: a healthy timeout fires well under 5s.
+        // If this trips the suite is hung on the kill path.
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "timeout took {elapsed:?} to fire — kill path is broken",
+        );
+    }
+
+    /// F-665 DoD: `GIT_TERMINAL_PROMPT=0` is set so a clone that would
+    /// otherwise prompt for credentials cannot hang waiting on stdin. The
+    /// previous test asserts the env var is set; this test pins the
+    /// configured timeout default (60s) so a regression that drops the
+    /// timeout entirely surfaces here even if `GIT_TERMINAL_PROMPT` survives.
+    #[test]
+    fn std_runner_default_timeout_is_bounded() {
+        let runner = StdCommandRunner::new();
+        // Inspect via the public timeout accessor — we expose it precisely
+        // so callers and tests can confirm a non-zero, finite bound is in
+        // place, defending against `Duration::ZERO` or `Duration::MAX`
+        // regressions that would defeat the "no infinite hang" property.
+        let t = runner.timeout();
+        assert!(t > Duration::from_secs(0), "default timeout must be > 0");
+        assert!(
+            t <= Duration::from_secs(300),
+            "default timeout must be a sane upper bound (<= 5min), got {t:?}",
+        );
+    }
+
+    /// Process-wide env mutation in `std_runner_strips_parent_git_env` and
+    /// `std_runner_passes_through_allowlisted_parent_env` would race if the
+    /// suite runs them in parallel. Serialize them via a static mutex.
+    fn env_test_lock() -> &'static std::sync::Mutex<()> {
+        use std::sync::OnceLock;
+        static LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
     }
 }

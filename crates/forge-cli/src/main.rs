@@ -50,7 +50,7 @@ async fn skill_install(source: String, target: SkillScopeFlag) -> Result<()> {
 
     let resolved = if skill_mod::looks_like_git_url(&source) {
         let cache_root = skill_mod::default_cache_root(&home);
-        let runner = skill_mod::StdCommandRunner;
+        let runner = skill_mod::StdCommandRunner::new();
         let resolver = skill_mod::GitResolver::new(source.clone(), cache_root, &runner);
         resolver.resolve()?
     } else {
