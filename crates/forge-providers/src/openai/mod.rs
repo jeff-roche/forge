@@ -116,11 +116,14 @@ pub(crate) fn chat_request(
         for (name, value) in auth_headers {
             builder = builder.header(name, value);
         }
-        let resp = builder
-            .body(body)
-            .send()
-            .await
-            .map_err(|e| anyhow::anyhow!("openai chat request failed: {e}"))?;
+        let resp = builder.body(body).send().await.map_err(|e| {
+            // Preserve the source chain so a redirect-policy refusal
+            // (CustomOpenAI's SSRF guard, F-646) — which reqwest stores
+            // on the error's source — surfaces through anyhow's `{:#}`
+            // walker rather than being collapsed to the opaque
+            // top-level "error following redirect" message.
+            anyhow::Error::new(e).context("openai chat request failed")
+        })?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -134,13 +137,6 @@ pub(crate) fn chat_request(
 
         Ok(decode_openai_stream(resp.bytes_stream(), cfg))
     }
-}
-
-/// Construct a stream HTTP client with the same hardening posture as
-/// [`OpenAiProvider`]. Re-exported so [`CustomOpenAiProvider`] can build its
-/// own client with identical timeouts.
-pub(crate) fn build_stream_client_default() -> reqwest::Client {
-    http_util::build_stream_client(&HttpClientConfig::DEFAULT)
 }
 
 /// Decode the raw `bytes` stream into a `ChatChunk` stream by piping through
