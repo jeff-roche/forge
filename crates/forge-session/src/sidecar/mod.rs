@@ -71,7 +71,7 @@ use forge_ipc::sidecar::{
 use tokio::io::{AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::process::{Child, Command};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, OnceCell};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
@@ -240,6 +240,12 @@ pub struct SidecarSupervisor {
     /// updated yet still spawn — their crashes simply land under a
     /// `default` bucket until the wiring catches up.
     session_id: Arc<String>,
+    /// F-662: canonical absolute path of `socket_dir`, captured on first
+    /// successful [`Self::spawn`]. Every subsequent bind verifies the
+    /// directory still canonicalizes to this value — if a grandparent
+    /// is replaced with a symlink mid-flight, the divergence trips
+    /// [`verify_socket_dir_matches_expected`] and the spawn refuses.
+    expected_canonical_dir: Arc<OnceCell<PathBuf>>,
 }
 
 impl SidecarSupervisor {
@@ -257,6 +263,7 @@ impl SidecarSupervisor {
             socket_dir: Arc::new(socket_dir),
             forged_agent_path: Arc::new(forged_agent_path),
             session_id: Arc::new("default".to_string()),
+            expected_canonical_dir: Arc::new(OnceCell::new()),
         }
     }
 
@@ -288,6 +295,23 @@ impl SidecarSupervisor {
         self.socket_dir.join(format!("{}.sock", instance_id))
     }
 
+    /// F-662: canonicalize `self.socket_dir`, populate the cached
+    /// expected-canonical on first call, and verify on every subsequent
+    /// call that the directory still resolves to the same canonical.
+    /// Returns the canonical path the caller should use to construct
+    /// the bind path.
+    async fn resolve_and_verify_socket_dir(&self) -> Result<PathBuf> {
+        // First call wins the OnceCell; subsequent calls compare against
+        // the cached value via `verify_socket_dir_matches_expected`.
+        let cached = self
+            .expected_canonical_dir
+            .get_or_try_init(|| async { validate_socket_dir_canonical(&self.socket_dir).await })
+            .await?
+            .clone();
+        verify_socket_dir_matches_expected(&self.socket_dir, &cached).await?;
+        Ok(cached)
+    }
+
     /// Spawn a sidecar for `instance_id` and stand up its bidirectional
     /// pump tasks.
     ///
@@ -309,7 +333,14 @@ impl SidecarSupervisor {
     ) -> Result<SidecarHandle> {
         ensure_socket_dir(&self.socket_dir).await?;
 
-        let socket_path = self.socket_path_for(&instance_id);
+        // F-662: cache the canonical bind directory on first spawn and
+        // re-verify on every spawn that the directory still resolves to
+        // the same canonical. This neutralises a planted symlink at any
+        // grandparent component: post-canonicalize the supervisor binds
+        // sockets at an absolute path with no symlink components, and a
+        // mid-flight redirect attempt is detected here before bind.
+        let canonical = self.resolve_and_verify_socket_dir().await?;
+        let socket_path = canonical.join(format!("{}.sock", instance_id));
 
         // Bind, handshake, fork: do this synchronously up front so
         // `spawn` returns an error to the caller (rather than swallowing
@@ -329,6 +360,7 @@ impl SidecarSupervisor {
             socket_dir: self.socket_dir.clone(),
             forged_agent_path: self.forged_agent_path.clone(),
             session_id: self.session_id.clone(),
+            expected_canonical_dir: self.expected_canonical_dir.clone(),
             socket_path: socket_path.clone(),
             instance_id: instance_id.clone(),
             params,
@@ -368,6 +400,12 @@ impl SidecarSupervisor {
                 instance_id
             );
         }
+        // F-662: re-verify the bind directory still canonicalizes to the
+        // expected root before every (re)bind. The supervisor's restart
+        // loop calls back here without going through `spawn`, so this
+        // is the guard that catches a grandparent symlink swap planted
+        // between the initial bind and a transparent restart.
+        self.resolve_and_verify_socket_dir().await?;
         let listener = bind_uds_safely(socket_path).await?;
         // Tighten the socket file to 0o600 immediately to match the
         // server's discipline (`forge-session/src/server.rs`). bind(2)
@@ -541,6 +579,10 @@ struct SupervisorTask {
     socket_dir: Arc<PathBuf>,
     forged_agent_path: Arc<PathBuf>,
     session_id: Arc<String>,
+    /// F-662: shared with [`SidecarSupervisor`] so the restart path
+    /// re-verifies the same expected canonical that gated the initial
+    /// bind. A mid-flight grandparent symlink swap fails the next bind.
+    expected_canonical_dir: Arc<OnceCell<PathBuf>>,
     socket_path: PathBuf,
     instance_id: AgentInstanceId,
     params: SpawnParams,
@@ -627,6 +669,7 @@ impl SupervisorTask {
                         socket_dir: self.socket_dir.clone(),
                         forged_agent_path: self.forged_agent_path.clone(),
                         session_id: self.session_id.clone(),
+                        expected_canonical_dir: self.expected_canonical_dir.clone(),
                     };
                     match supervisor_view
                         .launch_and_handshake(
@@ -986,6 +1029,62 @@ async fn ensure_socket_dir(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// F-662: confirm the supervisor's bind directory is a real directory
+/// (not a symlink) and return its canonical absolute path.
+///
+/// `bind_uds_safely` only stats the *leaf* socket entry on the
+/// `EADDRINUSE` recovery path; it never validates the parent component
+/// chain. An attacker with write access to a grandparent (e.g.
+/// `/run/user/$UID/forge`) could otherwise plant a symlink in place of
+/// the directory, redirecting every per-instance socket bind into an
+/// attacker-controlled tree. The 0o700 mode set by [`ensure_socket_dir`]
+/// only fences a same-uid attacker on the directory itself, not on its
+/// ancestors.
+///
+/// Pattern parallels F-649 (`crates/forge-agents/src/memory.rs`):
+/// `symlink_metadata` to refuse a symlink at the leaf, and
+/// `canonicalize` to materialize an absolute path with no remaining
+/// symlink components for downstream comparison.
+async fn validate_socket_dir_canonical(dir: &Path) -> Result<PathBuf> {
+    let meta = tokio::fs::symlink_metadata(dir).await.with_context(|| {
+        format!(
+            "stat sidecar socket dir at {} during symlink validation",
+            dir.display()
+        )
+    })?;
+    let ft = meta.file_type();
+    if ft.is_symlink() || !ft.is_dir() {
+        anyhow::bail!(
+            "refusing to bind sidecar UDS: {} is not a real directory (type={:?}); \
+             a symlink at the bind dir would redirect the socket outside the runtime root",
+            dir.display(),
+            ft
+        );
+    }
+    tokio::fs::canonicalize(dir)
+        .await
+        .with_context(|| format!("canonicalize sidecar socket dir {}", dir.display()))
+}
+
+/// F-662: re-validate that `dir` still canonicalizes to `expected`
+/// before every bind. Defends against an attacker who plants a symlink
+/// in a grandparent component **after** the supervisor cached its
+/// expected canonical at first spawn. A divergence is treated as an
+/// active redirection attempt and the bind is refused.
+async fn verify_socket_dir_matches_expected(dir: &Path, expected: &Path) -> Result<()> {
+    let current = validate_socket_dir_canonical(dir).await?;
+    if current != expected {
+        anyhow::bail!(
+            "sidecar socket dir {} canonicalizes to {} but expected {}; \
+             refusing to bind (parent-component symlink redirection detected)",
+            dir.display(),
+            current.display(),
+            expected.display()
+        );
+    }
+    Ok(())
+}
+
 /// F-651: read the daemon's effective uid. Wraps the `geteuid()`
 /// libc call so the supervisor doesn't pull in `nix` for a single
 /// syscall; `forge-session` already depends on `libc`.
@@ -1061,6 +1160,89 @@ async fn bind_uds_safely(path: &Path) -> Result<UnixListener> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::symlink;
+    use tempfile::TempDir;
+
+    /// F-662: a real directory passes `validate_socket_dir_canonical` and
+    /// returns its canonical path.
+    #[tokio::test]
+    async fn validate_socket_dir_accepts_real_directory() {
+        let tmp = TempDir::new().expect("tmp");
+        let dir = tmp.path().join("forge");
+        tokio::fs::create_dir_all(&dir).await.expect("mkdir");
+        let canonical = validate_socket_dir_canonical(&dir)
+            .await
+            .expect("real dir must pass validation");
+        assert_eq!(
+            canonical,
+            dir.canonicalize().expect("canonicalize"),
+            "validated canonical must equal direct canonicalize result",
+        );
+    }
+
+    /// F-662: a `socket_dir` that is itself a symlink to another directory
+    /// is rejected. The leaf component is what the issue calls out as the
+    /// most direct redirection vector — refusing it forces the operator
+    /// to point us at a real directory.
+    #[tokio::test]
+    async fn validate_socket_dir_rejects_symlink_at_leaf() {
+        let tmp = TempDir::new().expect("tmp");
+        let real = tmp.path().join("real");
+        tokio::fs::create_dir_all(&real).await.expect("mkdir real");
+        let link = tmp.path().join("forge");
+        symlink(&real, &link).expect("symlink");
+
+        let err = validate_socket_dir_canonical(&link)
+            .await
+            .expect_err("symlink leaf must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not a real directory") || msg.contains("symlink"),
+            "expected symlink-rejection error, got: {msg}"
+        );
+    }
+
+    /// F-662: with a stable expected-canonical reference, swapping the
+    /// supervisor's bind dir for a symlink to an attacker-controlled
+    /// location is detected as a redirection and rejected by
+    /// `verify_socket_dir_matches_expected`.
+    #[tokio::test]
+    async fn verify_socket_dir_rejects_grandparent_symlink_redirection() {
+        let tmp = TempDir::new().expect("tmp");
+        let runtime = tmp.path().join("runtime");
+        tokio::fs::create_dir_all(&runtime).await.expect("mkdir");
+        let socket_dir = runtime.join("forge");
+        tokio::fs::create_dir_all(&socket_dir)
+            .await
+            .expect("mkdir forge");
+
+        let expected = socket_dir.canonicalize().expect("canonicalize expected");
+
+        // Simulate an attacker swapping `runtime` for a symlink that
+        // points at an attacker-controlled tree. After the swap, the
+        // original socket_dir resolves through the symlink and lands
+        // outside the validated runtime.
+        let evil = tmp.path().join("evil");
+        tokio::fs::create_dir_all(evil.join("forge"))
+            .await
+            .expect("mkdir evil/forge");
+        tokio::fs::remove_dir(&socket_dir)
+            .await
+            .expect("remove socket_dir");
+        tokio::fs::remove_dir(&runtime)
+            .await
+            .expect("remove runtime");
+        symlink(&evil, &runtime).expect("plant grandparent symlink");
+
+        let err = verify_socket_dir_matches_expected(&socket_dir, &expected)
+            .await
+            .expect_err("redirected socket_dir must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("symlink") || msg.contains("does not match expected"),
+            "expected redirection error, got: {msg}"
+        );
+    }
 
     /// F-651: a connected peer with the same uid as the daemon (the
     /// realistic case — both halves of a `UnixStream::pair` belong to
