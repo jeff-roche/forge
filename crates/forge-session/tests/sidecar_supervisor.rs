@@ -363,6 +363,76 @@ async fn shutdown_grace_window_then_sigterm() {
     let _ = snap;
 }
 
+/// F-662 regression: a grandparent symlink swapped in between
+/// supervisor construction and the first spawn must trip the canonical-
+/// dir verification and cause `spawn` to fail. Without the fix
+/// `bind_uds_safely` would happily `bind(2)` through the planted
+/// symlink and place the per-instance UDS inside the attacker's tree.
+#[tokio::test]
+async fn spawn_rejects_grandparent_symlink_redirection() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = TempDir::new().expect("tmp");
+    let runtime = tmp.path().join("runtime");
+    let socket_dir = runtime.join("forge");
+    std::fs::create_dir_all(&socket_dir).expect("mkdir socket_dir");
+
+    let supervisor = supervisor(&socket_dir);
+    let id = AgentInstanceId::from_string("inst-symlink".into());
+    let sink = CapturingSink::new();
+
+    // Successful first spawn caches the canonical bind dir on the
+    // supervisor (`expected_canonical_dir`). Tear it down cleanly so
+    // the runtime dir is empty for the swap below.
+    let handle = supervisor
+        .spawn(
+            id.clone(),
+            SpawnParams {
+                hello: fixture_hello(&id),
+            },
+            sink.clone(),
+        )
+        .await
+        .expect("first spawn must succeed against a real directory");
+    handle.shutdown().await.expect("shutdown");
+
+    // Plant a grandparent symlink: replace `runtime` with a link into
+    // an attacker-controlled tree. After the swap, `socket_dir` still
+    // exists as a path, but it now resolves through the symlink to
+    // `evil/forge` which is outside the validated runtime root.
+    let evil = tmp.path().join("evil");
+    std::fs::create_dir_all(evil.join("forge")).expect("mkdir evil/forge");
+    std::fs::remove_dir(&socket_dir).expect("rm socket_dir");
+    std::fs::remove_dir(&runtime).expect("rm runtime");
+    symlink(&evil, &runtime).expect("plant grandparent symlink");
+
+    let id2 = AgentInstanceId::from_string("inst-symlink-2".into());
+    let err = supervisor
+        .spawn(
+            id2.clone(),
+            SpawnParams {
+                hello: fixture_hello(&id2),
+            },
+            sink.clone(),
+        )
+        .await
+        .expect_err("spawn must refuse a redirected bind dir");
+    let chain = format!("{err:#}");
+    assert!(
+        chain.contains("symlink") || chain.contains("does not match expected"),
+        "expected symlink-redirection error, got: {chain}"
+    );
+
+    // The attacker's tree must not contain the would-be bind path —
+    // the supervisor refused before bind, so no socket was created.
+    let leaked = evil.join("forge").join(format!("{id2}.sock"));
+    assert!(
+        !leaked.exists(),
+        "supervisor must not bind through the planted symlink; found {} after refused spawn",
+        leaked.display()
+    );
+}
+
 /// Compile-time confirmation that key types pull in the bound trait
 /// objects the supervisor's public API promises.
 #[allow(dead_code)]
