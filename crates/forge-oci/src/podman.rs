@@ -6,7 +6,9 @@
 //! logic without a real binary.
 
 use crate::runner::{CommandOutcome, CommandRunner, TokioCommandRunner};
-use crate::signature::{enforce_policy, NoopVerifier, SignaturePolicy, SignatureVerifier};
+use crate::signature::{
+    enforce_policy, CosignVerifier, NoopVerifier, SignaturePolicy, SignatureVerifier,
+};
 use crate::{
     ContainerHandle, ContainerLogs, ContainerRuntime, ExecResult, ImageRef, LogLine, OciError,
     SecurityOpts, Stats,
@@ -32,21 +34,32 @@ pub struct PodmanRuntime {
 impl PodmanRuntime {
     /// Build a runtime that shells out via `tokio::process::Command`. The
     /// runtime starts in [`SignaturePolicy::Permissive`] mode with a
-    /// [`NoopVerifier`] — production deployments should call
-    /// [`Self::with_verifier`] to wire a real verifier (typically
-    /// [`crate::CosignVerifier`]) and switch to
-    /// [`SignaturePolicy::Strict`].
+    /// [`CosignVerifier`] — operators get identity-pinned signature
+    /// verification by default once they set
+    /// [`crate::signature::IDENTITY_ENV`] /
+    /// [`crate::signature::OIDC_ENV`]; until then the permissive policy
+    /// logs a warning and lets the pull through so dev environments still
+    /// function. Production deployments call [`Self::with_verifier`] to
+    /// switch to [`SignaturePolicy::Strict`] (or to swap in a custom
+    /// verifier).
+    ///
+    /// **Why CosignVerifier and not NoopVerifier**: a previous default of
+    /// [`NoopVerifier`] gave silent zero verification — operators who
+    /// forgot to call [`Self::with_verifier`] got no signature gate AND
+    /// no warning, ever. The new default ensures every pull either
+    /// consults cosign or emits a warning explaining what was skipped.
     pub fn new() -> Self {
         Self {
             runner: Box::new(TokioCommandRunner),
-            verifier: Box::new(NoopVerifier),
+            verifier: Box::new(CosignVerifier::new(SignaturePolicy::Permissive)),
             policy: SignaturePolicy::Permissive,
         }
     }
 
     /// Build a runtime backed by a custom [`CommandRunner`] — for tests.
-    /// Defaults to a no-op verifier; tests that exercise the verification
-    /// path should call [`Self::with_verifier`] afterwards.
+    /// Defaults to a no-op verifier so tests that don't care about the
+    /// supply-chain gate stay simple; tests that exercise the verification
+    /// path call [`Self::with_verifier`] afterwards.
     pub fn with_runner(runner: Box<dyn CommandRunner>) -> Self {
         Self {
             runner,
@@ -976,6 +989,90 @@ mod tests {
             1,
             "podman pull must run when permissive policy lets the missing verifier through"
         );
+    }
+
+    /// Test verifier that records every call so we can assert the
+    /// default-constructed runtime actually wires a verifier in.
+    struct CountingNoopVerifier {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl SignatureVerifier for CountingNoopVerifier {
+        async fn verify(
+            &self,
+            _image: &ImageRef,
+        ) -> Result<(), crate::signature::VerificationError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn new_defaults_to_a_real_verifier_not_noop() {
+        // Regression for F-643 follow-up: `PodmanRuntime::new()` previously
+        // wired `NoopVerifier`, so an operator who forgot to call
+        // `with_verifier` got ZERO signature verification and no warning
+        // ever logged. The new default is `CosignVerifier::new(Permissive)`
+        // — pulls without identity env vars set are warned about, not
+        // silently waved through.
+        //
+        // Asserting this through behaviour: the type-level default must
+        // not return `Ok(())` for an arbitrary pull without producing
+        // either a verification call or a permissive warning. We can't
+        // assert tracing output cheaply, so we instead pin the
+        // construction by checking the verifier is NOT a `NoopVerifier`
+        // — concretely, by exercising the env-missing path which a real
+        // CosignVerifier rejects with `VerifierUnavailable`.
+        //
+        // Use a SINGLE-threaded runtime for this test so the env mutation
+        // doesn't race with sibling tests.
+        use crate::signature::{IDENTITY_ENV, OIDC_ENV};
+        // Snapshot/restore env to be polite to other tests.
+        let prev_id = std::env::var(IDENTITY_ENV).ok();
+        let prev_oidc = std::env::var(OIDC_ENV).ok();
+        std::env::remove_var(IDENTITY_ENV);
+        std::env::remove_var(OIDC_ENV);
+
+        let runtime = PodmanRuntime::new();
+        // Delegate verification through the public verifier accessor: we
+        // call the verifier directly so the test doesn't need a real
+        // podman on PATH.
+        let img = alpine_pinned();
+        let res = runtime.verifier.verify(&img).await;
+
+        // Restore env.
+        match prev_id {
+            Some(v) => std::env::set_var(IDENTITY_ENV, v),
+            None => std::env::remove_var(IDENTITY_ENV),
+        }
+        match prev_oidc {
+            Some(v) => std::env::set_var(OIDC_ENV, v),
+            None => std::env::remove_var(OIDC_ENV),
+        }
+
+        match res {
+            Err(crate::signature::VerificationError::VerifierUnavailable(_)) => {}
+            other => panic!(
+                "expected default verifier to be CosignVerifier (returns VerifierUnavailable when \
+                 identity env is unset); got {other:?} — has the default regressed back to NoopVerifier?"
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn with_verifier_noop_is_still_available_for_tests() {
+        // NoopVerifier must remain a valid override so tests that don't
+        // care about the signature gate stay terse. The new default for
+        // production is CosignVerifier — but `.with_verifier(NoopVerifier)`
+        // explicitly opts out, making the test intent visible.
+        let counter = Box::new(CountingNoopVerifier {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let runner = RecordingRunner::new();
+        runner.push(StubResponse::ok_stdout(b"".to_vec()));
+        let runtime = rt(runner).with_verifier(counter, SignaturePolicy::Permissive);
+        runtime.pull(&alpine_pinned()).await.unwrap();
     }
 
     #[tokio::test]

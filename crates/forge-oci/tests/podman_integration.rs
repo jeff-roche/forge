@@ -41,7 +41,16 @@ const SHA: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abc
 #[tokio::test]
 #[ignore = "requires rootless podman on PATH (run with --ignored)"]
 async fn create_does_not_apply_caller_flags_as_runtime_flags() {
-    let runtime = PodmanRuntime::new();
+    // F-643 follow-up: production `new()` defaults to a real
+    // `CosignVerifier` so nobody silently runs without verification.
+    // These ignored end-to-end tests deliberately opt out via
+    // `with_verifier(NoopVerifier)` because they exercise podman
+    // semantics, not the signature gate (which has its own coverage in
+    // `mismatched_signature_is_rejected` below).
+    let runtime = PodmanRuntime::new().with_verifier(
+        Box::new(forge_oci::NoopVerifier),
+        SignaturePolicy::Permissive,
+    );
     runtime.detect().await.expect("podman detect");
     // F-643: tag-only refs are rejected for non-allowlisted sources; pin
     // by digest. We use a known-good alpine 3.19 amd64 digest. If alpine's
@@ -106,7 +115,16 @@ async fn create_does_not_apply_caller_flags_as_runtime_flags() {
 #[tokio::test]
 #[ignore = "requires rootless podman on PATH (run with --ignored)"]
 async fn exec_does_not_apply_caller_flags_as_runtime_flags() {
-    let runtime = PodmanRuntime::new();
+    // F-643 follow-up: production `new()` defaults to a real
+    // `CosignVerifier` so nobody silently runs without verification.
+    // These ignored end-to-end tests deliberately opt out via
+    // `with_verifier(NoopVerifier)` because they exercise podman
+    // semantics, not the signature gate (which has its own coverage in
+    // `mismatched_signature_is_rejected` below).
+    let runtime = PodmanRuntime::new().with_verifier(
+        Box::new(forge_oci::NoopVerifier),
+        SignaturePolicy::Permissive,
+    );
     runtime.detect().await.expect("podman detect");
     // F-643: tag-only refs are rejected for non-allowlisted sources; pin
     // by digest. We use a known-good alpine 3.19 amd64 digest. If alpine's
@@ -148,7 +166,16 @@ async fn exec_does_not_apply_caller_flags_as_runtime_flags() {
 #[tokio::test]
 #[ignore = "requires rootless podman on PATH (run with --ignored)"]
 async fn podman_full_lifecycle_against_alpine() {
-    let runtime = PodmanRuntime::new();
+    // F-643 follow-up: production `new()` defaults to a real
+    // `CosignVerifier` so nobody silently runs without verification.
+    // These ignored end-to-end tests deliberately opt out via
+    // `with_verifier(NoopVerifier)` because they exercise podman
+    // semantics, not the signature gate (which has its own coverage in
+    // `mismatched_signature_is_rejected` below).
+    let runtime = PodmanRuntime::new().with_verifier(
+        Box::new(forge_oci::NoopVerifier),
+        SignaturePolicy::Permissive,
+    );
 
     runtime
         .detect()

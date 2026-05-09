@@ -92,18 +92,27 @@ The rejection path returns `OciError::UntrustedTagOnlyRef` so callers — includ
 
 #### Gate 2 — Signature verification before pull
 
-[`PodmanRuntime::pull`](../../crates/forge-oci/src/podman.rs) invokes a [`SignatureVerifier`](../../crates/forge-oci/src/signature.rs) on the digest-pinned reference *before* `podman pull` runs. The default production verifier is [`CosignVerifier`], which shells to `cosign verify` in keyless mode against the configured Fulcio root + Rekor transparency log. Operators pin trusted signer identities through the standard cosign environment (`COSIGN_CERTIFICATE_IDENTITY`, `COSIGN_CERTIFICATE_OIDC_ISSUER`).
+[`PodmanRuntime::pull`](../../crates/forge-oci/src/podman.rs) invokes a [`SignatureVerifier`](../../crates/forge-oci/src/signature.rs) on the digest-pinned reference *before* `podman pull` runs. `PodmanRuntime::new()` defaults to [`CosignVerifier`] in `SignaturePolicy::Permissive` — operators get identity-pinned verification by default once they configure the daemon environment, and never silently get zero verification. Production deployments call `with_verifier` to switch to `SignaturePolicy::Strict`.
+
+[`CosignVerifier`] shells to `cosign verify` in keyless mode against the configured Fulcio root + Rekor transparency log AND pins the trusted signer identity. Cosign by itself accepts *any* Fulcio-issued certificate, so the verifier reads two env vars at verify time and forwards them as cosign flags:
+
+| Env var | Forwarded to cosign as |
+|---|---|
+| `COSIGN_CERTIFICATE_IDENTITY` | `--certificate-identity=<value>` |
+| `COSIGN_CERTIFICATE_OIDC_ISSUER` | `--certificate-oidc-issuer=<value>` |
+
+The env-var convention is a Forge bridge — cosign itself only reads the equivalent CLI flags. The names match cosign's CLI flag names so operators have one mental model. Forge supports literal-string match only; operators who need regex pinning can wire a custom `SignatureVerifier` impl.
 
 A failed verification surfaces as `OciError::SignatureVerificationFailed` and aborts the pull — `podman` is never invoked.
 
-The `SignaturePolicy` enum governs how a missing verifier is handled:
+The `SignaturePolicy` enum governs how an unavailable verifier is handled. "Unavailable" includes both the cosign binary missing from `PATH` AND the identity env vars being unset (because either case means cosign cannot enforce identity pinning):
 
-| Policy | Missing verifier | Signature mismatch |
+| Policy | Verifier unavailable | Signature mismatch |
 |---|---|---|
 | `Strict` | hard-fail | hard-fail |
 | `Permissive` (default) | logged warning, pull proceeds | hard-fail |
 
-Permissive is the default so existing dev environments without `cosign` continue to function. Production wiring opts into `Strict` explicitly. **The permissive escape hatch only relaxes the "verifier installed" check** — a real signature mismatch always blocks the pull regardless of policy.
+Permissive is the default so existing dev environments without `cosign` (or without a chosen signer identity) continue to function. Production wiring opts into `Strict` explicitly, after the daemon environment is wired with both identity env vars. **The permissive escape hatch only relaxes the "verifier operational" check** — a real signature mismatch always blocks the pull regardless of policy.
 
 #### Why both gates
 
