@@ -1,3 +1,4 @@
+#![allow(deprecated)] // F-652: tests/benches still drive the deprecated bare read_frame helpers.
 //! F-608 step 8: in-process vs sidecar per-token + cold-start bench.
 //!
 //! ## What this bench measures

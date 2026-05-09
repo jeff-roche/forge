@@ -1,3 +1,4 @@
+#![allow(deprecated)] // F-652: tests/benches still drive the deprecated bare read_frame helpers.
 //! F-603: end-to-end coverage for the orchestrator pause/resume primitive.
 //!
 //! These tests drive a real `serve_with_session` daemon over a UDS pair, the

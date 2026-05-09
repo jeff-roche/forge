@@ -1,3 +1,4 @@
+#![allow(deprecated)] // F-652: tests/benches still drive the deprecated bare read_frame helpers.
 //! F-586: orchestrator subscription to mid-session provider swap.
 //!
 //! Demonstrates that an `Arc<SwappableProvider>` plumbed through
