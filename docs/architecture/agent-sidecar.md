@@ -59,7 +59,7 @@ forge-shell ◀──UDS──┤             forged              │
 
 ### 2. IPC Transport
 
-**Decision.** Per-instance Unix domain socket using the same length-prefixed JSON framing (`forge_ipc::write_frame` / `read_frame` at `crates/forge-ipc/src/lib.rs:247`) the daemon ↔ shell wire already uses. The daemon binds the socket before spawning the sidecar; the sidecar receives the path via `--socket /run/user/$uid/forge/<session>/<instance-id>.sock` and connects on startup.
+**Decision.** Per-instance Unix domain socket using the same length-prefixed JSON framing (`forge_ipc::write_frame` / `read_frame` at `crates/forge-ipc/src/lib.rs:247`) the daemon ↔ shell wire already uses. The daemon binds the socket before spawning the sidecar; the sidecar receives the path via `--socket ${XDG_RUNTIME_DIR:-$TMPDIR}/forge/sidecars/<session-id>/<instance-id>.sock` and connects on startup. The supervisor creates the per-session directory at mode `0o700` lazily on the first spawn (see `ensure_socket_dir` in `crates/forge-session/src/sidecar/mod.rs`); the production wiring is in `forge_shell::ipc::sidecar_socket_dir` (`crates/forge-shell/src/ipc.rs:2355`).
 
 **Rationale.**
 - Reusing `forge-ipc`'s framing pattern (same `[u32 BE length][JSON body]` shape, same 4 MiB cap, same `serde(tag = "t")` discriminated union) means zero new framing code and one mental model for IPC throughout Forge.
@@ -235,6 +235,30 @@ self.monitor.track(id.clone(), handle.pid).await;
 **Metrics surfaced via existing channels.**
 - `Event::ResourceSample` (already on the wire): real per-sidecar CPU/RSS/FD pills land in the AgentMonitor automatically once §9 wires the PID.
 - New event variant — **deliberately deferred**. F-608 does not introduce sidecar-lifecycle wire events; the existing `BackgroundAgentStarted` / `BackgroundAgentCompleted` / `AgentEvent::Failed` cover the three transitions the UI needs. The supervisor's restarts are invisible to the shell.
+
+---
+
+### 11. `provider:changed` Integration (F-640)
+
+**Decision.** A `provider:changed` swap takes effect on the **next** `RunTurn`. Any chat stream already in flight when the swap arrives continues against the previous provider until it terminates.
+
+**Mechanism.** The dashboard / settings flow emits a `provider:changed` Tauri event (`crates/forge-shell/src/providers_ipc.rs:314`). Each open session window forwards it to its session daemon over the existing UDS as `IpcMessage::ProviderChanged { provider_id }` (`crates/forge-ipc/src/lib.rs:108`). The daemon's connection arm calls `SwappableProvider::swap` (`crates/forge-providers/src/runtime.rs:128`), which atomically replaces the inner `RuntimeProvider` behind an `Arc<RwLock<_>>`.
+
+**In-flight semantics.** `SwappableProvider::chat` clones the inner `RuntimeProvider` (an `Arc` clone) under a brief read lock and drops the guard before awaiting the upstream stream. The cloned snapshot owns the in-flight chat for the rest of the turn — see `runtime.rs:144-152`. Result: the swap is invisible to any frame still being streamed. The next `chat` call (the next turn) re-reads the lock and picks up the new inner.
+
+**Sidecar protocol impact.** None. The sidecar wire protocol does not carry provider-swap frames; the daemon owns the `SwappableProvider` and the sidecar consumes whatever provider the daemon hands it via `Hello` / `Credentials` at the moment a `RunTurn` is dispatched. Operators reading event logs should therefore expect: a `provider:changed` event followed by an in-flight turn that finishes against the old provider, and only the *subsequent* turn's `Event::AssistantMessage { provider, .. }` reflects the new id.
+
+---
+
+## Known Security Limitations
+
+The architecture has open security findings that operators should be aware of. The supervisor / sidecar protocol is sufficient for trusted single-user workstations (Forge's current deployment model) but does not yet defend against a hostile process on the same host. Tracking issues:
+
+- **[SEC-11 / F-651](https://github.com/forge-ide/forge/issues/687)** — sidecar UDS `accept` does not verify peer credentials. Any process on the host that can `connect(2)` the supervisor's socket can impersonate a sidecar. Mitigation under design: `SO_PEERCRED` check against the spawned child's pid before completing the handshake.
+- **[SEC-12 / F-652](https://github.com/forge-ide/forge/issues/688)** — `forge_ipc::read_frame` / `read_frame_into` lack a mandatory deadline; the deadline-bearing variant `read_frame_into_with_deadline` exists (`crates/forge-ipc/src/lib.rs:437`) but is not used on every read site. A peer that opens a connection and writes one byte per minute holds the supervisor's read task indefinitely (slowloris). Mitigation under design: make a per-connection idle deadline mandatory at the framing layer.
+- **[SEC-19 / F-659](https://github.com/forge-ide/forge/issues/695)** — `SecretBytes` in the sidecar `Credentials` frame zeroizes only on the receive side (the sidecar wraps the bytes in `SecretString` straight out of the wire — see `crates/forge-agent-host/src/lib.rs:662`). The cleartext copy on the *sender* side, and any intermediate `Vec<u8>` produced by `serde_json::to_vec`, is not zeroized. A heap inspector with code-execution on the daemon could observe a recently-pushed credential before allocator reuse overwrites the buffer.
+
+These are tracked, intentionally not blocking F-608 rollout, and will close as their owning issues land. New findings should be added here with the same `SEC-NN / F-NNN` shape.
 
 ---
 

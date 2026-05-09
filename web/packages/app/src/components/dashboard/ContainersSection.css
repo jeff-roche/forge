@@ -29,7 +29,7 @@
 
 .containers-section__hint {
   margin: 0;
-  font-size: 13px;
+  font-size: var(--type-mono-md);
   color: var(--color-text-secondary);
   line-height: 1.5;
 }
@@ -41,7 +41,7 @@
   border-left: 3px solid var(--color-error);
   border-radius: var(--r-sm);
   color: var(--color-text-primary);
-  font-size: 13px;
+  font-size: var(--type-mono-md);
 }
 
 .containers-section__list {
@@ -78,12 +78,12 @@
 
 .containers-section__id {
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: var(--type-mono-md);
   color: var(--color-text-primary);
 }
 
 .containers-section__image {
-  font-size: 13px;
+  font-size: var(--type-mono-md);
   color: var(--color-text-secondary);
 }
 
@@ -103,7 +103,7 @@
   display: flex;
   gap: var(--sp-3);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   color: var(--color-text-tertiary);
 }
 
@@ -169,7 +169,7 @@
   border-radius: var(--r-sm);
   padding: var(--sp-3);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--type-body-sm);
   color: var(--color-text-secondary);
   line-height: 1.5;
   white-space: pre;
@@ -232,14 +232,14 @@
 
 .containers-banner__headline {
   margin: 0;
-  font-size: 13px;
+  font-size: var(--type-mono-md);
   font-weight: 600;
   color: var(--color-text-primary);
 }
 
 .containers-banner__detail {
   margin: 0;
-  font-size: 12px;
+  font-size: var(--type-body-sm);
   color: var(--color-text-secondary);
   line-height: 1.5;
 }

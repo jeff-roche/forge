@@ -8,6 +8,47 @@
 
 Forge has **two distinct IPC boundaries**. They must not be confused.
 
+### 4.0 Response shape rule: inline-response vs event-driven
+
+Every new IPC message — Boundary 1 (Tauri command) or Boundary 2 (UDS `IpcMessage` variant) — picks one of two response shapes. Pick by the **caller's wait semantics**, not by what feels symmetric.
+
+| Caller semantic | Shape | Examples |
+|-----------------|-------|----------|
+| Caller needs a value back, or a synchronous ack that the operation completed | **Inline pair** — request variant + response variant carried on the same connection / awaited by the same Tauri command | `ListMcpServers` → `McpServersList`; `ToggleMcpServer` → `McpToggleResult`; `ImportMcpConfig` → `McpImportResult`; `InterruptSession` → `RefineHandoff`; every shipped Tauri command returning `Result<T, String>` (`read_file`, `tree`, `start_background_agent`, …) |
+| Caller fires the command and observes the outcome through `session:event` (or another typed event channel) | **Event-driven** — request variant has no paired response; the daemon emits a `forge_core::Event` the webview is already subscribed to | `RerunMessage` → `Event::MessageRerun*`; `SelectBranch` → `Event::BranchSelected`; `DeleteBranch` → `Event::BranchDeleted`; `CompactTranscript` → `Event::ContextCompacted`; `PauseSession` / `ResumeSession` → `Event::SessionPaused` / `SessionResumed`; `SwitchProvider` (no event — pure side-effect on `SwappableProvider::swap`, in-flight turns finish on the previous provider) |
+
+**Decision procedure for a new message:**
+
+1. Does the caller need data the daemon computes (a list, a snapshot, a handoff payload)? → **Inline pair.** The response variant carries the data.
+2. Does the caller need to know the operation failed in a way the event stream wouldn't surface (unknown server name, bad import slug)? → **Inline pair.** The response variant carries an `error: Option<String>` or `Result`.
+3. Does the operation produce a `forge_core::Event` the webview is already subscribed to, and is the caller content to learn the outcome through that event? → **Event-driven.** Skip the response variant; the event *is* the contract.
+4. Is the operation fire-and-forget with no observable outcome (a pure side-effect like `SwitchProvider`)? → **Event-driven.** Log on the daemon if the call is malformed; do not synthesize a response variant just to acknowledge receipt.
+
+**Why the rule exists.** Without it, Phase 3 added inline pairs (`InterruptSession` → `RefineHandoff`) and event-driven commands (`PauseSession`, `RerunMessage`, `SwitchProvider`) under no consistent principle, and reviewers had to relitigate the choice each time. The rule above codifies the existing, working pattern so future messages slot in without a per-PR debate.
+
+**Anti-patterns:**
+
+- A response variant that carries no payload and no error — the caller learns nothing the underlying transport ack didn't already convey. Use event-driven instead.
+- Emitting an event *and* returning an inline response carrying the same payload — pick one. The interrupt + refine flow is the one allowed exception (F-604) because two distinct subscribers (the Tauri command awaiting the IPC reply and any other webview / `forge session tail` consuming the event stream) need the same shape; the caller still only awaits the inline reply.
+- An inline pair where the caller never blocks on the response — that's an event-driven flow disguised as a request/reply. Drop the response variant.
+
+**Phase 3 audit (post-F-640).** Every message variant in `crates/forge-ipc/src/lib.rs::IpcMessage` matches the rule above:
+
+| Variant | Shape | Rationale |
+|---------|-------|-----------|
+| `ListMcpServers` → `McpServersList` | inline pair | query, returns data |
+| `ToggleMcpServer` → `McpToggleResult` | inline pair | sync ack with error path |
+| `ImportMcpConfig` → `McpImportResult` | inline pair | sync ack with computed payload |
+| `InterruptSession` → `RefineHandoff` | inline pair | returns captured partial text the caller needs synchronously |
+| `RerunMessage` | event-driven | outcome surfaces through the rerun events on `session:event` |
+| `SelectBranch` | event-driven | emits `Event::BranchSelected` |
+| `DeleteBranch` | event-driven | emits `Event::BranchDeleted` |
+| `CompactTranscript` | event-driven | emits `Event::ContextCompacted` |
+| `PauseSession` / `ResumeSession` | event-driven | emit `Event::SessionPaused` / `SessionResumed` |
+| `SwitchProvider` | event-driven | pure side-effect on `SwappableProvider`; no observable outcome the caller needs |
+
+Boundary 1 (Tauri) is symmetric: every shipped `#[tauri::command]` returns `Result<T, String>` because Tauri's command machinery is request/reply by construction; the event-driven shape is encoded by *omitting* a command and emitting on the appropriate channel (`session:event`, `terminal:bytes`, etc.). The same decision procedure applies — when a webview interaction needs only an event, do not invent a Tauri command whose body returns `Ok(())`.
+
 ```
   ┌──────────────────────┐
   │  Webview (Solid)     │
