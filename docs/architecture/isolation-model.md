@@ -70,6 +70,56 @@ Whitelist scope is **session only** — never persisted across sessions. At sess
 
 Forge ships an OCI manager using `oci-spec-rs` and shelling to `podman` or `docker`. v1 requires the user to have podman or docker installed; bundling a runtime is deferred. Dashboard onboarding detects missing runtimes and surfaces install instructions. Images pulled on first use, layers cached.
 
+### 6.8 Supply-chain model (F-643)
+
+Level 2 executes user code inside images pulled from external registries. Treating those images as trusted on the basis of a tag is unsafe: tags are mutable, and an attacker who gains push access (or a registry compromise / MITM on the pull) can replace the bytes that get pulled and run inside the sandbox.
+
+Two independent gates close that gap. Both must succeed before `podman pull` writes anything to the local store.
+
+#### Gate 1 — Digest pinning at parse time
+
+[`forge_oci::ImageRef::parse`](../../crates/forge-oci/src/lib.rs) accepts three reference shapes:
+
+| Shape | Status |
+|---|---|
+| `[registry/]name@sha256:<hex>` | Always accepted. |
+| `[registry/]name:tag@sha256:<hex>` | Accepted; the digest is what runs. The tag is informational. |
+| `[registry/]name:tag` (no digest) | **Rejected** unless the canonical `[registry]/[namespace]/<name>` matches an entry in `TAG_ONLY_ALLOWLIST`. |
+
+The allowlist is a small first-party-only set (today: `oci.io/forge/`) and exists so the Forge tool images can roll tags during early Phase 3 without forcing every dev sandbox to know the latest digest. **Production deployments should still pin even allowlisted images by digest.**
+
+The rejection path returns `OciError::UntrustedTagOnlyRef` so callers — including `Level2Session::create` and any future config loader — fail loudly rather than silently pulling a mutable reference. Canonicalization (resolving an implicit `docker.io` registry and the `library/` namespace) happens before the allowlist check, so `alpine` cannot bypass it by dropping segments the allowlist would otherwise see.
+
+#### Gate 2 — Signature verification before pull
+
+[`PodmanRuntime::pull`](../../crates/forge-oci/src/podman.rs) invokes a [`SignatureVerifier`](../../crates/forge-oci/src/signature.rs) on the digest-pinned reference *before* `podman pull` runs. The default production verifier is [`CosignVerifier`], which shells to `cosign verify` in keyless mode against the configured Fulcio root + Rekor transparency log. Operators pin trusted signer identities through the standard cosign environment (`COSIGN_CERTIFICATE_IDENTITY`, `COSIGN_CERTIFICATE_OIDC_ISSUER`).
+
+A failed verification surfaces as `OciError::SignatureVerificationFailed` and aborts the pull — `podman` is never invoked.
+
+The `SignaturePolicy` enum governs how a missing verifier is handled:
+
+| Policy | Missing verifier | Signature mismatch |
+|---|---|---|
+| `Strict` | hard-fail | hard-fail |
+| `Permissive` (default) | logged warning, pull proceeds | hard-fail |
+
+Permissive is the default so existing dev environments without `cosign` continue to function. Production wiring opts into `Strict` explicitly. **The permissive escape hatch only relaxes the "verifier installed" check** — a real signature mismatch always blocks the pull regardless of policy.
+
+#### Why both gates
+
+A digest alone proves identity (the bytes Forge pulls are the bytes the digest names) but not provenance (those bytes were produced by a trusted signer). A signature alone proves provenance but not identity at the call site (a compromised CI could sign a malicious image at a tag the user knows). Together they close the loop: the user types a digest, signed by a trusted identity, and only then does `podman` see a byte.
+
+#### Tested invariants
+
+The supply-chain story has both unit and integration coverage that runs on every `cargo test -p forge-oci`:
+
+- `image_ref_rejects_tag_only_when_not_allowlisted` — non-allowlisted tag-only refs fail at parse time.
+- `image_ref_accepts_tag_only_for_allowlisted_first_party_source` — first-party allowlist works as documented.
+- `image_ref_parses_digest_pinned_form` — digest-pinned refs round-trip through parse + render with the tag dropped on the wire.
+- `pull_runs_verifier_before_invoking_podman` — verifier is consulted before the runner; a rejection short-circuits the pull.
+- `pull_strict_policy_blocks_on_missing_verifier` / `pull_permissive_policy_proceeds_when_verifier_unavailable` / `pull_permissive_policy_still_blocks_on_signature_mismatch` — the policy matrix.
+- `mismatched_signature_is_rejected` (integration) — end-to-end DoD coverage.
+
 ---
 
 ## 8. Sandboxing implementation

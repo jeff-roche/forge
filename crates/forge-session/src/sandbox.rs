@@ -1546,7 +1546,7 @@ mod tests {
         let session = Arc::new(
             Level2Session::create(
                 runtime,
-                OciImageRef::parse("alpine:3.19").unwrap(),
+                OciImageRef::parse("docker.io/library/alpine@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef").unwrap(),
                 ContainerLimits::default(),
             )
             .await
@@ -1575,7 +1575,7 @@ mod tests {
         let session = Arc::new(
             Level2Session::create(
                 runtime,
-                OciImageRef::parse("alpine:3.19").unwrap(),
+                OciImageRef::parse("docker.io/library/alpine@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef").unwrap(),
                 ContainerLimits::default(),
             )
             .await
@@ -1635,7 +1635,7 @@ mod tests {
         let session = Arc::new(
             Level2Session::create(
                 runtime,
-                OciImageRef::parse("alpine:3.19").unwrap(),
+                OciImageRef::parse("docker.io/library/alpine@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef").unwrap(),
                 ContainerLimits::default(),
             )
             .await

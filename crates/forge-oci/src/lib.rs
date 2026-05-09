@@ -6,30 +6,112 @@
 //!
 //! See `docs/architecture/crate-architecture.md` §3.6 for the design rationale
 //! and `docs/architecture/isolation-model.md` for how this slots into the
-//! agent execution model.
+//! agent execution model — including the supply-chain story (digest pinning
+//! and signature verification) that [`ImageRef`] and
+//! [`signature::SignatureVerifier`] enforce.
 
 #![deny(missing_docs)]
 
 mod podman;
 mod runner;
+pub mod signature;
 
 pub use podman::PodmanRuntime;
 pub use runner::{
     CommandOutcome, CommandRunner, RecordedCall, RecordedCalls, RecordingRunner, StubResponse,
     TokioCommandRunner,
 };
+pub use signature::{
+    CosignVerifier, NoopVerifier, SignaturePolicy, SignatureVerifier, VerificationError,
+};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+/// Allowlist of image-reference prefixes for which a tag-only (no digest)
+/// reference is accepted. Production runs should still pin even allowlisted
+/// images by digest — this list exists so the first-party Forge tool images
+/// can roll new tags during early Phase 3 without forcing every test fixture
+/// and dev sandbox to know the latest digest.
+///
+/// A prefix matches the *canonical* `[registry/]name` portion of an
+/// [`ImageRef`] (i.e. the part before the tag/digest). The empty string is
+/// not allowed; every entry must include the registry so docker.io aliases
+/// like `library/alpine` cannot accidentally satisfy the allowlist.
+const TAG_ONLY_ALLOWLIST: &[&str] = &["oci.io/forge/"];
+
+/// SHA-256 image digest (e.g. the bytes after `sha256:` in
+/// `alpine@sha256:abcdef...`). Newtype so the parser can validate the format
+/// once and downstream code never has to.
+///
+/// The wrapped string is the *full* canonical form including the `sha256:`
+/// algorithm prefix — that is what `podman pull` and `cosign verify` both
+/// expect to see verbatim.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Digest(String);
+
+impl Digest {
+    /// Parse a digest of the form `sha256:<64 lowercase hex chars>`.
+    ///
+    /// We only accept `sha256` today because that is what every relevant
+    /// registry, signer, and policy emits. When/if a stronger algorithm
+    /// becomes the default, extend this match without changing the
+    /// representation.
+    pub fn parse(input: &str) -> Result<Self, OciError> {
+        let trimmed = input.trim();
+        let (algo, hex) = trimmed.split_once(':').ok_or(OciError::InvalidDigest {
+            input: input.to_string(),
+            reason: "missing algorithm prefix (expected `sha256:<hex>`)",
+        })?;
+        if algo != "sha256" {
+            return Err(OciError::InvalidDigest {
+                input: input.to_string(),
+                reason: "only sha256 digests are accepted",
+            });
+        }
+        if hex.len() != 64
+            || !hex
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        {
+            return Err(OciError::InvalidDigest {
+                input: input.to_string(),
+                reason: "sha256 digest must be 64 lowercase hex characters",
+            });
+        }
+        Ok(Self(trimmed.to_string()))
+    }
+
+    /// Return the full canonical form including the `sha256:` prefix.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for Digest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// Reference to an OCI image, decomposed into the parts the runtime cares
 /// about.
 ///
-/// `parse` is intentionally lenient: it accepts the common forms
-/// `name`, `name:tag`, `registry/name:tag`, `registry/namespace/name:tag`.
-/// When `tag` is omitted it defaults to `latest`. When `registry` is omitted
-/// it stays `None` so callers can decide whether to default to `docker.io` or
-/// require an explicit registry.
+/// `parse` accepts three reference shapes:
+///
+/// - `[registry/]name@sha256:<hex>` — pinned by digest. Always accepted.
+/// - `[registry/]name@sha256:<hex>:tag` — digest with a human-readable tag
+///   for diagnostics. The digest is what runs.
+/// - `[registry/]name:tag` — tag-only. Rejected for any source not on the
+///   first-party tag-only allowlist (today: `oci.io/forge/`). This is the
+///   supply-chain mitigation in F-643: a tag is mutable, so an attacker who
+///   pushes to the registry can replace the bytes that get pulled and
+///   executed inside the Level 2 sandbox.
+///
+/// `name` here means the registry-qualified path (e.g.
+/// `docker.io/library/alpine`) so the allowlist check cannot be bypassed by
+/// dropping the registry — `parse` resolves an implicit `docker.io` and
+/// `library/` namespace before testing the allowlist.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ImageRef {
     /// Optional registry hostname (e.g. `docker.io`, `quay.io`).
@@ -37,12 +119,18 @@ pub struct ImageRef {
     /// Image name including any namespace (e.g. `library/alpine`,
     /// `myorg/myapp`).
     pub name: String,
-    /// Image tag (e.g. `3.19`, `latest`).
+    /// Image tag (e.g. `3.19`, `latest`). For digest-pinned references this
+    /// is informational only — `podman pull` runs on the digest.
     pub tag: String,
+    /// Pinned content digest (`sha256:<hex>`). When present, the runtime
+    /// fetches and verifies *this* exact image regardless of the tag.
+    pub digest: Option<Digest>,
 }
 
 impl ImageRef {
-    /// Construct an [`ImageRef`] from explicit parts.
+    /// Construct an [`ImageRef`] from explicit parts. Use [`Self::parse`] for
+    /// validated input — this constructor skips the supply-chain checks and
+    /// is intended for tests and explicit programmatic references.
     pub fn new(
         registry: Option<impl Into<String>>,
         name: impl Into<String>,
@@ -52,16 +140,27 @@ impl ImageRef {
             registry: registry.map(Into::into),
             name: name.into(),
             tag: tag.into(),
+            digest: None,
         }
     }
 
-    /// Parse an image reference string of the form
-    /// `[registry/]name[:tag]`.
-    ///
-    /// A leading segment counts as a registry only when it contains `.` or `:`
-    /// (port). This matches the convention `podman` and `docker` follow when
-    /// disambiguating `library/alpine` (no registry, namespace `library`)
-    /// from `quay.io/myorg/myapp`.
+    /// Construct a digest-pinned [`ImageRef`] from explicit parts.
+    pub fn with_digest(
+        registry: Option<impl Into<String>>,
+        name: impl Into<String>,
+        tag: impl Into<String>,
+        digest: Digest,
+    ) -> Self {
+        Self {
+            registry: registry.map(Into::into),
+            name: name.into(),
+            tag: tag.into(),
+            digest: Some(digest),
+        }
+    }
+
+    /// Parse an image reference. See type-level docs for the accepted
+    /// shapes and the allowlist semantics.
     pub fn parse(input: &str) -> Result<Self, OciError> {
         let trimmed = input.trim();
         if trimmed.is_empty() {
@@ -71,15 +170,22 @@ impl ImageRef {
             });
         }
 
-        let (path, tag) = match trimmed.rsplit_once(':') {
+        // Split off the digest first so a `:` inside the digest portion (or
+        // after it) cannot be misread as a tag separator.
+        let (path_and_tag, digest) = match trimmed.split_once('@') {
+            Some((before, after)) => (before, Some(Digest::parse(after)?)),
+            None => (trimmed, None),
+        };
+
+        let (path, tag) = match path_and_tag.rsplit_once(':') {
             // A `:` inside the first segment is part of the registry port,
             // not a tag separator. Detect by checking whether the substring
             // before the colon contains a `/`.
-            Some((before, after)) if before.contains('/') => (before, after.to_string()),
+            Some((before, after)) if before.contains('/') => (before, Some(after.to_string())),
             Some((before, after)) if !before.contains('/') && !after.contains('/') => {
-                (before, after.to_string())
+                (before, Some(after.to_string()))
             }
-            _ => (trimmed, "latest".to_string()),
+            _ => (path_and_tag, None),
         };
 
         let (registry, name) = match path.split_once('/') {
@@ -96,20 +202,63 @@ impl ImageRef {
             });
         }
 
+        // Tag fallback. We retain `latest` as the informational default so
+        // the renderer keeps producing the canonical `name:tag` form podman
+        // expects, but the F-643 supply-chain check below still rejects
+        // the reference if it has no digest AND is not allowlisted.
+        let tag = tag.unwrap_or_else(|| "latest".to_string());
+
+        // Supply-chain guard: a reference with no digest is only safe if the
+        // *canonical* registry-qualified path matches the first-party
+        // allowlist. We canonicalize `docker.io` and the `library/`
+        // namespace so a bare `alpine` cannot sneak past by stripping
+        // identifiers the allowlist would otherwise see.
+        if digest.is_none() {
+            let canonical = canonical_path(registry.as_deref(), &name);
+            if !TAG_ONLY_ALLOWLIST
+                .iter()
+                .any(|prefix| canonical.starts_with(prefix))
+            {
+                return Err(OciError::UntrustedTagOnlyRef {
+                    input: input.to_string(),
+                });
+            }
+        }
+
         Ok(Self {
             registry,
             name,
             tag,
+            digest,
         })
     }
 
-    /// Render the reference back into the canonical `[registry/]name:tag` form
-    /// that `podman` accepts.
+    /// Render the reference into the canonical form `podman` accepts.
+    /// Digest-pinned refs render as `[registry/]name@sha256:<hex>` so the
+    /// runtime fetches and verifies the exact bytes — the tag is dropped
+    /// from the wire form because podman uses whichever of `:tag` or
+    /// `@digest` comes last and we want the digest to win unambiguously.
     pub fn to_image_string(&self) -> String {
-        match &self.registry {
-            Some(reg) => format!("{}/{}:{}", reg, self.name, self.tag),
-            None => format!("{}:{}", self.name, self.tag),
+        let path = match &self.registry {
+            Some(reg) => format!("{}/{}", reg, self.name),
+            None => self.name.clone(),
+        };
+        match &self.digest {
+            Some(d) => format!("{}@{}", path, d.as_str()),
+            None => format!("{}:{}", path, self.tag),
         }
+    }
+}
+
+/// Canonicalize a `(registry, name)` pair into a single comparison key for
+/// the [`TAG_ONLY_ALLOWLIST`]. The convention is podman's: missing registry
+/// is `docker.io`, missing namespace under docker.io is `library/`.
+fn canonical_path(registry: Option<&str>, name: &str) -> String {
+    let registry = registry.unwrap_or("docker.io");
+    if registry == "docker.io" && !name.contains('/') {
+        format!("docker.io/library/{}", name)
+    } else {
+        format!("{}/{}", registry, name)
     }
 }
 
@@ -213,6 +362,41 @@ pub enum OciError {
         input: String,
         /// Why it failed.
         reason: &'static str,
+    },
+
+    /// A digest string did not match the accepted form
+    /// (`sha256:<64 lowercase hex chars>`).
+    #[error("invalid image digest '{input}': {reason}")]
+    InvalidDigest {
+        /// Original digest input that failed to parse.
+        input: String,
+        /// Why it failed.
+        reason: &'static str,
+    },
+
+    /// The image reference is tag-only and the source is not on the
+    /// first-party allowlist. F-643 supply-chain mitigation: a mutable tag
+    /// from a third-party registry could be repointed by a registry
+    /// compromise and yield code execution inside the Level 2 sandbox.
+    /// Pin the image by digest (`name@sha256:<hex>`) instead.
+    #[error(
+        "image reference '{input}' is tag-only and not on the digest-pin allowlist; \
+         pin by digest (e.g. `{input}@sha256:<hex>`) to use this image"
+    )]
+    UntrustedTagOnlyRef {
+        /// Original reference the caller supplied.
+        input: String,
+    },
+
+    /// Signature / content-trust verification rejected the image before it
+    /// was pulled. F-643 supply-chain mitigation.
+    #[error("signature verification failed for image '{image}': {reason}")]
+    SignatureVerificationFailed {
+        /// Image reference that failed verification.
+        image: String,
+        /// Reason surfaced by the verifier (cosign output, policy mismatch,
+        /// etc.).
+        reason: String,
     },
 
     /// Runtime spawn / I/O failure (process couldn't be launched, pipe died,
@@ -662,49 +846,113 @@ pub trait ContainerRuntime: Send + Sync {
 mod tests {
     use super::*;
 
+    /// Convenience: a 64-char lowercase hex literal for use in tests that
+    /// need a syntactically valid sha256 digest.
+    const SHA: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
     #[test]
-    fn image_ref_parses_bare_name() {
-        let r = ImageRef::parse("alpine").unwrap();
-        assert_eq!(r.registry, None);
-        assert_eq!(r.name, "alpine");
-        assert_eq!(r.tag, "latest");
-        assert_eq!(r.to_image_string(), "alpine:latest");
+    fn image_ref_rejects_bare_name_when_not_allowlisted() {
+        // F-643: a bare image name resolves to docker.io/library/<name> with
+        // tag `latest` — both the name source and the tag are mutable, so we
+        // refuse to pull it. Callers must pin by digest.
+        let err = ImageRef::parse("alpine").unwrap_err();
+        assert!(
+            matches!(err, OciError::UntrustedTagOnlyRef { .. }),
+            "expected UntrustedTagOnlyRef, got {err:?}"
+        );
     }
 
     #[test]
-    fn image_ref_parses_name_and_tag() {
-        let r = ImageRef::parse("alpine:3.19").unwrap();
-        assert_eq!(r.registry, None);
-        assert_eq!(r.name, "alpine");
-        assert_eq!(r.tag, "3.19");
+    fn image_ref_rejects_tag_only_when_not_allowlisted() {
+        // F-643: tag-only references are mutable; reject for non-allowlisted
+        // sources. End-state callers must supply `@sha256:<hex>`.
+        for input in [
+            "alpine:3.19",
+            "library/alpine:1",
+            "docker.io/library/alpine:3.19",
+            "quay.io/myorg/myapp:v1",
+            "localhost:5000/myapp:dev",
+        ] {
+            let err = ImageRef::parse(input).unwrap_err();
+            assert!(
+                matches!(err, OciError::UntrustedTagOnlyRef { .. }),
+                "expected UntrustedTagOnlyRef for {input:?}, got {err:?}"
+            );
+        }
     }
 
     #[test]
-    fn image_ref_parses_full_form_round_trip() {
-        let r = ImageRef::parse("docker.io/library/alpine:3.19").unwrap();
+    fn image_ref_accepts_tag_only_for_allowlisted_first_party_source() {
+        // F-643: the first-party `oci.io/forge/` namespace is allowlisted so
+        // dev/test fixtures can roll tags without forcing every call site to
+        // know the latest digest. Production should still pin even
+        // allowlisted images by digest.
+        let r = ImageRef::parse("oci.io/forge/rust-tools:0.1").unwrap();
+        assert_eq!(r.registry.as_deref(), Some("oci.io"));
+        assert_eq!(r.name, "forge/rust-tools");
+        assert_eq!(r.tag, "0.1");
+        assert!(r.digest.is_none());
+        assert_eq!(r.to_image_string(), "oci.io/forge/rust-tools:0.1");
+    }
+
+    #[test]
+    fn image_ref_parses_digest_pinned_form() {
+        // F-643: `@sha256:<hex>` is the supply-chain-safe form. It's
+        // accepted regardless of source because the digest is the
+        // immutable identity of the image bytes.
+        let input = format!("docker.io/library/alpine@sha256:{SHA}");
+        let r = ImageRef::parse(&input).unwrap();
         assert_eq!(r.registry.as_deref(), Some("docker.io"));
         assert_eq!(r.name, "library/alpine");
+        assert_eq!(
+            r.digest.as_ref().map(|d| d.as_str()),
+            Some(format!("sha256:{SHA}").as_str())
+        );
+        // Renderer drops the tag on the wire so podman cannot resolve the
+        // tag in preference to the digest.
+        assert_eq!(
+            r.to_image_string(),
+            format!("docker.io/library/alpine@sha256:{SHA}")
+        );
+    }
+
+    #[test]
+    fn image_ref_parses_digest_with_informational_tag() {
+        // Some operators want a human-readable tag *and* a digest in their
+        // config files. The digest is what runs.
+        let input = format!("docker.io/library/alpine:3.19@sha256:{SHA}");
+        let r = ImageRef::parse(&input).unwrap();
         assert_eq!(r.tag, "3.19");
-        assert_eq!(r.to_image_string(), "docker.io/library/alpine:3.19");
+        assert!(r.digest.is_some());
+        assert_eq!(
+            r.to_image_string(),
+            format!("docker.io/library/alpine@sha256:{SHA}")
+        );
     }
 
     #[test]
-    fn image_ref_parses_namespace_no_registry() {
-        // `library/alpine` is a namespace + name, not a registry — there's no
-        // `.` or `:` in the head segment.
-        let r = ImageRef::parse("library/alpine:1").unwrap();
-        assert_eq!(r.registry, None);
-        assert_eq!(r.name, "library/alpine");
-        assert_eq!(r.tag, "1");
-    }
-
-    #[test]
-    fn image_ref_parses_registry_with_port() {
-        let r = ImageRef::parse("localhost:5000/myapp:dev").unwrap();
-        assert_eq!(r.registry.as_deref(), Some("localhost:5000"));
-        assert_eq!(r.name, "myapp");
-        assert_eq!(r.tag, "dev");
-        assert_eq!(r.to_image_string(), "localhost:5000/myapp:dev");
+    fn image_ref_rejects_malformed_digest() {
+        // Bad algorithm
+        assert!(matches!(
+            ImageRef::parse("alpine@md5:0123456789abcdef0123456789abcdef"),
+            Err(OciError::InvalidDigest { .. })
+        ));
+        // Wrong hex length
+        assert!(matches!(
+            ImageRef::parse("alpine@sha256:abc"),
+            Err(OciError::InvalidDigest { .. })
+        ));
+        // Uppercase hex (we require canonical lowercase)
+        let upper = "ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        assert!(matches!(
+            ImageRef::parse(&format!("alpine@sha256:{upper}")),
+            Err(OciError::InvalidDigest { .. })
+        ));
+        // Missing algorithm prefix
+        assert!(matches!(
+            ImageRef::parse(&format!("alpine@{SHA}")),
+            Err(OciError::InvalidDigest { .. })
+        ));
     }
 
     #[test]
@@ -717,6 +965,12 @@ mod tests {
             ImageRef::parse("   "),
             Err(OciError::InvalidImageRef { .. })
         ));
+    }
+
+    #[test]
+    fn digest_round_trip_display() {
+        let d = Digest::parse(&format!("sha256:{SHA}")).unwrap();
+        assert_eq!(format!("{}", d), format!("sha256:{SHA}"));
     }
 
     #[test]
@@ -799,7 +1053,7 @@ mod tests {
     async fn mock_runtime_satisfies_trait() {
         let rt: &dyn ContainerRuntime = &MockRuntime;
         rt.detect().await.unwrap();
-        let img = ImageRef::parse("alpine:3.19").unwrap();
+        let img = ImageRef::parse(&format!("docker.io/library/alpine@sha256:{SHA}")).unwrap();
         rt.pull(&img).await.unwrap();
         // `create`/`exec` accept caller-borrowed `&str` slices directly —
         // no `.into()` allocation required.
@@ -837,7 +1091,7 @@ mod tests {
         // F-680: argv parameters are `&[&str]` so callers with borrowed
         // string slices can call directly without allocating a Vec<String>.
         let rt: &dyn ContainerRuntime = &MockRuntime;
-        let img = ImageRef::parse("alpine:3.19").unwrap();
+        let img = ImageRef::parse(&format!("docker.io/library/alpine@sha256:{SHA}")).unwrap();
         let argv: [&str; 2] = ["echo", "hi"];
         let _ = rt
             .create(&img, &argv, &SecurityOpts::hardened_default())

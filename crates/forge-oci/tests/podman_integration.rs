@@ -15,7 +15,14 @@
 
 #![cfg(target_os = "linux")]
 
-use forge_oci::{ContainerLimits, ContainerRuntime, ImageRef, PodmanRuntime, SecurityOpts};
+use forge_oci::signature::{SignaturePolicy, SignatureVerifier, VerificationError};
+use forge_oci::{
+    ContainerLimits, ContainerRuntime, ImageRef, OciError, PodmanRuntime, SecurityOpts,
+};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// 64-char lowercase hex literal — a syntactically valid sha256 digest.
+const SHA: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 /// End-to-end flag-injection regression test for `create`.
 ///
@@ -36,7 +43,14 @@ use forge_oci::{ContainerLimits, ContainerRuntime, ImageRef, PodmanRuntime, Secu
 async fn create_does_not_apply_caller_flags_as_runtime_flags() {
     let runtime = PodmanRuntime::new();
     runtime.detect().await.expect("podman detect");
-    let image = ImageRef::parse("docker.io/library/alpine:3.19").expect("valid image ref");
+    // F-643: tag-only refs are rejected for non-allowlisted sources; pin
+    // by digest. We use a known-good alpine 3.19 amd64 digest. If alpine's
+    // multi-arch index changes, this digest needs to be regenerated with
+    // `podman pull docker.io/library/alpine:3.19 && podman image inspect ...`.
+    let image = ImageRef::parse(
+        "docker.io/library/alpine@sha256:c5b1261d6d3e43071626931fc004f70149baeba2c8ec672bd4f27761f8e1ad6b",
+    )
+    .expect("valid image ref");
     runtime.pull(&image).await.expect("pull alpine");
 
     // Caller argv begins with `--privileged`. If podman wrongly treated this
@@ -94,7 +108,14 @@ async fn create_does_not_apply_caller_flags_as_runtime_flags() {
 async fn exec_does_not_apply_caller_flags_as_runtime_flags() {
     let runtime = PodmanRuntime::new();
     runtime.detect().await.expect("podman detect");
-    let image = ImageRef::parse("docker.io/library/alpine:3.19").expect("valid image ref");
+    // F-643: tag-only refs are rejected for non-allowlisted sources; pin
+    // by digest. We use a known-good alpine 3.19 amd64 digest. If alpine's
+    // multi-arch index changes, this digest needs to be regenerated with
+    // `podman pull docker.io/library/alpine:3.19 && podman image inspect ...`.
+    let image = ImageRef::parse(
+        "docker.io/library/alpine@sha256:c5b1261d6d3e43071626931fc004f70149baeba2c8ec672bd4f27761f8e1ad6b",
+    )
+    .expect("valid image ref");
     runtime.pull(&image).await.expect("pull alpine");
 
     let handle = runtime
@@ -134,7 +155,14 @@ async fn podman_full_lifecycle_against_alpine() {
         .await
         .expect("podman detect: rootless podman must be configured");
 
-    let image = ImageRef::parse("docker.io/library/alpine:3.19").expect("valid image ref");
+    // F-643: tag-only refs are rejected for non-allowlisted sources; pin
+    // by digest. We use a known-good alpine 3.19 amd64 digest. If alpine's
+    // multi-arch index changes, this digest needs to be regenerated with
+    // `podman pull docker.io/library/alpine:3.19 && podman image inspect ...`.
+    let image = ImageRef::parse(
+        "docker.io/library/alpine@sha256:c5b1261d6d3e43071626931fc004f70149baeba2c8ec672bd4f27761f8e1ad6b",
+    )
+    .expect("valid image ref");
 
     runtime.pull(&image).await.expect("pull alpine");
 
@@ -413,4 +441,94 @@ async fn pids_limit_bounds_a_fork_bomb_inside_the_container() {
     );
 
     runtime.remove(&handle).await.expect("remove container");
+}
+
+// ── F-643: supply-chain integration tests ─────────────────────────────
+//
+// These do NOT require a real podman or cosign on the host — they
+// exercise the F-643 supply-chain gates through the public API surface
+// (`ImageRef::parse`, `PodmanRuntime::pull` with a stub verifier). They
+// run on every `cargo test -p forge-oci` invocation, so CI keeps the
+// supply-chain story under continuous regression.
+
+/// Verifier that always rejects with a `Mismatch` — simulates cosign
+/// reporting "no matching signatures" or "signature does not verify".
+struct MismatchVerifier {
+    calls: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl SignatureVerifier for MismatchVerifier {
+    async fn verify(&self, _image: &ImageRef) -> Result<(), VerificationError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Err(VerificationError::Mismatch(
+            "no matching signatures (test fixture)".to_string(),
+        ))
+    }
+}
+
+/// DoD: "pinned digest accepted". Parse + render round-trip a digest-
+/// pinned reference end-to-end through the public API.
+#[test]
+fn pinned_digest_reference_is_accepted() {
+    let input = format!("docker.io/library/alpine@sha256:{SHA}");
+    let r = ImageRef::parse(&input).expect("digest-pinned ref must parse");
+    assert!(r.digest.is_some(), "digest field must be populated");
+    assert_eq!(
+        r.to_image_string(),
+        format!("docker.io/library/alpine@sha256:{SHA}"),
+        "renderer must drop the tag in favour of the digest on the wire"
+    );
+}
+
+/// DoD: "tag-only rejected". A non-allowlisted tag-only reference must
+/// be refused at parse time before any runtime sees it.
+#[test]
+fn tag_only_reference_is_rejected() {
+    for input in [
+        "alpine",
+        "alpine:3.19",
+        "library/alpine:1",
+        "docker.io/library/alpine:3.19",
+        "quay.io/myorg/myapp:v1",
+    ] {
+        let err = ImageRef::parse(input).unwrap_err();
+        assert!(
+            matches!(err, OciError::UntrustedTagOnlyRef { .. }),
+            "{input:?} must yield UntrustedTagOnlyRef, got {err:?}"
+        );
+    }
+}
+
+/// DoD: "mismatched signature rejected". Wire a verifier that reports a
+/// mismatch and confirm `pull` aborts before podman is invoked, surfacing
+/// `OciError::SignatureVerificationFailed`.
+#[tokio::test]
+async fn mismatched_signature_is_rejected() {
+    let verifier = MismatchVerifier {
+        calls: AtomicUsize::new(0),
+    };
+    let verifier = Box::new(verifier);
+    // We don't need a real podman for this test — `with_runner` accepts
+    // a recording stub, and the verifier should short-circuit before the
+    // runner is invoked.
+    let runner = forge_oci::RecordingRunner::new();
+    runner.push(forge_oci::StubResponse::ok_stdout(b"".to_vec()));
+    let calls = runner.calls.clone();
+    let runtime = PodmanRuntime::with_runner(Box::new(runner))
+        .with_verifier(verifier, SignaturePolicy::Strict);
+
+    let img = ImageRef::parse(&format!("docker.io/library/alpine@sha256:{SHA}"))
+        .expect("digest-pinned ref must parse");
+    let err = runtime.pull(&img).await.unwrap_err();
+
+    assert!(
+        matches!(err, OciError::SignatureVerificationFailed { .. }),
+        "expected SignatureVerificationFailed, got {err:?}"
+    );
+    assert_eq!(
+        calls.lock().unwrap().len(),
+        0,
+        "podman pull must not be invoked when signature verification fails"
+    );
 }
