@@ -173,6 +173,19 @@ pub enum Event {
         model: String,
         tokens_in: u64,
         tokens_out: u64,
+        /// F-669: Provider-reported cost for this tick — **not authoritative**.
+        ///
+        /// Carries whatever value the provider returned at emission time
+        /// (often `0.0` when the provider doesn't surface a per-call cost).
+        /// `forge-session::usage_flush` deliberately ignores this field and
+        /// reprices every tick from the embedded `PriceTable` at flush time,
+        /// so the canonical reported cost lives on
+        /// [`crate::usage::MonthlyAggregate`] (`cost` per bucket) and on
+        /// [`crate::usage::SessionUsage`] for live readouts.
+        ///
+        /// UI surfaces may display this value for live, in-flight token
+        /// readouts, but must reconcile against `MonthlyAggregate::cost`
+        /// after flush — never cache or relay this field as billing-truth.
         cost_usd: f64,
         scope: RosterScope,
     },
