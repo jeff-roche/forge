@@ -9,6 +9,7 @@ import {
   installInstructionsUrl,
 } from './ContainersSection';
 import type { RuntimeStatus } from '../../ipc/containers';
+import { clearToastsForTesting, toasts } from '../toast';
 
 vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn(async () => () => undefined),
@@ -65,16 +66,34 @@ describe('ContainersSection (F-597)', () => {
   beforeEach(() => {
     const { fn } = makeBackend();
     setInvokeForTesting(fn as never);
+    clearToastsForTesting();
   });
 
   afterEach(() => {
     setInvokeForTesting(null);
     cleanup();
+    clearToastsForTesting();
   });
 
   it('renders the empty state when the registry is empty', async () => {
     const { findByTestId } = render(() => <ContainersSection />);
     expect(await findByTestId('containers-empty')).toBeTruthy();
+  });
+
+  it('renders a skeleton loading state during the IPC fetch (F-684)', async () => {
+    const fn = vi.fn(async (cmd: string) => {
+      if (cmd === 'list_active_containers') {
+        return new Promise(() => undefined);
+      }
+      return undefined;
+    });
+    setInvokeForTesting(fn as never);
+    const { findByTestId, queryByText } = render(() => <ContainersSection />);
+    const skeleton = await findByTestId('containers-loading');
+    expect(skeleton.getAttribute('role')).toBe('status');
+    expect(skeleton.getAttribute('aria-busy')).toBe('true');
+    // Plain-text "containers · loading" copy must be gone.
+    expect(queryByText(/containers · loading/i)).toBeFalsy();
   });
 
   it('renders one row per registered container', async () => {
@@ -125,7 +144,31 @@ describe('ContainersSection (F-597)', () => {
     });
   });
 
-  it('clicking REMOVE invokes remove_container and drops the row from the list', async () => {
+  it('clicking REMOVE opens a confirm modal and does NOT call remove_container until confirmed', async () => {
+    const { fn, state } = makeBackend({
+      containers: [
+        {
+          container_id: 'cid-1',
+          session_id: 'sess-1',
+          image: 'alpine:3.19',
+          started_at: new Date().toISOString(),
+          stopped: false,
+        },
+      ],
+    });
+    setInvokeForTesting(fn as never);
+
+    const { findByTestId } = render(() => <ContainersSection />);
+    const remove = (await findByTestId('container-remove-cid-1')) as HTMLButtonElement;
+    fireEvent.click(remove);
+
+    const modal = await findByTestId('container-remove-modal');
+    expect(modal.getAttribute('role')).toBe('dialog');
+    expect(modal.getAttribute('aria-modal')).toBe('true');
+    expect(state.removeCalls).toEqual([]);
+  });
+
+  it('REMOVE confirm flow: cancelling closes the modal without invoking remove_container', async () => {
     const { fn, state } = makeBackend({
       containers: [
         {
@@ -140,11 +183,64 @@ describe('ContainersSection (F-597)', () => {
     setInvokeForTesting(fn as never);
 
     const { findByTestId, queryByTestId } = render(() => <ContainersSection />);
-    const remove = (await findByTestId('container-remove-cid-1')) as HTMLButtonElement;
-    fireEvent.click(remove);
+    fireEvent.click((await findByTestId('container-remove-cid-1')) as HTMLButtonElement);
+    await findByTestId('container-remove-modal');
+
+    fireEvent.click((await findByTestId('container-remove-cancel')) as HTMLButtonElement);
+    await waitFor(() => {
+      expect(queryByTestId('container-remove-modal')).toBeNull();
+    });
+    expect(state.removeCalls).toEqual([]);
+  });
+
+  it('REMOVE confirm flow: confirming invokes remove_container and drops the row from the list', async () => {
+    const { fn, state } = makeBackend({
+      containers: [
+        {
+          container_id: 'cid-1',
+          session_id: 'sess-1',
+          image: 'alpine:3.19',
+          started_at: new Date().toISOString(),
+          stopped: false,
+        },
+      ],
+    });
+    setInvokeForTesting(fn as never);
+
+    const { findByTestId, queryByTestId } = render(() => <ContainersSection />);
+    fireEvent.click((await findByTestId('container-remove-cid-1')) as HTMLButtonElement);
+    fireEvent.click((await findByTestId('container-remove-confirm')) as HTMLButtonElement);
+
     await waitFor(() => {
       expect(state.removeCalls).toEqual(['cid-1']);
       expect(queryByTestId('container-row-cid-1')).toBeNull();
+      expect(queryByTestId('container-remove-modal')).toBeNull();
+    });
+  });
+
+  it('clicking STOP pushes a confirmation toast after the IPC succeeds', async () => {
+    const { fn, state } = makeBackend({
+      containers: [
+        {
+          container_id: 'cid-1',
+          session_id: 'sess-1',
+          image: 'alpine:3.19',
+          started_at: new Date().toISOString(),
+          stopped: false,
+        },
+      ],
+    });
+    setInvokeForTesting(fn as never);
+
+    const { findByTestId } = render(() => <ContainersSection />);
+    fireEvent.click((await findByTestId('container-stop-cid-1')) as HTMLButtonElement);
+
+    await waitFor(() => {
+      expect(state.stopCalls).toEqual(['cid-1']);
+      const queue = toasts();
+      expect(queue.length).toBe(1);
+      expect(queue[0]!.kind).toBe('info');
+      expect(queue[0]!.message).toContain('stopped');
     });
   });
 

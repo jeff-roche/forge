@@ -371,6 +371,7 @@ pub struct CrashDump {
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // F-652: tests still drive the deprecated bare read_frame helpers.
 mod tests {
     use super::*;
     use chrono::TimeZone;

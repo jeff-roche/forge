@@ -40,4 +40,11 @@ def_enabled: boolean,
  * User's `[memory.enabled.<agent>]` override, if present in settings.
  * Frontend uses this to render the toggle's "set" vs "inherit" state.
  */
-settings_override: boolean | null, };
+settings_override: boolean | null, 
+/**
+ * F-649: when populated, this row represents an agent def whose name
+ * failed validation (e.g. a path-traversal stem that slipped past
+ * parse-time gating). The dashboard should surface the row as an
+ * error rather than hide the regression. `None` for healthy rows.
+ */
+error: string | null, };

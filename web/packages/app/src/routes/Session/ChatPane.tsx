@@ -410,22 +410,19 @@ const ToolCallCard: Component<{
         'tool-call-card--awaiting': props.turn.status === 'awaiting-approval',
         'tool-call-card--expanded': expanded(),
       }}
-      tabIndex={props.turn.status === 'awaiting-approval' ? 0 : undefined}
       ref={cardRef}
     >
-      {/* Collapsed row. Acts as the expand/collapse affordance; keyboard
-          activation via Enter/Space on the role="button" element. */}
+      {/* Collapsed row. Single keyboard activation target: tabIndex, role,
+          onClick, and onKeyDown all live here so ARIA semantics and focus
+          order agree (WCAG 2.4.3). The outer card carries the
+          ApprovalPrompt's bubble-phase keydown listener — keys originating on
+          the row bubble up and reach the prompt's "approve on Enter" handler
+          while the row's own toggle stays a no-op during approval. */}
       <div
         class="tool-call-card__row"
         data-testid={`tool-call-row-${props.turn.tool_call_id}`}
         role={canExpand() ? 'button' : undefined}
-        tabIndex={
-          canExpand()
-            ? props.turn.status === 'awaiting-approval'
-              ? -1
-              : 0
-            : undefined
-        }
+        tabIndex={canExpand() ? 0 : undefined}
         aria-expanded={canExpand() ? expanded() : undefined}
         aria-controls={
           canExpand() ? `tool-call-body-${props.turn.tool_call_id}` : undefined
