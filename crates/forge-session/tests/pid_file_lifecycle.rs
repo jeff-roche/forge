@@ -1,3 +1,4 @@
+#![allow(deprecated)] // F-652: tests/benches still drive the deprecated bare read_frame helpers.
 //! Integration test: `forged` owns its pid file lifecycle (F-049, F-338).
 //!
 //! Persistent-mode `forged` must:

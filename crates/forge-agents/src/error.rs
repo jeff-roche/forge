@@ -32,6 +32,16 @@ pub enum Error {
         limit: u64,
     },
 
+    /// F-649: an agent definition's `name` (or its file-stem fallback) failed
+    /// path-traversal-safe validation. The id lands on disk as
+    /// `<memory_root>/<name>.md`; accepting `/`, `\`, `..`, leading `.`,
+    /// whitespace, or oversized stems would let a hostile or careless agent
+    /// definition escape the memory root or render confusingly in CLI/UI.
+    /// Mirrors the rules used by [`forge_core::skill::SkillId`] plus a
+    /// 64-byte length cap matching the IPC `MAX_AGENT_ID_BYTES` ceiling.
+    #[error("invalid agent name {name:?}: {reason}")]
+    InvalidAgentName { name: String, reason: String },
+
     /// Parsing / IO / other non-isolation failures.
     #[error(transparent)]
     Other(#[from] anyhow::Error),

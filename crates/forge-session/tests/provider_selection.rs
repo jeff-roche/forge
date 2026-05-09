@@ -1,3 +1,4 @@
+#![allow(deprecated)] // F-652: tests/benches still drive the deprecated bare read_frame helpers.
 //! Integration tests for `forged --provider <spec>` dispatch (F-038).
 //!
 //! Two scenarios:

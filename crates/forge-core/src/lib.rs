@@ -5,6 +5,7 @@ mod error;
 mod event;
 mod event_log;
 mod event_sink;
+pub mod http;
 pub mod ids;
 pub mod mcp_state;
 pub mod meta;
