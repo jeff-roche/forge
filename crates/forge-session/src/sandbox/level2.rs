@@ -516,7 +516,14 @@ mod tests {
     }
 
     fn alpine() -> ImageRef {
-        ImageRef::parse("alpine:3.19").unwrap()
+        // F-643: tag-only references are rejected at parse time for
+        // non-allowlisted sources. Tests use a syntactically valid digest
+        // — these tests don't actually contact a registry, so the digest
+        // contents are irrelevant; only the supply-chain shape matters.
+        ImageRef::parse(
+            "docker.io/library/alpine@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .unwrap()
     }
 
     #[tokio::test]
@@ -536,7 +543,10 @@ mod tests {
         // image is local before create), create (so the cgroup leaf
         // is shaped before exec), start (so exec has a running ns).
         assert_eq!(mock.calls(), vec!["pull", "create", "start"]);
-        assert_eq!(session.image().to_image_string(), "alpine:3.19");
+        assert_eq!(
+            session.image().to_image_string(),
+            "docker.io/library/alpine@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        );
         assert_eq!(session.handle().id, "mock-container");
     }
 
