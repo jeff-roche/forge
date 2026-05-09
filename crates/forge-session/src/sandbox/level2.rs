@@ -42,7 +42,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use forge_oci::{ContainerHandle, ContainerRuntime, ImageRef, OciError};
+use forge_oci::{ContainerHandle, ContainerRuntime, ImageRef, OciError, SecurityOpts};
 
 /// Binary used by [`Level2Session::drop`]'s panic-safety net to reap
 /// a leaked container. Hardcoded because the only `ContainerRuntime`
@@ -201,7 +201,17 @@ impl Level2Session {
         limits: ContainerLimits,
     ) -> Result<Self, OciError> {
         runtime.pull(&image).await?;
-        let handle = runtime.create(&image, Self::default_init_argv()).await?;
+        // F-642: every Level 2 container is created with the strict
+        // hardening defaults — no-new-privileges, cap-drop ALL, read-only
+        // rootfs, no network, keep-id user namespace. Documented at
+        // `docs/architecture/isolation-model.md` §8.3.
+        let handle = runtime
+            .create(
+                &image,
+                Self::default_init_argv(),
+                &SecurityOpts::hardened_default(),
+            )
+            .await?;
         runtime.start(&handle).await?;
         // Operator-facing notice when limits are configured but not
         // yet enforced. Until follow-up #631 lands, the container
@@ -453,6 +463,9 @@ mod tests {
         calls: Mutex<Vec<String>>,
         // Optional canned exec outcome.
         exec_outcome: Mutex<Option<ExecResult>>,
+        // Last SecurityOpts seen by `create`, captured for F-642 tests
+        // that need to verify the hardened defaults reached the trait.
+        last_create_opts: Mutex<Option<SecurityOpts>>,
     }
 
     impl MockRuntime {
@@ -461,6 +474,9 @@ mod tests {
         }
         fn record(&self, name: &str) {
             self.calls.lock().unwrap().push(name.to_string());
+        }
+        fn last_create_opts(&self) -> Option<SecurityOpts> {
+            self.last_create_opts.lock().unwrap().clone()
         }
     }
 
@@ -478,8 +494,10 @@ mod tests {
             &self,
             _image: &ImageRef,
             _argv: &[&str],
+            opts: &SecurityOpts,
         ) -> Result<ContainerHandle, OciError> {
             self.record("create");
+            *self.last_create_opts.lock().unwrap() = Some(opts.clone());
             Ok(ContainerHandle::new("mock-container"))
         }
         async fn start(&self, _handle: &ContainerHandle) -> Result<(), OciError> {
@@ -662,6 +680,32 @@ mod tests {
         // Defuse for the actual drop in this test environment so we
         // don't fork off a real `podman rm -f`.
         session.disable_drop_cleanup();
+    }
+
+    // ── F-642: Level2Session passes hardened defaults to runtime.create ──
+
+    #[tokio::test]
+    async fn create_passes_hardened_security_opts_to_runtime() {
+        // Load-bearing F-642 invariant: every Level 2 container must be
+        // created with the strict hardening preset. If a refactor drops
+        // this propagation, the integration test would still pass with
+        // a mock runtime — this test pins the explicit opt-in.
+        let mock: Arc<MockRuntime> = Arc::new(MockRuntime::default());
+        let runtime: Arc<dyn ContainerRuntime> = mock.clone();
+
+        let session = Level2Session::create(runtime, alpine(), ContainerLimits::default())
+            .await
+            .unwrap();
+        session.disable_drop_cleanup();
+
+        let opts = mock
+            .last_create_opts()
+            .expect("runtime.create must have been invoked");
+        assert_eq!(
+            opts,
+            SecurityOpts::hardened_default(),
+            "Level2Session must pass the hardened SecurityOpts preset to runtime.create"
+        );
     }
 
     // ── ContainerLimits flag shaping ─────────────────────────────────
@@ -874,6 +918,25 @@ mod tests {
         // create's argv ends with the init argv we shipped.
         let create_args = &calls[1].1;
         assert!(create_args.ends_with(&["sleep".into(), "infinity".into()]));
+        // F-642: every hardening flag must be present in the create argv —
+        // end-to-end proof that Level2Session ships the strict preset
+        // through the trait into PodmanRuntime's flag rendering.
+        for required in [
+            "--security-opt",
+            "no-new-privileges",
+            "--cap-drop",
+            "ALL",
+            "--read-only",
+            "--network",
+            "none",
+            "--userns",
+            "keep-id",
+        ] {
+            assert!(
+                create_args.iter().any(|a| a == required),
+                "create argv missing F-642 hardening flag {required:?}: {create_args:?}"
+            );
+        }
         // exec's argv carries the caller's command after the container id.
         let exec_args = &calls[3].1;
         assert!(exec_args.ends_with(&["echo".into(), "hello".into()]));
