@@ -125,14 +125,10 @@ for the duration of the session. The lifecycle, owned by
    `Level2Unavailable` and trigger auto-fallback (see below):
    `RuntimeMissing`, `RuntimeBroken`, `RootlessUnavailable`.
 2. **Pull** — `runtime.pull(image)`. Idempotent; layers cached.
-3. **Create** — `runtime.create(image, ["sleep", "infinity"])`. The
-   `sleep infinity` init keeps the container alive between `exec`
-   calls. Resource limits attach at this step in the long-term
-   design (see below) — **deferred to follow-up #631**; containers
-   currently run with the host slice's default limits, and
-   `Level2Session::create` emits a `tracing::warn!` whenever a
-   non-default `ContainerLimits` is passed so operators are not
-   surprised at runtime.
+3. **Create** — `runtime.create(image, ["sleep", "infinity"], &opts)`.
+   The `sleep infinity` init keeps the container alive between `exec`
+   calls. The `opts` carry both the F-642 security flags and the F-654
+   cgroup caps; both apply at create time (see below).
 4. **Start** — `runtime.start(handle)`. Container is now ready for
    `exec`.
 5. **Exec, repeated** — every step in the session runs through
@@ -215,14 +211,18 @@ auditing the daemon's `tracing` log can grep for the same fixed shape.
 
 Per-step caps land on the container's cgroup v2 leaf at **create
 time**, not exec time — `podman exec` does not accept resource
-flags. `ContainerLimits` captures the three caps Phase 1 cares
+flags. F-654 routes them through `forge_oci::SecurityOpts::limits`
+so the same `runtime.create(...)` call applies both the security
+flags and the cgroup caps. `forge_oci::ContainerLimits` (re-exported
+as `level2::ContainerLimits`) captures the four caps Phase 3 cares
 about:
 
-| Field | podman flag | Maps to |
-|---|---|---|
-| `cpus: Option<f32>` | `--cpus <N>` | cgroup v2 `cpu.max` |
-| `memory_bytes: Option<u64>` | `--memory <bytes>` | cgroup v2 `memory.max` |
-| `pids_max: Option<u64>` | `--pids-limit <N>` | cgroup v2 `pids.max` |
+| Field | podman flag | Unit | Maps to |
+|---|---|---|---|
+| `cpus: Option<f32>` | `--cpus <N>` | float CPU shares | cgroup v2 `cpu.max` |
+| `memory_bytes: Option<u64>` | `--memory <bytes>` | bytes | cgroup v2 `memory.max` |
+| `memory_swap_bytes: Option<u64>` | `--memory-swap <bytes>` | bytes; equal to `memory_bytes` disables swap | cgroup v2 `memory.swap.max` |
+| `pids_max: Option<u64>` | `--pids-limit <N>` | process count | cgroup v2 `pids.max` |
 
 These map directly onto the same intent as the Level-1
 `SandboxConfig` — `cpu_seconds` ↔ `--cpus`, `address_space_bytes`
@@ -230,16 +230,24 @@ These map directly onto the same intent as the Level-1
 enforcement (per-container) instead of `setrlimit` (per-process /
 per-uid).
 
-> **Known gap, tracked as a follow-up (issue #631).** F-595's
-> `ContainerRuntime::create` signature accepts only
-> `(image, argv)`. To preserve the F-595 public API (per F-596's
-> constraints), `Level2Session::create` currently stores the
-> `ContainerLimits` on the session for observability rather than
-> passing them through to `podman create`. The argv-shaping helper
-> `level2::limits_to_create_flags` pins the canonical podman flag
-> rendering (verified by unit test) so the eventual wiring — once
-> the trait grows a `create_with_limits` method — is a one-line
-> change.
+The hardened preset
+(`SecurityOpts::hardened_default`) ships
+`ContainerLimits::conservative_default()` — **2 cpus, 4 GiB memory
+with swap disabled, 1024 pids**. `Level2Session::create`
+substitutes the conservative preset whenever the caller passes
+`ContainerLimits::default()` (every field `None`), so a config
+without explicit overrides still gets bounded; an explicit
+non-default `ContainerLimits` reaches the runtime verbatim. This
+closes CWE-770: a fork-bomb (`:(){ :|:& };:`) or memory-exhaust
+workload inside a Level 2 sandbox now hits the cgroup `pids.max` /
+`memory.max` ceiling instead of starving the host.
+
+> **Why `--memory-swap` defaults to `--memory`.** Without
+> `--memory-swap`, podman lets the container use `2 ×
+> memory_bytes` of swap, which makes `--memory` advisory rather
+> than enforced. Setting them equal disables swap and pins the
+> total memory budget to the headline number. Operators that need
+> swap explicitly opt in by overriding `memory_swap_bytes`.
 
 #### Auto-fallback to Level 1
 

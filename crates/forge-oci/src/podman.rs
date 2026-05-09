@@ -1002,6 +1002,10 @@ mod tests {
 
         let calls = calls.lock().unwrap();
         let argv = &calls[0].1;
+        // F-654: hardened_default carries the conservative cgroup
+        // caps (2 cpus, 4 GiB, 1024 pids, no swap) which render after
+        // the security flags and before the IMAGE positional.
+        const FOUR_GIB_STR: &str = "4294967296";
         assert_eq!(
             argv,
             &vec![
@@ -1015,6 +1019,14 @@ mod tests {
                 "none".to_string(),
                 "--userns".to_string(),
                 "keep-id".to_string(),
+                "--cpus".to_string(),
+                "2".to_string(),
+                "--memory".to_string(),
+                FOUR_GIB_STR.to_string(),
+                "--memory-swap".to_string(),
+                FOUR_GIB_STR.to_string(),
+                "--pids-limit".to_string(),
+                "1024".to_string(),
                 "alpine:3.19".to_string(),
                 "sleep".to_string(),
                 "infinity".to_string(),
