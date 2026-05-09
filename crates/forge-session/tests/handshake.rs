@@ -1,3 +1,4 @@
+#![allow(deprecated)] // F-652: tests/benches still drive the deprecated bare read_frame helpers.
 use forge_ipc::{ClientInfo, Hello, IpcMessage, PROTO_VERSION};
 use forge_providers::MockProvider;
 use forge_session::server::{serve, serve_with_session};

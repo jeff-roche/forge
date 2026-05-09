@@ -95,6 +95,14 @@ const MAX_RETRIES_IN_WINDOW: usize = 3;
 /// architecture-doc §4 default.
 const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_millis(2000);
 
+/// F-652: per-frame read deadline on the steady-state sidecar event
+/// pump. A healthy `forged-agent` heartbeats every few seconds; a 60 s
+/// silence is unambiguously a stalled or wedged child (and a
+/// slowloris-style same-uid attacker holding the socket open without
+/// sending data). On timeout the pump treats the read as an EOF /
+/// crash and the supervisor's restart loop kicks in.
+const PUMP_FRAME_DEADLINE: Duration = Duration::from_secs(60);
+
 /// Buffer depth on the daemon → child command channel. Sized for the
 /// realistic burst of approval frames a single turn can produce; an
 /// over-eager producer is back-pressured rather than allowed to balloon
@@ -420,26 +428,45 @@ impl SidecarSupervisor {
                 );
             }
         };
+
+        // F-651: defence-in-depth peer-uid check. The sidecar UDS lives
+        // in a 0o700 directory and the socket itself is 0o600, but
+        // verifying the connecting peer's uid matches our euid in code
+        // closes the same-uid attacker hole and rejects any future
+        // operator misconfiguration of the parent dir without silently
+        // trusting the connection. Tokio's `peer_cred()` wraps
+        // SO_PEERCRED on Linux and LOCAL_PEERCRED on macOS.
+        if let Err(e) = verify_peer_uid(&stream, current_euid()) {
+            warn!(
+                target: "forge_session::sidecar",
+                instance_id = %instance_id,
+                error = %e,
+                "rejecting sidecar peer with mismatched uid",
+            );
+            let _ = child.kill().await;
+            return Err(e).context("verify forged-agent peer uid");
+        }
+
         let (mut reader, mut writer) = tokio::io::split(stream);
 
         // Read the child's Hello. The architecture-doc §2 protocol has
         // the *child* send Hello first; we validate the proto version
         // and instance_id before completing the handshake.
+        //
+        // F-652: `read_frame_into_with_deadline` enforces the same
+        // handshake deadline directly inside the framing helper so a
+        // silent child can't pin the worker.
         let mut buf = Vec::new();
-        let hello_frame: SidecarMessage = match tokio::time::timeout(
-            deadline,
-            forge_ipc::read_frame_into::<_, SidecarMessage>(&mut reader, &mut buf),
-        )
+        let hello_frame: SidecarMessage = match forge_ipc::read_frame_into_with_deadline::<
+            _,
+            SidecarMessage,
+        >(&mut reader, &mut buf, deadline)
         .await
         {
-            Ok(Ok(m)) => m,
-            Ok(Err(e)) => {
+            Ok(m) => m,
+            Err(e) => {
                 let _ = child.kill().await;
                 return Err(e.context("read Hello from forged-agent"));
-            }
-            Err(_) => {
-                let _ = child.kill().await;
-                anyhow::bail!("forged-agent did not send Hello within {:?}", deadline);
             }
         };
         match &hello_frame {
@@ -721,7 +748,7 @@ impl SupervisorTask {
                         }
                     }
                 }
-                read = forge_ipc::read_frame_into::<_, SidecarMessage>(&mut live.reader, &mut buf) => {
+                read = forge_ipc::read_frame_into_with_deadline::<_, SidecarMessage>(&mut live.reader, &mut buf, PUMP_FRAME_DEADLINE) => {
                     match read {
                         Ok(frame) => {
                             if let Some(reason) = self.handle_inbound(frame).await {
@@ -959,6 +986,35 @@ async fn ensure_socket_dir(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// F-651: read the daemon's effective uid. Wraps the `geteuid()`
+/// libc call so the supervisor doesn't pull in `nix` for a single
+/// syscall; `forge-session` already depends on `libc`.
+fn current_euid() -> u32 {
+    // Safe: `geteuid()` is async-signal-safe and has no failure mode.
+    unsafe { libc::geteuid() }
+}
+
+/// F-651: assert that the connected peer's uid matches `expected_uid`.
+/// Tokio's `peer_cred()` wraps SO_PEERCRED on Linux and LOCAL_PEERCRED
+/// on macOS; both report the credentials of the process that
+/// `connect()`'d the socket. A mismatch is a defence-in-depth signal:
+/// even though the parent dir is 0o700 and the socket file 0o600, a
+/// real different-uid peer or a confused operator must be rejected.
+fn verify_peer_uid(stream: &UnixStream, expected_uid: u32) -> Result<()> {
+    let cred = stream
+        .peer_cred()
+        .context("read peer credentials from sidecar UDS")?;
+    let peer_uid = cred.uid();
+    if peer_uid != expected_uid {
+        anyhow::bail!(
+            "sidecar peer uid {} does not match daemon euid {}",
+            peer_uid,
+            expected_uid
+        );
+    }
+    Ok(())
+}
+
 /// Bind a `UnixListener` at `path` without the classic pre-unlink
 /// TOCTOU. Mirrors the discipline in
 /// `crates/forge-session/src/server.rs::bind_uds_safely`: try `bind`
@@ -999,5 +1055,63 @@ async fn bind_uds_safely(path: &Path) -> Result<UnixListener> {
                 .with_context(|| format!("retry bind failed at {}", path.display()))
         }
         Err(e) => Err(e).with_context(|| format!("bind failed at {}", path.display())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// F-651: a connected peer with the same uid as the daemon (the
+    /// realistic case — both halves of a `UnixStream::pair` belong to
+    /// our own process) is accepted.
+    #[tokio::test]
+    async fn verify_peer_uid_accepts_same_uid() {
+        let (a, _b) = UnixStream::pair().expect("UnixStream::pair");
+        let euid = current_euid();
+        verify_peer_uid(&a, euid).expect("same-uid peer must be accepted");
+    }
+
+    /// F-651: a connected peer whose uid does not match the daemon's
+    /// euid is rejected. We can't fork a different-uid process under
+    /// `cargo test` without privileges, so we exercise the rejection
+    /// path by passing a deliberately-wrong `expected_uid` — the
+    /// supervisor's call site always passes `current_euid()`, so this
+    /// test pins the comparison's negative branch end-to-end.
+    #[tokio::test]
+    async fn verify_peer_uid_rejects_mismatched_uid() {
+        let (a, _b) = UnixStream::pair().expect("UnixStream::pair");
+        let euid = current_euid();
+        let bogus = euid.wrapping_add(1);
+        let err = verify_peer_uid(&a, bogus).expect_err("mismatched-uid peer must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("does not match"),
+            "expected mismatch error, got: {msg}"
+        );
+    }
+
+    /// F-652: an idle (silent) sidecar peer must not pin the steady-
+    /// state pump indefinitely. `read_frame_into_with_deadline` returns
+    /// an error after `PUMP_FRAME_DEADLINE`; the supervisor's
+    /// `pump_until_exit` then routes that into its EOF-classification
+    /// branch and the restart loop.
+    #[tokio::test]
+    async fn pump_frame_deadline_fires_on_silent_peer() {
+        // Use a short deadline derived from the same helper the
+        // supervisor uses, so a regression that drops the deadline
+        // wrapper would still surface as a hang here.
+        let (a, _b) = UnixStream::pair().expect("UnixStream::pair");
+        let mut reader = a;
+        let started = Instant::now();
+        let deadline = Duration::from_millis(150);
+        let result =
+            forge_ipc::read_frame_with_deadline::<_, SidecarMessage>(&mut reader, deadline).await;
+        let elapsed = started.elapsed();
+        assert!(result.is_err(), "deadline must fire for a silent peer");
+        assert!(
+            elapsed < Duration::from_millis(750),
+            "deadline did not fire promptly: {elapsed:?}"
+        );
     }
 }

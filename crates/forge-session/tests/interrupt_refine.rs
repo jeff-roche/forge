@@ -1,3 +1,4 @@
+#![allow(deprecated)] // F-652: tests/benches still drive the deprecated bare read_frame helpers.
 //! F-604: end-to-end coverage for the orchestrator interrupt + refine
 //! primitive.
 //!

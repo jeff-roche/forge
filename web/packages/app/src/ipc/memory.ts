@@ -24,6 +24,13 @@ export interface AgentMemoryEntry {
   def_enabled: boolean;
   /** User's `[memory.enabled.<agent>]` override, or null when unset. */
   settings_override: boolean | null;
+  /**
+   * F-649: when populated, the row represents an agent def whose name failed
+   * validation (e.g. a path-traversal stem that slipped past parse-time
+   * gating). `null` for healthy rows. The dashboard surfaces non-null
+   * values as an error so the regression is visible rather than hidden.
+   */
+  error: string | null;
 }
 
 export interface AgentMemorySaved {
