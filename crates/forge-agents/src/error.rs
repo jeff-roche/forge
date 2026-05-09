@@ -42,6 +42,22 @@ pub enum Error {
     #[error("invalid agent name {name:?}: {reason}")]
     InvalidAgentName { name: String, reason: String },
 
+    /// F-650: a `memory.write` call submitted a content payload larger than
+    /// [`crate::memory::MEMORY_WRITE_CONTENT_CAP`]. Distinct from
+    /// [`Error::InvalidAgentName`] so callers (the `memory.write` tool, the
+    /// Dashboard editor, IPC consumers) can distinguish a path-traversal
+    /// rejection from a size-cap rejection without string-matching.
+    ///
+    /// The bound exists to prevent two failure modes:
+    ///
+    /// 1. **DoS** — an unbounded blob persisted to disk and re-injected into
+    ///    every subsequent system prompt exhausts context windows and
+    ///    provider tokens.
+    /// 2. **Persistent prompt injection** — a large blob magnifies the
+    ///    surface area for crafted control sequences in the system prompt.
+    #[error("memory.write content is {size} bytes, which exceeds the {limit}-byte cap")]
+    MemoryContentTooLarge { size: usize, limit: usize },
+
     /// Parsing / IO / other non-isolation failures.
     #[error(transparent)]
     Other(#[from] anyhow::Error),
