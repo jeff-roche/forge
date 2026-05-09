@@ -1,0 +1,38 @@
+# Lychee config — markdown link-rot gate (F-705).
+#
+# CI runs offline-only (internal links) on every PR, and a separate
+# nightly job sweeps external URLs. Tunables here apply to both lanes.
+
+# Paths excluded from the corpus. Generated artifacts and curated
+# audit / brainstorming dumps are intentionally not link-checked.
+exclude_path = [
+    "docs/superpowers/",
+    "docs/audits/",
+    "node_modules/",
+    "target/",
+    "web/packages/app/dist/",
+]
+
+# URL-level excludes. Loopback addresses are example-only and should
+# never resolve from a CI runner.
+exclude = [
+    "^http://localhost",
+    "^http://127\\.0\\.0\\.1",
+    "^https?://0\\.0\\.0\\.0",
+]
+
+# Drop mailto: links and any loopback hosts the regex above missed.
+# `include_mail` is the supported toggle (default = exclude); we keep
+# it explicit so future readers see the intent.
+include_mail = false
+exclude_loopback = true
+
+# External-link tuning. Cheap servers redirect through CDNs and
+# auth walls; cap the chain so a misconfigured target can't hang CI.
+max_redirects = 5
+timeout = 30
+
+# Quiet output for CI logs. `info` surfaces failures with full URL +
+# source location without dumping every successful check.
+no_progress = true
+verbose = "info"
