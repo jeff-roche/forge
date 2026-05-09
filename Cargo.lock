@@ -1426,6 +1426,7 @@ dependencies = [
  "forge-core",
  "futures",
  "gray_matter",
+ "libc",
  "serde",
  "tempfile",
  "thiserror 1.0.69",

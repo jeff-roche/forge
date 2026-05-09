@@ -210,10 +210,33 @@ impl MemoryStore {
     /// [`Error::Other`] only on hard IO errors (permission denied, etc.) —
     /// a corrupt frontmatter is logged and surfaces as `Ok(None)` so a
     /// session can never crash on a malformed memory file.
+    ///
+    /// F-649: refuses to follow a symlink at the memory file path. An
+    /// attacker who can plant `<root>/<id>.md` as a symlink to an outside
+    /// file (e.g. `/etc/passwd`) would otherwise leak its contents into
+    /// the agent's system prompt and any IPC consumer of memory.
     pub fn load(&self, agent_id: &str) -> Result<Option<Memory>> {
         let path = self.path_for(agent_id)?;
-        if !path.exists() {
-            return Ok(None);
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                tracing::warn!(
+                    target: "forge_agents::memory",
+                    path = %path.display(),
+                    "memory file is a symlink; refusing to follow",
+                );
+                return Ok(None);
+            }
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => {
+                tracing::warn!(
+                    target: "forge_agents::memory",
+                    path = %path.display(),
+                    error = %err,
+                    "failed to stat memory file; treating as absent",
+                );
+                return Ok(None);
+            }
         }
         let raw = match fs::read_to_string(&path)
             .with_context(|| format!("reading memory file {}", path.display()))
@@ -271,13 +294,41 @@ impl MemoryStore {
     ///
     /// On Unix the parent directory is enforced at mode `0700` and the
     /// file at `0600`. On Windows the platform default ACL is used.
+    ///
+    /// F-649: refuses to clobber a symlink at either the destination or the
+    /// `.tmp` staging path. The Unix temp open uses `O_NOFOLLOW` so a
+    /// pre-existing symlink at the staging path fails the open with
+    /// `ELOOP` instead of writing through to the symlink target.
     pub fn save(&self, agent_id: &str, memory: &Memory) -> Result<()> {
         ensure_dir_secure(&self.root)?;
         let path = self.path_for(agent_id)?;
 
+        if let Ok(meta) = fs::symlink_metadata(&path) {
+            if meta.file_type().is_symlink() {
+                return Err(Error::InvalidAgentName {
+                    name: agent_id.to_string(),
+                    reason: format!(
+                        "memory file {} is a symlink; refusing to overwrite",
+                        path.display(),
+                    ),
+                });
+            }
+        }
+
         let serialized = serialize(memory);
 
         let tmp = path.with_extension("md.tmp");
+        if let Ok(meta) = fs::symlink_metadata(&tmp) {
+            if meta.file_type().is_symlink() {
+                return Err(Error::InvalidAgentName {
+                    name: agent_id.to_string(),
+                    reason: format!(
+                        "memory staging file {} is a symlink; refusing to overwrite",
+                        tmp.display(),
+                    ),
+                });
+            }
+        }
         let mut file = open_secure_temp(&tmp)?;
         file.write_all(serialized.as_bytes())
             .map_err(|e| Error::Other(anyhow::Error::from(e)))?;
@@ -376,11 +427,16 @@ fn ensure_dir_secure(dir: &Path) -> Result<()> {
 #[cfg(unix)]
 fn open_secure_temp(path: &Path) -> Result<fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
+    // F-649: `O_NOFOLLOW` causes `open(2)` to fail with `ELOOP` when the
+    // final path component is a symlink — defends against an attacker
+    // planting `<root>/<id>.md.tmp` as a symlink that would otherwise be
+    // truncated through to its target.
     fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
         .open(path)
         .map_err(|e| Error::Other(anyhow::Error::from(e)))
 }
@@ -715,6 +771,108 @@ mod tests {
         // root because both sides canonicalize identically.
         let resolved = s.path_for("scribe").unwrap();
         assert!(resolved.starts_with(&symlinked_root));
+    }
+
+    /// F-649 regression: a pre-existing symlink at `<root>/<id>.md` pointing
+    /// outside the memory root must NOT be followed by `save` (which would
+    /// otherwise rename through and silently retarget) and must NOT have its
+    /// target overwritten via the staging path. The contract is:
+    /// (a) `save` returns an error, AND
+    /// (b) the external file's contents are unchanged.
+    #[cfg(unix)]
+    #[test]
+    fn save_refuses_to_follow_outward_symlink_at_destination() {
+        use std::os::unix::fs::symlink;
+
+        let outer = tempdir().unwrap();
+        let config_root = outer.path().join("config");
+        let s = MemoryStore::new(&config_root);
+        // Pre-create the store's `forge/memory/` directory so we can plant
+        // the symlink at the exact path `path_for` will hand back.
+        ensure_dir_secure(&s.root).unwrap();
+
+        let escape_target = outer.path().join("escape_target");
+        fs::write(&escape_target, "ORIGINAL_SECRET").unwrap();
+
+        // Plant `<store-root>/pwned.md` as a symlink to the external file.
+        let pwned = s.root.join("pwned.md");
+        symlink(&escape_target, &pwned).unwrap();
+        let result = s.write("pwned", "attacker-content", WriteMode::Append);
+        assert!(
+            result.is_err(),
+            "write through outward symlink must fail; got {result:?}",
+        );
+
+        // Belt-and-suspenders: even if a future regression weakens the error
+        // path, the external file's contents must not have been touched.
+        let after = fs::read_to_string(&escape_target).unwrap();
+        assert_eq!(
+            after, "ORIGINAL_SECRET",
+            "symlink target was modified — symlink escape regressed",
+        );
+    }
+
+    /// F-649 regression: a pre-existing symlink at `<root>/<id>.md.tmp`
+    /// pointing outside the memory root must NOT be followed by the staging
+    /// open. `O_NOFOLLOW` must surface as a hard error.
+    #[cfg(unix)]
+    #[test]
+    fn save_refuses_to_follow_outward_symlink_at_staging_path() {
+        use std::os::unix::fs::symlink;
+
+        let outer = tempdir().unwrap();
+        let config_root = outer.path().join("config");
+        let s = MemoryStore::new(&config_root);
+        ensure_dir_secure(&s.root).unwrap();
+
+        let escape_target = outer.path().join("escape_target");
+        fs::write(&escape_target, "ORIGINAL_SECRET").unwrap();
+
+        // Plant `<store-root>/pwned.md.tmp` as a symlink — the staging path
+        // the implementation derives via `with_extension("md.tmp")`.
+        let staged = s.root.join("pwned.md.tmp");
+        symlink(&escape_target, &staged).unwrap();
+
+        let result = s.write("pwned", "attacker-content", WriteMode::Append);
+        assert!(
+            result.is_err(),
+            "write through staging symlink must fail; got {result:?}",
+        );
+        let after = fs::read_to_string(&escape_target).unwrap();
+        assert_eq!(
+            after, "ORIGINAL_SECRET",
+            "staging-path symlink target was modified",
+        );
+    }
+
+    /// F-649 regression: `load` must refuse to follow a symlink at the
+    /// memory file path; otherwise reading memory becomes an arbitrary-file
+    /// disclosure vector for any IPC consumer of the body.
+    #[cfg(unix)]
+    #[test]
+    fn load_refuses_to_follow_outward_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let outer = tempdir().unwrap();
+        let config_root = outer.path().join("config");
+        let s = MemoryStore::new(&config_root);
+        ensure_dir_secure(&s.root).unwrap();
+
+        let secret = outer.path().join("secret");
+        fs::write(
+            &secret,
+            "---\nupdated_at: 2026-04-26T12:00:00Z\nversion: 1\n---\nSECRET",
+        )
+        .unwrap();
+
+        let leaked = s.root.join("leak.md");
+        symlink(&secret, &leaked).unwrap();
+        // Symlink-targeted read must surface as "absent" — never as the
+        // contents of the symlink target.
+        assert!(
+            s.load("leak").unwrap().is_none(),
+            "load followed an outward symlink — symlink escape regressed",
+        );
     }
 
     /// Regression: `from_home` must anchor at the platform's

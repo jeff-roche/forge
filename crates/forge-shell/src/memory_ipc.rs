@@ -82,6 +82,11 @@ pub struct AgentMemoryEntry {
     /// User's `[memory.enabled.<agent>]` override, if present in settings.
     /// Frontend uses this to render the toggle's "set" vs "inherit" state.
     pub settings_override: Option<bool>,
+    /// F-649: when populated, this row represents an agent def whose name
+    /// failed validation (e.g. a path-traversal stem that slipped past
+    /// parse-time gating). The dashboard should surface the row as an
+    /// error rather than hide the regression. `None` for healthy rows.
+    pub error: Option<String>,
 }
 
 /// Validate the inbound `agent_id` against the size cap and an allowlist
@@ -140,12 +145,13 @@ pub fn build_agent_memory_entries(
 ) -> Vec<AgentMemoryEntry> {
     let mut out: Vec<AgentMemoryEntry> = defs
         .iter()
-        .filter_map(|def| {
+        .map(|def| {
             // F-649: `path_for` validates the agent name. By the time we get
             // here, names have already been gated at parse time, so any
-            // failure means a programmatic def constructed with a hostile
-            // name slipped through — drop the row rather than surface a
-            // half-resolved path to the dashboard.
+            // failure means a programmatic def with a hostile name slipped
+            // through. Surface it as an error row so the dashboard can
+            // visibly flag the regression — silently filtering would hide
+            // the agent from the UI and mask the bug.
             let path = match store.path_for(&def.name) {
                 Ok(p) => p,
                 Err(err) => {
@@ -153,9 +159,18 @@ pub fn build_agent_memory_entries(
                         target: "forge_shell::memory_ipc",
                         agent_id = %def.name,
                         error = %err,
-                        "skipping memory entry: invalid agent name",
+                        "surfacing memory entry as error: invalid agent name",
                     );
-                    return None;
+                    return AgentMemoryEntry {
+                        agent_id: def.name.clone(),
+                        path: String::new(),
+                        size_bytes: None,
+                        updated_at: None,
+                        version: None,
+                        def_enabled: def.memory_enabled,
+                        settings_override: settings_overrides.get(&def.name).copied(),
+                        error: Some(format!("invalid agent name: {err}")),
+                    };
                 }
             };
             let (size_bytes, updated_at, version) = match std::fs::metadata(&path) {
@@ -181,7 +196,7 @@ pub fn build_agent_memory_entries(
                 }
                 Err(_) => (None, None, None),
             };
-            Some(AgentMemoryEntry {
+            AgentMemoryEntry {
                 agent_id: def.name.clone(),
                 path: path.display().to_string(),
                 size_bytes,
@@ -189,7 +204,8 @@ pub fn build_agent_memory_entries(
                 version,
                 def_enabled: def.memory_enabled,
                 settings_override: settings_overrides.get(&def.name).copied(),
-            })
+                error: None,
+            }
         })
         .collect();
     // Stable sort for deterministic UI rendering / test assertions.
@@ -461,6 +477,32 @@ mod tests {
         // Override does not mutate def_enabled — the row carries both so
         // the UI can show "settings: ON, def: OFF".
         assert!(!entries[0].def_enabled);
+    }
+
+    /// F-649: a def whose name fails [`forge_agents::MemoryStore::path_for`]
+    /// validation must surface as an error row in the listing rather than be
+    /// silently dropped. Silent filtering would hide a future regression
+    /// where parse-time validation is bypassed.
+    #[test]
+    fn build_entries_surfaces_invalid_name_as_error() {
+        let dir = TempDir::new().unwrap();
+        let store = MemoryStore::new(dir.path());
+        // `..` is rejected by `validate_agent_name` — simulates a def
+        // constructed programmatically that bypasses parse-time gating.
+        let bad = def("..", true);
+        let defs = vec![bad];
+        let overrides: HashMap<String, bool> = HashMap::new();
+        let entries = build_agent_memory_entries(&store, &defs, &overrides);
+
+        assert_eq!(entries.len(), 1, "invalid-name def must not be filtered");
+        assert_eq!(entries[0].agent_id, "..");
+        assert!(
+            entries[0].error.is_some(),
+            "invalid-name entry must carry an error message",
+        );
+        assert_eq!(entries[0].size_bytes, None);
+        assert_eq!(entries[0].version, None);
+        assert_eq!(entries[0].path, "");
     }
 
     #[test]
