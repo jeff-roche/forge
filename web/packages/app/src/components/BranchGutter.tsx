@@ -26,11 +26,12 @@ export interface BranchGutterProps {
 }
 
 export const BranchGutter: Component<BranchGutterProps> = (props) => {
-  // Inline style for depth so tests can observe the computed indent.
-  // Using `left` rather than `transform: translateX` keeps layout math
-  // straightforward for nested branches (no transform compounding).
+  // Bridge `depth` into CSS via the `--branch-depth` custom property so the
+  // 4px indent step is owned by `tokens.css` (`var(--sp-1)`). Using `left`
+  // rather than `transform: translateX` keeps layout math straightforward
+  // for nested branches (no transform compounding).
   const style = (): Record<string, string> => ({
-    left: `${props.depth * 4}px`,
+    '--branch-depth': String(props.depth),
   });
 
   return (

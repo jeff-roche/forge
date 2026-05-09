@@ -11,6 +11,9 @@
   position: absolute;
   top: 0;
   bottom: 0;
+  /* Indent steps by `--sp-1` (4px) per nesting level. The component sets
+   * `--branch-depth` inline; this rule converts it to the actual offset. */
+  left: calc(var(--branch-depth, 0) * var(--sp-1));
   width: 2px;
   background: var(--color-ember-300, #ff7a30);
   pointer-events: none;
