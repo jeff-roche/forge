@@ -8,7 +8,7 @@
 use crate::runner::{CommandOutcome, CommandRunner, TokioCommandRunner};
 use crate::{
     ContainerHandle, ContainerLogs, ContainerRuntime, ExecResult, ImageRef, LogLine, OciError,
-    Stats,
+    SecurityOpts, Stats,
 };
 use async_trait::async_trait;
 
@@ -134,7 +134,12 @@ impl ContainerRuntime for PodmanRuntime {
         Ok(())
     }
 
-    async fn create(&self, image: &ImageRef, argv: &[&str]) -> Result<ContainerHandle, OciError> {
+    async fn create(
+        &self,
+        image: &ImageRef,
+        argv: &[&str],
+        opts: &SecurityOpts,
+    ) -> Result<ContainerHandle, OciError> {
         let img = image.to_image_string();
         // `podman create [options] IMAGE [COMMAND [ARG...]]` — podman's
         // argument grammar terminates flag parsing at the IMAGE positional, so
@@ -145,7 +150,19 @@ impl ContainerRuntime for PodmanRuntime {
         // "executable file `--` not found"). The flag-injection regression
         // test in this module pins that behaviour by feeding `--privileged`
         // through and asserting podman does not apply it as a runtime flag.
-        let mut args: Vec<&str> = vec!["create", &img];
+        //
+        // F-642: SecurityOpts flags are inserted between `create` and the
+        // IMAGE positional so podman parses them as runtime options. Order
+        // is pinned by `SecurityOpts::to_create_flags` and asserted by both
+        // unit tests in this module and the integration test in
+        // `tests/podman_integration.rs`.
+        let security_flags = opts.to_create_flags();
+        let mut args: Vec<&str> = Vec::with_capacity(2 + security_flags.len() + argv.len());
+        args.push("create");
+        for flag in &security_flags {
+            args.push(flag.as_str());
+        }
+        args.push(&img);
         args.extend_from_slice(argv);
         let outcome = self.run_or_fail(&args).await?;
         let id = String::from_utf8_lossy(&outcome.stdout).trim().to_string();
@@ -485,10 +502,15 @@ mod tests {
 
         let runtime = rt(runner);
         let img = ImageRef::parse("alpine:3.19").unwrap();
-        let h = runtime.create(&img, &["echo", "hi"]).await.unwrap();
+        let h = runtime
+            .create(&img, &["echo", "hi"], &SecurityOpts::permissive())
+            .await
+            .unwrap();
         assert_eq!(h.id, "abc1234deadbeef");
 
         let calls = calls.lock().unwrap();
+        // SecurityOpts::permissive emits zero flags, keeping the
+        // historical argv shape for tests that pre-date F-642.
         assert_eq!(calls[0].1, vec!["create", "alpine:3.19", "echo", "hi"]);
     }
 
@@ -508,7 +530,10 @@ mod tests {
 
         let runtime = rt(runner);
         let img = ImageRef::parse("alpine:3.19").unwrap();
-        runtime.create(&img, &["--privileged", "sh"]).await.unwrap();
+        runtime
+            .create(&img, &["--privileged", "sh"], &SecurityOpts::permissive())
+            .await
+            .unwrap();
 
         let argv = calls.lock().unwrap()[0].1.clone();
         let image_idx = argv
@@ -541,7 +566,10 @@ mod tests {
         let runtime = rt(runner);
         let img = ImageRef::parse("alpine:3.19").unwrap();
         let argv: [&str; 0] = [];
-        let err = runtime.create(&img, &argv).await.unwrap_err();
+        let err = runtime
+            .create(&img, &argv, &SecurityOpts::permissive())
+            .await
+            .unwrap_err();
         assert!(matches!(err, OciError::CommandFailed { .. }));
     }
 
@@ -895,6 +923,124 @@ mod tests {
         assert_eq!(l.stream, "stdout");
         assert_eq!(l.line, "hello world");
         assert_eq!(l.timestamp.as_deref(), Some("2025-04-26T10:00:00Z"));
+    }
+
+    // ── F-642: SecurityOpts plumbed through `create` ─────────────────
+
+    #[tokio::test]
+    async fn create_emits_every_hardened_default_flag_before_image() {
+        // Load-bearing: the F-642 DoD says PodmanRuntime::create must
+        // inject no-new-privileges + cap-drop ALL + restricted network
+        // + read-only rootfs by default. This test pins the exact argv
+        // shape so a regression that drops a flag (or moves it past
+        // the IMAGE positional, where podman would treat it as the
+        // in-container command) fails the test loudly.
+        let runner = RecordingRunner::new();
+        runner.push(StubResponse::ok_stdout(b"abc1234\n".to_vec()));
+        let calls = runner.calls.clone();
+
+        let runtime = rt(runner);
+        let img = ImageRef::parse("alpine:3.19").unwrap();
+        runtime
+            .create(
+                &img,
+                &["sleep", "infinity"],
+                &SecurityOpts::hardened_default(),
+            )
+            .await
+            .unwrap();
+
+        let calls = calls.lock().unwrap();
+        let argv = &calls[0].1;
+        // Every hardening flag must be present before the IMAGE positional.
+        let image_idx = argv
+            .iter()
+            .position(|a| a == "alpine:3.19")
+            .expect("argv must contain image positional");
+        let prefix = &argv[..image_idx];
+        for required in [
+            "--security-opt",
+            "no-new-privileges",
+            "--cap-drop",
+            "ALL",
+            "--read-only",
+            "--network",
+            "none",
+            "--userns",
+            "keep-id",
+        ] {
+            assert!(
+                prefix.iter().any(|a| a == required),
+                "missing hardening flag {required:?} in {argv:?}"
+            );
+        }
+        // Caller argv lands strictly after IMAGE.
+        let suffix = &argv[image_idx + 1..];
+        assert_eq!(suffix, &["sleep".to_string(), "infinity".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn create_renders_security_flags_in_canonical_order() {
+        // Pinning the exact rendered prefix so operators reading the
+        // audit log see a stable shape and so reorderings can't sneak
+        // through review. The order is documented on
+        // `SecurityOpts::to_create_flags`.
+        let runner = RecordingRunner::new();
+        runner.push(StubResponse::ok_stdout(b"abc1234\n".to_vec()));
+        let calls = runner.calls.clone();
+
+        let runtime = rt(runner);
+        let img = ImageRef::parse("alpine:3.19").unwrap();
+        runtime
+            .create(
+                &img,
+                &["sleep", "infinity"],
+                &SecurityOpts::hardened_default(),
+            )
+            .await
+            .unwrap();
+
+        let calls = calls.lock().unwrap();
+        let argv = &calls[0].1;
+        assert_eq!(
+            argv,
+            &vec![
+                "create".to_string(),
+                "--security-opt".to_string(),
+                "no-new-privileges".to_string(),
+                "--cap-drop".to_string(),
+                "ALL".to_string(),
+                "--read-only".to_string(),
+                "--network".to_string(),
+                "none".to_string(),
+                "--userns".to_string(),
+                "keep-id".to_string(),
+                "alpine:3.19".to_string(),
+                "sleep".to_string(),
+                "infinity".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn create_with_permissive_opts_emits_no_security_flags() {
+        // Regression guard for the test-only `permissive` preset:
+        // every test in this module that calls `create` with
+        // SecurityOpts::permissive expects a clean argv with no
+        // hardening flags interleaved.
+        let runner = RecordingRunner::new();
+        runner.push(StubResponse::ok_stdout(b"abc1234\n".to_vec()));
+        let calls = runner.calls.clone();
+
+        let runtime = rt(runner);
+        let img = ImageRef::parse("alpine:3.19").unwrap();
+        runtime
+            .create(&img, &["sh"], &SecurityOpts::permissive())
+            .await
+            .unwrap();
+
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls[0].1, vec!["create", "alpine:3.19", "sh"]);
     }
 
     #[test]
