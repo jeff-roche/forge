@@ -66,6 +66,10 @@ These tokens should be defined at `:root` and used throughout. Never use raw val
   --color-error-border:   rgba(255,74,18,0.22);
   --color-info-border:    rgba(122,170,255,0.22);
 
+  /* Overlays & elevation — modal scrims and elevated-surface shadows. */
+  --color-overlay: rgba(0, 0, 0, 0.55);
+  --shadow-modal: 0 8px 32px rgba(0, 0, 0, 0.5);
+
   /* Syntax */
   --color-syntax-kw:      #ff7a30;
   --color-syntax-fn:      #ffd166;

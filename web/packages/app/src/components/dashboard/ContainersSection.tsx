@@ -158,9 +158,14 @@ export const ContainersSection: Component = () => {
       </Show>
 
       <Show when={!containers.loading && (containers() ?? []).length === 0}>
-        <p class="containers-section__hint" data-testid="containers-empty">
-          No active sandbox containers. They appear here when a session uses
-          Level-2 isolation.
+        <p class="containers-section__empty" data-testid="containers-empty">
+          // no active containers
+        </p>
+        <p
+          class="containers-section__empty-hint"
+          data-testid="containers-empty-hint"
+        >
+          Level-2 isolation populates this list.
         </p>
       </Show>
 
@@ -503,7 +508,12 @@ const LogsFlyout: Component<LogsFlyoutProps> = (props) => {
             </p>
           )}
         </Show>
-        <pre class="containers-section__log-pane" tabIndex={0}>
+        <pre
+          class="containers-section__log-pane"
+          role="log"
+          aria-live="polite"
+          aria-label={`Container ${props.containerId.slice(0, 12)} logs`}
+        >
           <For each={lines()}>
             {(l) => (
               <div

@@ -7,15 +7,16 @@ describe('BranchGutter', () => {
     const { getByTestId } = render(() => <BranchGutter depth={0} />);
     const gutter = getByTestId('branch-gutter');
     expect(gutter.getAttribute('data-branch-depth')).toBe('0');
-    // Inline style controls indent; depth 0 => left: 0px.
-    expect(gutter.getAttribute('style')).toContain('left: 0px');
+    // The depth bridges into CSS via the `--branch-depth` custom property;
+    // the actual `left` offset is computed by tokens.css (`var(--sp-1)`).
+    expect(gutter.getAttribute('style')).toContain('--branch-depth: 0');
   });
 
-  it('indents by 4px per depth level for nested branches', () => {
+  it('bridges depth into the --branch-depth custom property for nested branches', () => {
     const { getByTestId } = render(() => <BranchGutter depth={2} />);
     const gutter = getByTestId('branch-gutter');
     expect(gutter.getAttribute('data-branch-depth')).toBe('2');
-    expect(gutter.getAttribute('style')).toContain('left: 8px');
+    expect(gutter.getAttribute('style')).toContain('--branch-depth: 2');
   });
 
   it('renders separate gutters per nesting level when mounted together', () => {
@@ -31,7 +32,7 @@ describe('BranchGutter', () => {
     ));
     const gutters = getAllByTestId('branch-gutter');
     expect(gutters).toHaveLength(2);
-    expect(gutters[0]!.getAttribute('style')).toContain('left: 0px');
-    expect(gutters[1]!.getAttribute('style')).toContain('left: 4px');
+    expect(gutters[0]!.getAttribute('style')).toContain('--branch-depth: 0');
+    expect(gutters[1]!.getAttribute('style')).toContain('--branch-depth: 1');
   });
 });

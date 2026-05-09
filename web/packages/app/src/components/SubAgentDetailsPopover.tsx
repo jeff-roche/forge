@@ -1,4 +1,4 @@
-import { type Component, Show } from 'solid-js';
+import { type Component, Show, onMount } from 'solid-js';
 import { useFocusTrap } from '../lib/useFocusTrap';
 import type { SubAgentStatus } from '../stores/messages';
 import './SubAgentDetailsPopover.css';
@@ -32,11 +32,17 @@ function formatStartedAt(ms: number): string {
 }
 
 export const SubAgentDetailsPopover: Component<SubAgentDetailsPopoverProps> = (props) => {
-  // Menu-mode focus trap: Escape + outside-click dismissal without moving
-  // focus into the popover (the state-chip button retains focus so Tab flow
-  // stays predictable).
+  // Menu-mode focus trap: Escape + outside-click dismissal. F-696: per APG
+  // menu pattern, focus moves to the first interactive descendant on open so
+  // assistive tech can announce popover contents and Tab navigates within it.
   let rootRef: HTMLDivElement | undefined;
   useFocusTrap(() => rootRef, { trap: false, onDismiss: () => props.onDismiss() });
+  onMount(() => {
+    const first = rootRef?.querySelector<HTMLElement>(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+    );
+    first?.focus();
+  });
 
   return (
     <div

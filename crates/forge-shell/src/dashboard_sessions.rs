@@ -229,6 +229,7 @@ impl Pinger for UdsPinger {
                         pid: std::process::id(),
                         user: whoami(),
                     },
+                    schema_version: forge_ipc::SCHEMA_VERSION,
                 }),
             )
             .await

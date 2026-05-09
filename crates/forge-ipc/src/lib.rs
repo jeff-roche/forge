@@ -19,6 +19,30 @@ pub mod sidecar;
 pub const PROTO_VERSION: u32 = 1;
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// F-678: log a `warn!` when a handshake peer reports a schema version
+/// that does not match the local [`SCHEMA_VERSION`] (or the per-leg
+/// equivalent — same shape, same comparison). Used on every handshake
+/// site that exchanges a schema_version field so the four legs
+/// (daemon↔shell, sidecar↔supervisor) share a single message format and
+/// log target. `peer_label` identifies the remote side ("shell",
+/// "daemon", "sidecar", "supervisor") — surfaced verbatim in the log
+/// line so triage can pinpoint which leg drifted.
+///
+/// Today the mismatch is non-fatal: the connection still completes. A
+/// later `strict_schema_version` toggle (per F-678 finding) can elevate
+/// to error and reject the connection without touching the call sites.
+pub fn warn_if_schema_mismatch(peer_label: &str, peer_version: u32, local_version: u32) {
+    if peer_version != local_version {
+        tracing::warn!(
+            target: "forge_ipc::handshake",
+            peer = peer_label,
+            peer_schema_version = peer_version,
+            local_schema_version = local_version,
+            "schema_version mismatch on handshake; serde drift possible",
+        );
+    }
+}
+
 /// Hard cap on a single IPC frame body, enforced on both the write side
 /// (pre-send in [`write_frame`]) and the read side (pre-allocation in
 /// [`read_frame`], before the body buffer is sized). 4 MiB is generous
@@ -323,6 +347,14 @@ pub struct IpcEvent {
 pub struct Hello {
     pub proto: u32,
     pub client: ClientInfo,
+    /// F-678: peer-reported schema version. The daemon compares this against
+    /// the local [`SCHEMA_VERSION`] and `tracing::warn!`s on mismatch so a
+    /// version-skewed shell cannot silently corrupt downstream serde.
+    /// `#[serde(default)]` defaults to `0` for legacy peers that pre-date
+    /// the bidirectional check — those connections are surfaced via the
+    /// same warn path rather than rejected outright.
+    #[serde(default)]
+    pub schema_version: u32,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -341,6 +373,51 @@ pub struct HelloAck {
     pub schema_version: u32,
 }
 
+/// F-660: cap-checked serialization sink. A `std::io::Write` that
+/// accumulates serialized JSON into an internal buffer and short-circuits
+/// the serializer the moment the running byte count exceeds `cap`.
+///
+/// Replaces a prior `serde_json::to_vec(msg)?`-then-check pattern in
+/// [`write_frame`], which fully serialized the message before rejecting
+/// it. A misbehaving caller could drive `O(N)` allocations + serializer
+/// work per rejected frame for any `N >> MAX_FRAME_SIZE`. Aborting from
+/// the writer short-circuits `serde_json::to_writer` at the first
+/// overflowing chunk so the cost of rejection is bounded by `cap + ε`,
+/// where `ε` is the size of the last buffered chunk serde_json hands us.
+struct CapWriter {
+    buf: Vec<u8>,
+    cap: usize,
+    overflowed: bool,
+}
+
+impl CapWriter {
+    fn new(cap: usize) -> Self {
+        // Pre-size the buffer so the common (under-cap) path doesn't
+        // pay grow-and-copy overhead. We never grow beyond `cap` — the
+        // overflow branch fires the moment we'd need to.
+        Self {
+            buf: Vec::with_capacity(cap.min(64 * 1024)),
+            cap,
+            overflowed: false,
+        }
+    }
+}
+
+impl std::io::Write for CapWriter {
+    fn write(&mut self, chunk: &[u8]) -> std::io::Result<usize> {
+        if self.buf.len().saturating_add(chunk.len()) > self.cap {
+            self.overflowed = true;
+            return Err(std::io::Error::other("forge-ipc:cap-overflow"));
+        }
+        self.buf.extend_from_slice(chunk);
+        Ok(chunk.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Write one length-prefixed JSON frame.
 ///
 /// F-608: generic over `T: Serialize` so this helper services both the
@@ -349,15 +426,33 @@ pub struct HelloAck {
 /// and the 4 MiB frame cap are unchanged from the pre-F-608
 /// `&IpcMessage`-typed signature; existing callers compile without
 /// modification because `T` is inferred from the call site.
+///
+/// F-660: the cap is enforced *during* serialization via a private
+/// `CapWriter` sink. On overflow we bail before any bytes hit `writer`,
+/// so the rejection path neither allocates the full body nor corrupts
+/// the wire with a partial length prefix.
 pub async fn write_frame<W, T>(writer: &mut W, msg: &T) -> anyhow::Result<()>
 where
     W: AsyncWrite + Unpin,
     T: Serialize + ?Sized,
 {
-    let body = serde_json::to_vec(msg)?;
-    if body.len() > MAX_FRAME_SIZE {
-        bail!("frame too large: {} bytes", body.len());
+    let mut sink = CapWriter::new(MAX_FRAME_SIZE);
+    if let Err(err) = serde_json::to_writer(&mut sink, msg) {
+        if sink.overflowed {
+            // F-660: surface the same `"frame too large"` shape as the
+            // read-path cap so log greps and tests match a single
+            // string. `sink.buf.len()` reports how far the serializer
+            // got before the cap fired — useful for ops triage when a
+            // real frame is genuinely just past the cap.
+            bail!(
+                "frame too large: {} bytes (cap {})",
+                sink.buf.len(),
+                MAX_FRAME_SIZE
+            );
+        }
+        return Err(err.into());
     }
+    let body = sink.buf;
     writer.write_u32(body.len() as u32).await?;
     writer.write_all(&body).await?;
     Ok(())
@@ -483,9 +578,17 @@ where
 {
     match tokio::time::timeout(deadline, read_frame_into_undeadlined::<R, T>(reader, buf)).await {
         Ok(inner) => inner,
-        Err(_) => Err(IpcReadTimeout(deadline).into()),
+        Err(_) => Err(IpcReadTimeout::new(deadline).into()),
     }
 }
+
+/// Issue #784: shared per-frame deadline for every long-lived IPC pump
+/// (sidecar pump, shell bridge pump, CLI `tail`/`run`, daemon dispatch).
+/// The value bounds the worst-case silence window before a stalled or
+/// slowloris-style peer is treated as gone (CWE-770). Handshake / probe
+/// deadlines stay site-local: they have a different rationale (a peer
+/// that hasn't framed a `HelloAck` in 5 s is wedged).
+pub const DEFAULT_PUMP_DEADLINE: Duration = Duration::from_secs(60);
 
 /// F-652: typed marker error returned by [`read_frame_with_deadline`] /
 /// [`read_frame_into_with_deadline`] when the deadline elapses.
@@ -496,8 +599,22 @@ where
 /// error that should tear the connection down. Callers that treat
 /// every error path as fatal (handshakes, one-shot reads) can ignore
 /// the type and rely on the boxed `anyhow::Error`'s `Display`.
+///
+/// Issue #784: the inner `Duration` is private so the representation
+/// can grow (e.g. carry the originating call site for diagnostics)
+/// without a breaking churn at every downcast site.
 #[derive(Debug)]
-pub struct IpcReadTimeout(pub Duration);
+pub struct IpcReadTimeout(Duration);
+
+impl IpcReadTimeout {
+    pub fn new(deadline: Duration) -> Self {
+        Self(deadline)
+    }
+
+    pub fn duration(&self) -> Duration {
+        self.0
+    }
+}
 
 impl std::fmt::Display for IpcReadTimeout {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -521,6 +638,7 @@ mod tests {
                 pid: 1234,
                 user: "alice".to_string(),
             },
+            schema_version: SCHEMA_VERSION,
         })
     }
 
@@ -610,6 +728,28 @@ mod tests {
         }
     }
 
+    /// Issue #784: `DEFAULT_PUMP_DEADLINE` is the single source of truth for
+    /// the steady-state pump deadline shared by every long-lived `read_frame_*`
+    /// call site (sidecar pump, shell bridge pump, CLI tail/run, daemon
+    /// dispatch). Pinning the value here means a regression that drifts one
+    /// call site away from 60 s would have to drift this constant first.
+    #[test]
+    fn default_pump_deadline_is_sixty_seconds() {
+        assert_eq!(DEFAULT_PUMP_DEADLINE, Duration::from_secs(60));
+    }
+
+    /// Issue #784: `IpcReadTimeout` exposes its inner `Duration` via the
+    /// `duration()` accessor rather than a public tuple field. The accessor
+    /// guards the option to evolve the representation later (e.g. carry the
+    /// originating call site for diagnostics) without a breaking churn at
+    /// every downcast site.
+    #[test]
+    fn ipc_read_timeout_duration_accessor_returns_constructed_duration() {
+        let d = Duration::from_millis(250);
+        let err = IpcReadTimeout::new(d);
+        assert_eq!(err.duration(), d);
+    }
+
     /// F-652: the buffer-reusing `read_frame_into_with_deadline` must
     /// also fire promptly on a silent peer. The hot streaming pump
     /// uses this entry point, so a regression that drops the deadline
@@ -638,6 +778,63 @@ mod tests {
         );
     }
 
+    /// F-660: `CapWriter` must short-circuit `serde_json::to_writer` the
+    /// instant the running byte count first exceeds the cap, leaving the
+    /// internal buffer at no more than `cap + ε` (where `ε` is the size
+    /// of the chunk that triggered overflow). This is the precise
+    /// regression guard for the post-serialization bug — a return to
+    /// `to_vec`-then-check would produce a buffer of ~`message_size`,
+    /// not `cap + ε`.
+    #[test]
+    fn cap_writer_bounds_visited_bytes_on_overflow() {
+        // Far smaller than `MAX_FRAME_SIZE` to keep the test fast — the
+        // bound we assert is structural, independent of the absolute
+        // cap value.
+        let cap = 1024;
+        let mut sink = CapWriter::new(cap);
+
+        // Build a payload meaningfully larger than the cap, then walk it
+        // through `serde_json::to_writer` against `sink`. The serializer
+        // emits a sequence of small chunks; the first chunk that would
+        // push us past `cap` triggers the overflow branch. After that,
+        // serde_json gives up and `to_writer` returns the I/O error.
+        let payload: Vec<u8> = vec![b'x'; 16 * cap];
+        let err = serde_json::to_writer(&mut sink, &payload)
+            .expect_err("oversized payload must trip CapWriter");
+        assert!(sink.overflowed, "overflow flag should be set: {err}");
+        assert!(
+            sink.buf.len() <= cap,
+            "CapWriter accepted {} bytes past the {}-byte cap",
+            sink.buf.len(),
+            cap
+        );
+    }
+
+    /// F-660: `write_frame` must surface the canonical `"frame too
+    /// large"` error string on the cap path so log greps and downstream
+    /// tests can match against a single shape, regardless of whether
+    /// the cap is enforced at the read side or the write side.
+    #[tokio::test]
+    async fn write_frame_oversized_message_returns_cap_error() {
+        let (mut a, _b) = UnixStream::pair().unwrap();
+
+        // Slightly over the cap is sufficient — we're testing the error
+        // shape, not the bounded-allocation property (the
+        // `cap_writer_bounds_visited_bytes_on_overflow` unit test above
+        // covers that).
+        let sent = IpcMessage::SendUserMessage(SendUserMessage {
+            text: "a".repeat(MAX_FRAME_SIZE + 1024),
+        });
+        let err = write_frame(&mut a, &sent)
+            .await
+            .expect_err("write_frame must reject an oversized body");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("frame too large"),
+            "expected canonical cap error, got: {msg}"
+        );
+    }
+
     /// F-354: the deadline wrapper must succeed when the peer writes a
     /// frame within the deadline.
     #[tokio::test]
@@ -652,5 +849,95 @@ mod tests {
             .await
             .expect("frame should arrive before deadline");
         matches!(got, IpcMessage::Hello(_));
+    }
+
+    /// F-678: the `schema_version` field on `Hello` is `#[serde(default)]`
+    /// so a legacy peer that omits it deserializes to `0`, surfacing
+    /// through the warn path rather than failing at the deserialize
+    /// layer. Pin the wire-shape here so a future rename / type change
+    /// can't drift past CI silently.
+    #[test]
+    fn hello_defaults_schema_version_when_field_absent() {
+        let body = serde_json::json!({
+            "t": "Hello",
+            "proto": PROTO_VERSION,
+            "client": { "kind": "shell", "pid": 1, "user": "u" }
+            // no schema_version
+        });
+        let msg: IpcMessage = serde_json::from_value(body).expect("legacy Hello deserializes");
+        match msg {
+            IpcMessage::Hello(h) => {
+                assert_eq!(
+                    h.schema_version, 0,
+                    "missing schema_version must default to 0",
+                );
+            }
+            other => panic!("expected Hello, got {other:?}"),
+        }
+    }
+
+    /// F-678: the helper emits exactly one `warn!` event when the peer
+    /// version differs and stays silent on a match. Capture the tracing
+    /// subscriber output and assert the event surface so the four
+    /// handshake legs share an audited contract.
+    #[test]
+    fn warn_if_schema_mismatch_emits_warn_on_drift() {
+        use std::io;
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::fmt::MakeWriter;
+
+        #[derive(Clone, Default)]
+        struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
+        impl io::Write for CaptureWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> MakeWriter<'a> for CaptureWriter {
+            type Writer = CaptureWriter;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let writer = CaptureWriter::default();
+        let buf = writer.0.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .with_target(true)
+            .with_writer(writer)
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            // Match → silent.
+            warn_if_schema_mismatch("shell", SCHEMA_VERSION, SCHEMA_VERSION);
+            // Mismatch → warn.
+            warn_if_schema_mismatch("shell", 999, SCHEMA_VERSION);
+        });
+
+        let captured = String::from_utf8(buf.lock().unwrap().clone()).expect("utf-8");
+        assert!(
+            captured.contains("schema_version mismatch"),
+            "expected mismatch warn in capture: {captured}",
+        );
+        assert!(
+            captured.contains("peer=\"shell\""),
+            "expected peer label in capture: {captured}",
+        );
+        assert!(
+            captured.contains("peer_schema_version=999"),
+            "expected peer version in capture: {captured}",
+        );
+        // Exactly one event — the matching call must not log.
+        assert_eq!(
+            captured.matches("schema_version mismatch").count(),
+            1,
+            "matching version should not log: {captured}",
+        );
     }
 }

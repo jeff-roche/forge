@@ -431,6 +431,13 @@ pub enum OciError {
 /// traffic — because containers ship without any tool-declared host
 /// allow-list today (CNI policy is future work, see
 /// `docs/architecture/isolation-model.md` §8.3).
+///
+/// The "inherit the runtime default" intent has its own variant
+/// ([`NetworkPolicy::RuntimeDefault`]) so callers can express it without
+/// reaching for a string sentinel. [`NetworkPolicy::Named`] is reserved
+/// for callers that want to pin a specific podman network by name —
+/// including the literal string `"default"` if such a network actually
+/// exists on the host.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum NetworkPolicy {
     /// `--network none` — no network namespace beyond loopback.
@@ -438,20 +445,29 @@ pub enum NetworkPolicy {
     /// Inherit the host network namespace (`--network host`). Reserved for
     /// trusted callers; never the default for Level 2.
     Host,
+    /// Inherit whatever network namespace the runtime applies by
+    /// default — emit no `--network` flag at all. Used by
+    /// [`SecurityOpts::permissive`] so test assertions of the
+    /// rendered argv are not perturbed by a network flag.
+    RuntimeDefault,
     /// Use a named podman network. The string is passed verbatim to
-    /// `--network <name>`.
+    /// `--network <name>` — including the literal string `"default"`,
+    /// which refers to a podman network of that name and is **not** a
+    /// sentinel for "inherit the runtime default" (use
+    /// [`NetworkPolicy::RuntimeDefault`] for that).
     Named(String),
 }
 
 impl NetworkPolicy {
-    /// Render as the value passed after `--network`. Returns `None` when
-    /// the policy is "use the runtime default" — currently nothing maps to
-    /// this, but it leaves room for future variants without churning the
-    /// argv-shaping call sites.
+    /// Render as the value passed after `--network`. Returns `None` for
+    /// [`NetworkPolicy::RuntimeDefault`] — that variant means "emit no
+    /// `--network` flag at all, inherit the runtime default" — and
+    /// `Some(...)` for every other variant including `Named(...)`.
     pub fn as_arg(&self) -> Option<&str> {
         match self {
             NetworkPolicy::None => Some("none"),
             NetworkPolicy::Host => Some("host"),
+            NetworkPolicy::RuntimeDefault => None,
             NetworkPolicy::Named(name) => Some(name.as_str()),
         }
     }
@@ -670,7 +686,7 @@ impl SecurityOpts {
             cap_drop: Vec::new(),
             cap_add: Vec::new(),
             read_only_rootfs: false,
-            network: NetworkPolicy::Named("default".to_string()), // inherit runtime default
+            network: NetworkPolicy::RuntimeDefault,
             userns: UserNsPolicy::Default,
             limits: ContainerLimits::default(),
         }
@@ -683,8 +699,9 @@ impl SecurityOpts {
     /// 2. one `--cap-drop <CAP>` per entry in `cap_drop`, in input order
     /// 3. one `--cap-add <CAP>` per entry in `cap_add`, in input order
     /// 4. `--read-only` (if set)
-    /// 5. `--network <value>` (always emitted unless the variant maps to
-    ///    `None`, which currently never happens)
+    /// 5. `--network <value>` (emitted for every [`NetworkPolicy`]
+    ///    variant except [`NetworkPolicy::RuntimeDefault`], which renders
+    ///    nothing so the runtime's own default network is inherited)
     /// 6. `--userns keep-id` (if `KeepId`)
     /// 7. resource limit flags from
     ///    [`ContainerLimits::to_create_flags`] — `--cpus`, `--memory`,
@@ -712,13 +729,12 @@ impl SecurityOpts {
             out.push("--read-only".to_string());
         }
         if let Some(value) = self.network.as_arg() {
-            // SecurityOpts::permissive uses Named("default") as a sentinel
-            // for "do not pin --network" — emit nothing in that case so
-            // the runtime's default network namespace is inherited.
-            if !(matches!(self.network, NetworkPolicy::Named(ref n) if n == "default")) {
-                out.push("--network".to_string());
-                out.push(value.to_string());
-            }
+            // RuntimeDefault returns None from `as_arg` and is the
+            // explicit "emit no --network flag" variant; every other
+            // variant — including a `Named("default")` referring to a
+            // podman network actually called `default` — renders here.
+            out.push("--network".to_string());
+            out.push(value.to_string());
         }
         if matches!(self.userns, UserNsPolicy::KeepId) {
             out.push("--userns".to_string());
@@ -1344,5 +1360,44 @@ mod tests {
             .expect("cap-add must be present");
         assert!(drop_idx < add_idx, "cap-drop must precede cap-add");
         assert_eq!(flags[add_idx + 1], "NET_BIND_SERVICE");
+    }
+
+    // ── #779: NetworkPolicy::RuntimeDefault replaces Named("default") ────
+
+    #[test]
+    fn runtime_default_renders_no_network_arg() {
+        // RuntimeDefault is the explicit "inherit the podman default
+        // network namespace" variant. It must render no `--network`
+        // flag so callers that want podman's own default get exactly
+        // that without a string sentinel.
+        assert_eq!(NetworkPolicy::RuntimeDefault.as_arg(), None);
+    }
+
+    #[test]
+    fn permissive_uses_runtime_default_variant() {
+        // The permissive preset is the canonical caller of
+        // RuntimeDefault. Pinning the variant here catches any future
+        // refactor that re-introduces a string sentinel.
+        let opts = SecurityOpts::permissive();
+        assert_eq!(opts.network, NetworkPolicy::RuntimeDefault);
+    }
+
+    #[test]
+    fn named_default_now_emits_network_flag() {
+        // The previous encoding silently swallowed `Named("default")`
+        // because it doubled as the sentinel for "emit nothing". With
+        // RuntimeDefault carrying that meaning, a real caller naming
+        // a podman network "default" must get `--network default`
+        // emitted verbatim.
+        let opts = SecurityOpts {
+            network: NetworkPolicy::Named("default".to_string()),
+            ..SecurityOpts::permissive()
+        };
+        let flags = opts.to_create_flags();
+        let net_idx = flags
+            .iter()
+            .position(|s| s == "--network")
+            .expect("--network must be emitted for Named(...)");
+        assert_eq!(flags[net_idx + 1], "default");
     }
 }

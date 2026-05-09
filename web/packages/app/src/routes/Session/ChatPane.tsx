@@ -646,6 +646,7 @@ const ParallelReadsGroup: Component<{
         tabIndex={0}
         aria-expanded={expanded()}
         aria-controls={`tool-call-group-body-${props.batchId}`}
+        aria-label={`parallel reads — ${props.calls.length} ${props.calls.length === 1 ? 'call' : 'calls'} (${aggregateStatus()})`}
         onClick={() => setExpanded((v) => !v)}
         onKeyDown={handleKeyDown}
       >

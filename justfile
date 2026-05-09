@@ -72,6 +72,13 @@ check-web:
     cd web && pnpm -r typecheck
     cd web && pnpm check-tokens
 
+# Markdown link-rot gate (F-705). Offline lane only — mirrors the
+# `internal-links` job in .github/workflows/link-check.yml. The
+# nightly external sweep is CI-only because it needs network and
+# scheduled cadence.
+check-links:
+    lychee --offline --no-progress 'docs/**/*.md' 'crates/**/README.md' 'web/packages/**/README.md' README.md CHANGELOG.md AGENTS.md
+
 # Both lanes.
 check: check-rust check-web
 

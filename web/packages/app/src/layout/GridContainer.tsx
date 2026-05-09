@@ -3,6 +3,7 @@ import type { LayoutTree } from '@forge/ipc';
 import { SplitPane } from './SplitPane';
 import { DropZoneOverlay } from './DropZoneOverlay';
 import type { DragState } from './useDragToDock';
+import './GridContainer.css';
 
 /**
  * F-150: GridContainer now consumes the serialized `LayoutTree` shape from
@@ -92,7 +93,6 @@ const GridNode: Component<{
               class="grid-leaf"
               data-testid={`grid-leaf-${leaf().id}`}
               data-leaf-id={leaf().id}
-              style={{ width: '100%', height: '100%', position: 'relative' }}
             >
               {props.renderLeaf(leaf())}
               <Show when={isTarget()}>

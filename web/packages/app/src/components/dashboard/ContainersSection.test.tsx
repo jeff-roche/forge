@@ -96,6 +96,16 @@ describe('ContainersSection (F-597)', () => {
     expect(queryByText(/containers · loading/i)).toBeFalsy();
   });
 
+  it('empty-state uses canonical mono noun-phrase copy with muted secondary hint (F-691)', async () => {
+    const { findByTestId, queryByTestId } = render(() => <ContainersSection />);
+    const empty = await findByTestId('containers-empty');
+    expect(empty.textContent).toBe('// no active containers');
+    // Educational hint moves to a separate, muted line.
+    const hint = queryByTestId('containers-empty-hint');
+    expect(hint).toBeTruthy();
+    expect(hint?.textContent).toMatch(/Level-2 isolation/);
+  });
+
   it('renders one row per registered container', async () => {
     const { fn } = makeBackend({
       containers: [
@@ -270,6 +280,37 @@ describe('ContainersSection (F-597)', () => {
       // Initial poll requests `tail` so the viewer seeds with recent history.
       expect(first.tail).not.toBeNull();
     });
+  });
+
+  // F-696: the log pane sits inside a `useFocusTrap` modal flyout. A
+  // `tabIndex={0}` on `<pre>` made it a Tab stop *inside* the trap, and
+  // Tab from there exited the modal. The pane must instead expose itself
+  // as `role="log"` (live region) without entering the focus order.
+  it('log pane is a live region (role=log) and is not a Tab stop', async () => {
+    const { fn } = makeBackend({
+      containers: [
+        {
+          container_id: 'cid-1',
+          session_id: 'sess-1',
+          image: 'alpine:3.19',
+          started_at: new Date().toISOString(),
+          stopped: false,
+        },
+      ],
+      logs: [{ stream: 'stdout', line: 'tick', timestamp: null }],
+    });
+    setInvokeForTesting(fn as never);
+
+    const { findByTestId, container } = render(() => <ContainersSection />);
+    const logsBtn = (await findByTestId('container-logs-btn-cid-1')) as HTMLButtonElement;
+    fireEvent.click(logsBtn);
+    await findByTestId('container-logs-flyout');
+    const pane = container.querySelector('.containers-section__log-pane') as HTMLElement | null;
+    expect(pane).not.toBeNull();
+    expect(pane!.getAttribute('role')).toBe('log');
+    expect(pane!.hasAttribute('tabindex')).toBe(false);
+    expect(pane!.getAttribute('aria-live')).toBe('polite');
+    expect(pane!.getAttribute('aria-label')).toMatch(/logs/i);
   });
 });
 

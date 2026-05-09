@@ -106,25 +106,34 @@ export const ProvidersSection: Component = () => {
 
       <Show when={snapshot.state === 'ready' && snapshot()}>
         {(data) => (
-          <Tabs
-            variant="radio"
-            class="providers__grid"
-            aria-label="Active provider"
-            aria-busy={isSubmitting()}
-            ref={setGridRef as never}
+          <Show
+            when={(data().entries?.length ?? 0) > 0}
+            fallback={
+              <p class="providers__empty" data-testid="providers-empty">
+                // no providers configured
+              </p>
+            }
           >
-            <For each={data().entries}>
-              {(entry) => (
-                <ProviderCard
-                  entry={entry}
-                  active={data().active === entry.id}
-                  pending={pendingId() === entry.id}
-                  disabled={isSubmitting()}
-                  onSelect={handleSelect}
-                />
-              )}
-            </For>
-          </Tabs>
+            <Tabs
+              variant="radio"
+              class="providers__grid"
+              aria-label="Active provider"
+              aria-busy={isSubmitting()}
+              ref={setGridRef as never}
+            >
+              <For each={data().entries}>
+                {(entry) => (
+                  <ProviderCard
+                    entry={entry}
+                    active={data().active === entry.id}
+                    pending={pendingId() === entry.id}
+                    disabled={isSubmitting()}
+                    onSelect={handleSelect}
+                  />
+                )}
+              </For>
+            </Tabs>
+          </Show>
         )}
       </Show>
     </section>
@@ -144,7 +153,7 @@ const ProviderCard: Component<ProviderCardProps> = (props) => {
   const ariaLabel = () => {
     const parts = [`Select ${props.entry.display_name}`];
     if (credentialNeeded()) parts.push('credential missing');
-    if (!props.entry.model_available) parts.push('no model configured');
+    if (!props.entry.model_available) parts.push('unconfigured');
     if (props.pending) parts.push('switching');
     return parts.join(', ');
   };
@@ -179,10 +188,10 @@ const ProviderCard: Component<ProviderCardProps> = (props) => {
 const ModelHint: Component<{ entry: ProviderEntry }> = (props) => (
   <Show
     when={props.entry.model_available}
-    fallback={<span class="provider-card__hint provider-card__hint--missing">no model</span>}
+    fallback={<span class="provider-card__hint provider-card__hint--missing">unconfigured</span>}
   >
     <span class="provider-card__hint">
-      {props.entry.model ?? 'model ready'}
+      {props.entry.model ?? 'ready'}
     </span>
   </Show>
 );

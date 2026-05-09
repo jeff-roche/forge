@@ -49,9 +49,10 @@ pub const CREDENTIALS_OWNER_LABEL: &str = "dashboard";
 /// `login_provider` calls.
 pub const MAX_API_KEY_BYTES: usize = 8 * 1024;
 
-/// Per-field byte cap on `provider_id`. Provider IDs are short, lowercase
-/// ASCII slugs.
-pub const MAX_PROVIDER_ID_BYTES: usize = 64;
+// F-675: `MAX_PROVIDER_ID_BYTES` is defined canonically in `crate::ipc` so
+// the credentials and providers IPC surfaces share one cap. Re-import here
+// rather than redeclaring.
+use crate::ipc::MAX_PROVIDER_ID_BYTES;
 
 /// Tauri-managed handle to the credential store. Held as an
 /// `Arc<dyn Credentials>` so the same state can wrap any `Credentials`

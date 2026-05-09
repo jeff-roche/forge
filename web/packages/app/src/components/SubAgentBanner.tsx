@@ -131,6 +131,7 @@ export const SubAgentBanner: Component<SubAgentBannerProps> = (props) => {
         onDblClick={openInMonitor}
         role="button"
         tabIndex={0}
+        aria-expanded={expanded()}
         onKeyDown={(e: KeyboardEvent) => {
           if (e.key === 'Enter' || e.key === ' ') {
             e.preventDefault();
@@ -238,7 +239,7 @@ export const SubAgentBanner: Component<SubAgentBannerProps> = (props) => {
                 data-testid={`sub-agent-banner-open-monitor-${props.turn.child_instance_id}`}
                 onClick={openInMonitor}
               >
-                OPEN MONITOR
+                OPEN IN NEW WINDOW
               </Button>
             }
           >

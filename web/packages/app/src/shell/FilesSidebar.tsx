@@ -273,7 +273,10 @@ export const FilesSidebar: Component<FilesSidebarProps> = (props) => {
             class="files-sidebar__menu"
             role="menu"
             data-testid="files-sidebar-menu"
-            style={{ top: `${target().y}px`, left: `${target().x}px` }}
+            style={{
+              '--menu-y': `${target().y}px`,
+              '--menu-x': `${target().x}px`,
+            }}
             onClick={(e) => e.stopPropagation()}
           >
             <li role="none">
@@ -330,7 +333,6 @@ interface TreeRowProps {
 const TreeRow: Component<TreeRowProps> = (props) => {
   const isDir = (): boolean => props.node.kind === 'Dir';
   const isOpen = (): boolean => props.isExpanded(props.node.path);
-  const indent = (): string => `${props.depth * 12}px`;
 
   const onClick = (): void => {
     if (isDir()) {
@@ -353,7 +355,7 @@ const TreeRow: Component<TreeRowProps> = (props) => {
         aria-expanded={isDir() ? isOpen() : undefined}
         data-testid="files-sidebar-row"
         data-path={props.node.path}
-        style={{ 'padding-left': indent() }}
+        style={{ '--row-depth': String(props.depth) }}
         onClick={onClick}
         onDblClick={onDoubleClick}
         onContextMenu={(e) => props.onContext(e, props.node)}

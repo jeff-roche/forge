@@ -27,11 +27,12 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use forge_core::{ApprovalScope, RerunVariant};
 use forge_ipc::{
-    read_frame_into_with_deadline, read_frame_with_deadline, write_frame, ClientInfo,
-    CompactTranscript, DeleteBranch, Hello, HelloAck, ImportMcpConfig, InterruptSession,
-    IpcMessage, IpcReadTimeout, ListMcpServers, McpImportResult, McpServersList, McpToggleResult,
-    PauseSession, RefineHandoff, RerunMessage, ResumeSession, SelectBranch, SendUserMessage,
-    Subscribe, SwitchProvider, ToggleMcpServer, ToolCallApproved, ToolCallRejected, PROTO_VERSION,
+    read_frame_into_with_deadline, read_frame_with_deadline, warn_if_schema_mismatch, write_frame,
+    ClientInfo, CompactTranscript, DeleteBranch, Hello, HelloAck, ImportMcpConfig,
+    InterruptSession, IpcMessage, IpcReadTimeout, ListMcpServers, McpImportResult, McpServersList,
+    McpToggleResult, PauseSession, RefineHandoff, RerunMessage, ResumeSession, SelectBranch,
+    SendUserMessage, Subscribe, SwitchProvider, ToggleMcpServer, ToolCallApproved,
+    ToolCallRejected, DEFAULT_PUMP_DEADLINE, PROTO_VERSION, SCHEMA_VERSION,
 };
 use serde::Serialize;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -44,13 +45,13 @@ use tokio::task::JoinHandle;
 /// has not framed an `HelloAck` within five seconds is wedged.
 const HANDSHAKE_FRAME_DEADLINE: Duration = Duration::from_secs(5);
 
-/// F-652: per-frame deadline on the steady-state event pump. The pump
-/// waits indefinitely for the *next* event in normal operation, so the
-/// deadline must be long enough to swallow real silence (an idle
-/// session between turns) without a false reset. Sixty seconds covers
-/// every realistic gap between frames and still bounds the worst case
-/// where a same-uid attacker pins the connection (CWE-770).
-const PUMP_FRAME_DEADLINE: Duration = Duration::from_secs(60);
+// F-652 / Issue #784: the steady-state event pump uses the crate-level
+// `forge_ipc::DEFAULT_PUMP_DEADLINE`. The pump waits indefinitely for the
+// *next* event in normal operation, so the deadline must be long enough to
+// swallow real silence (an idle session between turns) without a false
+// reset. Sixty seconds covers every realistic gap between frames and still
+// bounds the worst case where a same-uid attacker pins the connection
+// (CWE-770).
 
 /// Payload emitted to the webview for every session event forwarded by the
 /// background reader task. `event` is the daemon's typed [`forge_core::Event`]
@@ -241,6 +242,7 @@ impl SessionBridge {
                 pid: std::process::id(),
                 user: std::env::var("USER").unwrap_or_else(|_| "forge".to_string()),
             },
+            schema_version: SCHEMA_VERSION,
         });
         write_frame(&mut writer, &hello).await?;
 
@@ -250,6 +252,10 @@ impl SessionBridge {
         let IpcMessage::HelloAck(ack) = ack else {
             return Err(anyhow!("expected HelloAck, got unexpected frame"));
         };
+        // F-678: shell side of the bidirectional schema-version check.
+        // The daemon stamps its `SCHEMA_VERSION` into `HelloAck.schema_version`;
+        // logging a warn here closes the second leg of the handshake validation.
+        warn_if_schema_mismatch("daemon", ack.schema_version, SCHEMA_VERSION);
 
         let conn = Connection {
             writer: Arc::new(Mutex::new(writer)),
@@ -709,7 +715,8 @@ async fn pump_events(
     // frames grow the buffer in place once and the capacity is retained.
     let mut frame_buf: Vec<u8> = Vec::with_capacity(4096);
     loop {
-        match read_frame_into_with_deadline(&mut reader, &mut frame_buf, PUMP_FRAME_DEADLINE).await
+        match read_frame_into_with_deadline(&mut reader, &mut frame_buf, DEFAULT_PUMP_DEADLINE)
+            .await
         {
             Ok(IpcMessage::Event(event)) => {
                 sink.emit(SessionEventPayload {

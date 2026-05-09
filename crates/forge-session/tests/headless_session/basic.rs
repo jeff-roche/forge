@@ -101,6 +101,7 @@ async fn full_headless_turn_emits_correct_event_sequence() {
                 pid: std::process::id(),
                 user: "tester".into(),
             },
+            schema_version: forge_ipc::SCHEMA_VERSION,
         }),
     )
     .await

@@ -234,6 +234,14 @@ describe('ProvidersSection (F-586)', () => {
     expect(alert.textContent).toMatch(/keyring backend down/i);
   });
 
+  it('empty-state uses canonical mono noun-phrase copy when no providers configured (F-691)', async () => {
+    setupInvokeMock({ entries: [], active: null });
+    const { findByTestId } = render(() => <ProvidersSection />);
+    await waitForFetch();
+    const empty = await findByTestId('providers-empty');
+    expect(empty.textContent).toBe('// no providers configured');
+  });
+
   it('drops a second click while the first switch is in flight', async () => {
     // F-586 review: double-tap guard. The first `setActiveProvider` IPC
     // is still pending (its promise hasn't resolved), so a second click
@@ -288,6 +296,43 @@ describe('ProvidersSection (F-586)', () => {
     fireEvent.click(openaiAfter);
     await waitForFetch();
     expect(setActiveCallCount).toBe(2);
+  });
+
+  describe('voice & terminology (F-690)', () => {
+    it('renders "unconfigured" not "no model" when a provider has no model_available', async () => {
+      setupInvokeMock();
+      const { findAllByRole } = render(() => <ProvidersSection />);
+      await waitForFetch();
+
+      const radios = await findAllByRole('radio');
+      const anthropic = radios.find((r) => r.textContent?.includes('Anthropic'))!;
+      expect(anthropic.textContent).toContain('unconfigured');
+      expect(anthropic.textContent).not.toMatch(/no model/i);
+    });
+
+    it('renders "ready" not "model ready" when model_available is true with no model name', async () => {
+      setupInvokeMock({
+        entries: [sample({ id: 'ollama', display_name: 'Ollama', model_available: true })],
+      });
+      const { findAllByRole } = render(() => <ProvidersSection />);
+      await waitForFetch();
+
+      const radios = await findAllByRole('radio');
+      expect(radios[0]?.textContent).toContain('ready');
+      expect(radios[0]?.textContent).not.toMatch(/model ready/i);
+    });
+
+    it('aria-label uses provider terminology, never "model"', async () => {
+      setupInvokeMock();
+      const { findAllByRole } = render(() => <ProvidersSection />);
+      await waitForFetch();
+
+      const radios = await findAllByRole('radio');
+      const anthropic = radios.find((r) => r.textContent?.includes('Anthropic'))!;
+      const label = anthropic.getAttribute('aria-label') ?? '';
+      expect(label).not.toMatch(/model/i);
+      expect(label.toLowerCase()).toContain('unconfigured');
+    });
   });
 
   it('marks the pending card with aria-busy while the IPC is in flight', async () => {

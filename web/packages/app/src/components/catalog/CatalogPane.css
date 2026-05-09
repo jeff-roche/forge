@@ -155,6 +155,35 @@
   gap: var(--sp-2);
 }
 
+/* F-694: provider color discipline. Provider-scoped groups inherit the
+ * accent color of the provider that owns the rows; matches the convention
+ * the dashboard ProvidersSection enforces (see docs/design/ai-patterns.md
+ * §"Provider identity"). The accent paints a left border on the group and
+ * tints the group label to keep the visual identity consistent across the
+ * pane and the dashboard.
+ */
+.catalog__group[data-provider] {
+  padding-left: var(--sp-3);
+  border-left: 3px solid var(--color-provider-accent, var(--color-border-2));
+}
+
+.catalog__group[data-provider='anthropic'] {
+  --color-provider-accent: var(--color-provider-anthropic);
+}
+.catalog__group[data-provider='openai'] {
+  --color-provider-accent: var(--color-provider-openai);
+}
+.catalog__group[data-provider='local'] {
+  --color-provider-accent: var(--color-provider-local);
+}
+.catalog__group[data-provider='custom'] {
+  --color-provider-accent: var(--color-provider-custom);
+}
+
+.catalog__group[data-provider] .catalog__group-label {
+  color: var(--color-provider-accent);
+}
+
 .catalog__group-label {
   margin: 0;
   font-family: var(--font-mono);
@@ -205,6 +234,38 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* F-694: Provider-typed rows carry a 6px dot ahead of the name, painted in
+ * the provider's accent color. This is the per-row equivalent of the group
+ * border applied to provider-scoped buckets.
+ */
+.catalog-row[data-provider] {
+  --color-provider-accent: var(--color-border-2);
+}
+.catalog-row[data-provider='anthropic'] {
+  --color-provider-accent: var(--color-provider-anthropic);
+}
+.catalog-row[data-provider='openai'] {
+  --color-provider-accent: var(--color-provider-openai);
+}
+.catalog-row[data-provider='local'] {
+  --color-provider-accent: var(--color-provider-local);
+}
+.catalog-row[data-provider='custom'] {
+  --color-provider-accent: var(--color-provider-custom);
+}
+
+.catalog-row[data-provider] .catalog-row__name::before {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-provider-accent);
+  margin-right: var(--sp-2);
+  vertical-align: middle;
+  flex-shrink: 0;
 }
 
 .catalog-row__meta {

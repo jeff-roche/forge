@@ -1,0 +1,10 @@
+/*
+ * GridContainer leaf — fills the SplitPane cell and establishes the
+ * positioning context for `DropZoneOverlay` (which uses `inset: 0`).
+ */
+
+.grid-leaf {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}

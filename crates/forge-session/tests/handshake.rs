@@ -1,5 +1,5 @@
 #![allow(deprecated)] // F-652: tests/benches still drive the deprecated bare read_frame helpers.
-use forge_ipc::{ClientInfo, Hello, IpcMessage, PROTO_VERSION};
+use forge_ipc::{ClientInfo, Hello, IpcMessage, PROTO_VERSION, SCHEMA_VERSION};
 use forge_providers::MockProvider;
 use forge_session::server::{serve, serve_with_session};
 use forge_session::session::Session;
@@ -8,6 +8,10 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
+
+// F-678: bidirectional schema-version warn tests use the shared capture
+// subscriber to assert the daemon-side `warn!` actually fires.
+mod common;
 
 /// F-354: The deadline tests mutate process-wide env vars
 /// (`FORGE_IPC_HANDSHAKE_DEADLINE_MS` / `FORGE_IPC_IDLE_TIMEOUT_MS`) that
@@ -53,6 +57,7 @@ async fn handshake_succeeds_with_valid_proto() {
             pid: std::process::id(),
             user: "test-user".into(),
         },
+        schema_version: forge_ipc::SCHEMA_VERSION,
     });
     forge_ipc::write_frame(&mut stream, &hello).await.unwrap();
 
@@ -83,6 +88,7 @@ async fn unknown_proto_rejected() {
             pid: std::process::id(),
             user: "test-user".into(),
         },
+        schema_version: forge_ipc::SCHEMA_VERSION,
     });
     forge_ipc::write_frame(&mut stream, &hello).await.unwrap();
 
@@ -101,6 +107,7 @@ async fn perform_handshake(stream: &mut UnixStream) -> forge_ipc::HelloAck {
             pid: std::process::id(),
             user: "test-user".into(),
         },
+        schema_version: forge_ipc::SCHEMA_VERSION,
     });
     forge_ipc::write_frame(stream, &hello).await.unwrap();
     let response = forge_ipc::read_frame(stream).await.unwrap();
@@ -275,6 +282,7 @@ async fn handshake_deadline_disconnects_half_handshaked_peer() {
             pid: std::process::id(),
             user: "test-user".into(),
         },
+        schema_version: forge_ipc::SCHEMA_VERSION,
     });
     forge_ipc::write_frame(&mut stream, &hello).await.unwrap();
     let _ack: IpcMessage = forge_ipc::read_frame(&mut stream).await.unwrap();
@@ -327,6 +335,7 @@ async fn post_handshake_idle_timeout_disconnects_peer() {
             pid: std::process::id(),
             user: "test-user".into(),
         },
+        schema_version: forge_ipc::SCHEMA_VERSION,
     });
     forge_ipc::write_frame(&mut stream, &hello).await.unwrap();
     let _ack: IpcMessage = forge_ipc::read_frame(&mut stream).await.unwrap();
@@ -409,5 +418,133 @@ async fn garbage_frame_rejected() {
     assert!(
         result.is_err(),
         "expected connection to be closed for garbage frame"
+    );
+}
+
+/// F-678: a shell whose `Hello.schema_version` does not match the daemon's
+/// `SCHEMA_VERSION` must complete the handshake (warn, do not reject) and
+/// the daemon's `warn!` must fire so a version-skewed peer surfaces in
+/// operator logs. This is the explicit DoD acceptance test for the
+/// daemon↔shell leg.
+// The capture-subscriber lock is a `std::sync::Mutex` held across awaits
+// to serialize the `drain_capture()` invariant — the existing
+// `bg_agents_tracing` tests use the same pattern. Clippy's concern
+// (waker deadlocks) doesn't apply: the guard is uncontended apart from
+// other capture-reading tests, which serialize through the same lock.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn handshake_with_mismatched_schema_version_warns_and_proceeds() {
+    let _test_lock = common::capture_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    common::install_capture_subscriber();
+    let _ = common::drain_capture(); // clear any prior emissions
+
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("schema-mismatch.sock");
+
+    let server_path = path.clone();
+    tokio::spawn(async move {
+        serve(&server_path, false, false).await.unwrap();
+    });
+
+    let mut stream = connect_with_retry(&path).await;
+
+    // Stamp a deliberately wrong schema_version. The daemon should warn
+    // but still produce a HelloAck.
+    let bogus_schema: u32 = SCHEMA_VERSION.wrapping_add(42);
+    let hello = IpcMessage::Hello(Hello {
+        proto: PROTO_VERSION,
+        client: ClientInfo {
+            kind: "shell".into(),
+            pid: std::process::id(),
+            user: "test-user".into(),
+        },
+        schema_version: bogus_schema,
+    });
+    forge_ipc::write_frame(&mut stream, &hello).await.unwrap();
+
+    let response = forge_ipc::read_frame(&mut stream).await.unwrap();
+    let IpcMessage::HelloAck(ack) = response else {
+        panic!("expected HelloAck, got {response:?}");
+    };
+    assert_eq!(
+        ack.schema_version, SCHEMA_VERSION,
+        "daemon should still ack with its local SCHEMA_VERSION",
+    );
+
+    // Give the daemon a moment to flush the warn through the subscriber.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let logs = common::drain_capture();
+    assert!(
+        logs.contains("schema_version mismatch"),
+        "expected mismatch warn in capture, got: {logs}",
+    );
+    assert!(
+        logs.contains("peer=\"shell\""),
+        "expected peer=shell label in capture, got: {logs}",
+    );
+    assert!(
+        logs.contains(&format!("peer_schema_version={bogus_schema}")),
+        "expected reported peer schema_version in capture, got: {logs}",
+    );
+}
+
+/// F-678: a shell that omits `schema_version` entirely (legacy peer that
+/// pre-dates the bidirectional check) deserializes via `#[serde(default)]`
+/// to `0`, surfaces through the warn path, and the connection still
+/// completes. Pins the wire-shape compatibility contract.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn handshake_with_legacy_hello_omitting_schema_version_warns_and_proceeds() {
+    let _test_lock = common::capture_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    common::install_capture_subscriber();
+    let _ = common::drain_capture();
+
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("legacy-hello.sock");
+
+    let server_path = path.clone();
+    tokio::spawn(async move {
+        serve(&server_path, false, false).await.unwrap();
+    });
+
+    let mut stream = connect_with_retry(&path).await;
+
+    // Hand-build a legacy `Hello` body with no `schema_version` key. We
+    // can't use the typed `Hello { ... }` literal because the field is
+    // mandatory in Rust; emit raw JSON to mimic an older shell.
+    let body = serde_json::json!({
+        "t": "Hello",
+        "proto": PROTO_VERSION,
+        "client": {
+            "kind": "shell",
+            "pid": std::process::id(),
+            "user": "legacy",
+        },
+    });
+    let bytes = serde_json::to_vec(&body).unwrap();
+    let len = bytes.len() as u32;
+    use tokio::io::AsyncWriteExt;
+    stream.write_u32(len).await.unwrap();
+    stream.write_all(&bytes).await.unwrap();
+
+    let response = forge_ipc::read_frame(&mut stream).await.unwrap();
+    let IpcMessage::HelloAck(ack) = response else {
+        panic!("expected HelloAck for legacy peer, got {response:?}");
+    };
+    assert_eq!(ack.schema_version, SCHEMA_VERSION);
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let logs = common::drain_capture();
+    assert!(
+        logs.contains("schema_version mismatch"),
+        "legacy peer should still warn (default 0 vs local): {logs}",
+    );
+    assert!(
+        logs.contains("peer_schema_version=0"),
+        "legacy peer reports default 0: {logs}",
     );
 }

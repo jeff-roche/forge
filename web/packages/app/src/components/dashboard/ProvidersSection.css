@@ -45,6 +45,20 @@
   gap: var(--sp-3);
 }
 
+.providers__loading,
+.providers__empty {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  letter-spacing: 0.2em;
+  margin: 0;
+}
+
+.providers__empty {
+  color: var(--color-text-tertiary);
+  letter-spacing: 0.05em;
+}
+
 .providers__error,
 .providers__action-error {
   display: flex;
