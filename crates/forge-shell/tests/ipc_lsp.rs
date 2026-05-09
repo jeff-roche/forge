@@ -339,33 +339,46 @@ fn lsp_start_rejects_arbitrary_binary_path_field() {
 // DoD: initialize → lsp_message event → shutdown round trip via IPC
 // ---------------------------------------------------------------------------
 
-/// Collect `lsp_message` payloads targeted at `window` until `deadline`
-/// elapses. Returns parsed messages so assertions can inspect structure.
-fn drain_lsp_messages(
-    window: &tauri::WebviewWindow<tauri::test::MockRuntime>,
-    deadline: Instant,
-) -> Vec<Value> {
-    use std::sync::{Arc, Mutex};
-    let collected: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
-    let sink = Arc::clone(&collected);
-    let _listener = window.listen("lsp_message", move |ev| {
-        if let Ok(v) = serde_json::from_str::<Value>(ev.payload()) {
-            sink.lock().unwrap().push(v);
-        }
-    });
-    while Instant::now() < deadline {
-        if !collected.lock().unwrap().is_empty() {
-            // Don't break on first event — a couple of frames may arrive
-            // close together; give the reader a beat.
-            std::thread::sleep(Duration::from_millis(50));
-            if collected.lock().unwrap().len() >= 2 {
-                break;
+/// Subscription to `lsp_message` events on a webview. Registering the
+/// listener **before** triggering the LSP roundtrip closes the race window
+/// where an event arrives between `lsp_send` and a later listener attach
+/// (the original cause of #816 flakes). The channel is signalled by Tauri's
+/// listener callback, so waiters wake immediately on arrival instead of
+/// polling on a fixed cadence.
+struct LspMessageStream {
+    rx: std::sync::mpsc::Receiver<Value>,
+}
+
+impl LspMessageStream {
+    fn subscribe(window: &tauri::WebviewWindow<tauri::test::MockRuntime>) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        // The listener handle is intentionally leaked: the listener lives
+        // as long as the window does, and the channel sender drops when the
+        // window's event loop tears down.
+        let _id = window.listen("lsp_message", move |ev| {
+            if let Ok(v) = serde_json::from_str::<Value>(ev.payload()) {
+                let _ = tx.send(v);
             }
-        }
-        std::thread::sleep(Duration::from_millis(25));
+        });
+        LspMessageStream { rx }
     }
-    let out = collected.lock().unwrap().clone();
-    out
+
+    /// Block until at least one message arrives or `timeout` elapses.
+    /// Returns every message received within the window so assertions can
+    /// inspect the first frame's shape; subsequent frames are drained
+    /// non-blockingly so the test doesn't lose them.
+    fn collect_until_first(&self, timeout: Duration) -> Vec<Value> {
+        let mut out = Vec::new();
+        match self.rx.recv_timeout(timeout) {
+            Ok(v) => out.push(v),
+            Err(_) => return out,
+        }
+        // Drain anything else that arrived back-to-back without blocking.
+        while let Ok(v) = self.rx.try_recv() {
+            out.push(v);
+        }
+        out
+    }
 }
 
 #[test]
@@ -384,6 +397,14 @@ fn initialize_round_trip_emits_lsp_message_on_owner_webview() {
         }),
     )
     .expect("lsp_start");
+
+    // Subscribe BEFORE issuing the request. Pre-#816 the listener was
+    // registered after `lsp_send`, opening a race: under loaded runners the
+    // mock LSP could write its response before the test's listener attached,
+    // so the event was emitted into the void and the assertion below fired.
+    // Subscribing first guarantees every frame produced by the supervisor
+    // forwarder lands in the channel.
+    let stream = LspMessageStream::subscribe(&window);
 
     // Give the supervisor a moment to spawn the child + install stdin. The
     // transport returns `server not running` until then; retrying until
@@ -412,8 +433,10 @@ fn initialize_round_trip_emits_lsp_message_on_owner_webview() {
         std::thread::sleep(Duration::from_millis(50));
     }
 
-    // Collect the response event.
-    let messages = drain_lsp_messages(&window, Instant::now() + Duration::from_secs(5));
+    // Block on the listener channel — wakes immediately when the supervisor
+    // forwarder emits the response. The 5s budget is a safety net for stuck
+    // CI runners; the test normally returns within a few milliseconds.
+    let messages = stream.collect_until_first(Duration::from_secs(5));
     assert!(
         !messages.is_empty(),
         "expected at least one lsp_message event"
