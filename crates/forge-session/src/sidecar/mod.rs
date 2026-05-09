@@ -101,6 +101,24 @@ const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_millis(2000);
 /// memory.
 const COMMAND_CHANNEL_DEPTH: usize = 64;
 
+/// Buffer depth on the sidecar → daemon event channel.
+///
+/// F-658: the inbound `SidecarMessage::Event` reader hands frames to a
+/// dedicated emitter task through a bounded `mpsc::channel`. A
+/// misbehaving (or compromised) sidecar that emits at line rate is
+/// back-pressured at this boundary: once the channel is full, the read
+/// loop awaits on `Sender::send`, the kernel UDS read buffer fills, and
+/// the sidecar's own [`forge_ipc::write_frame`] call blocks. End-to-end
+/// flow control with a documented memory ceiling — no daemon-side queue
+/// can grow unbounded regardless of peer behavior.
+///
+/// Sized at 1024 frames (~few-hundred-KiB worst case for typical
+/// `Event` payloads) so a normal turn's burst — token streaming chunks
+/// plus tool-call envelopes — never observes backpressure under
+/// healthy conditions, but a sustained flood saturates well before
+/// memory pressure.
+pub const EVENT_CHANNEL_DEPTH: usize = 1024;
+
 /// Resolve the supervisor's effective handshake deadline. Reads the
 /// same `FORGE_IPC_HANDSHAKE_DEADLINE_MS` env override the daemon's
 /// shell-facing handshake honors so `cargo test` can wind the value
@@ -317,6 +335,17 @@ impl SidecarSupervisor {
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<ShutdownRequest>();
         let pid_cell = Arc::new(AtomicU32::new(initial.child_pid));
 
+        // F-658: decouple inbound-event reads from sink emission with a
+        // bounded mpsc. The supervisor task pushes onto `event_tx` and
+        // backpressures the read loop when full; the emitter task drains
+        // `event_rx` into the sink without ever blocking the IPC read
+        // path. Failure-path escalations bypass the channel via the
+        // retained `event_sink` clone in `SupervisorTask` so an
+        // exhausted-budget event is delivered even if the channel is
+        // saturated.
+        let (event_tx, event_rx) = mpsc::channel::<Event>(EVENT_CHANNEL_DEPTH);
+        let emitter_join = spawn_event_emitter(event_rx, event_sink.clone(), instance_id.clone());
+
         let supervisor = SupervisorTask {
             socket_dir: self.socket_dir.clone(),
             forged_agent_path: self.forged_agent_path.clone(),
@@ -325,6 +354,8 @@ impl SidecarSupervisor {
             instance_id: instance_id.clone(),
             params,
             event_sink: event_sink.clone(),
+            event_tx,
+            emitter_join: Some(emitter_join),
             command_rx,
             shutdown_rx,
             pid_cell: pid_cell.clone(),
@@ -517,7 +548,18 @@ struct SupervisorTask {
     socket_path: PathBuf,
     instance_id: AgentInstanceId,
     params: SpawnParams,
+    /// Direct sink reference. Used **only** for failure-path
+    /// escalations (`emit_failure`); routine inbound events flow through
+    /// `event_tx` so the F-658 backpressure contract is preserved.
     event_sink: Arc<dyn EventSink>,
+    /// Bounded sender feeding the per-supervisor emitter task. Frames
+    /// arrive on the IPC read half; the supervisor awaits this send so
+    /// a slow sink propagates backpressure all the way to the sidecar.
+    event_tx: mpsc::Sender<Event>,
+    /// JoinHandle for the emitter task. Held `Option<>` so the
+    /// supervisor can `take()` it on shutdown, drop the sender, and
+    /// await final drain.
+    emitter_join: Option<JoinHandle<()>>,
     command_rx: mpsc::Receiver<SidecarMessage>,
     shutdown_rx: oneshot::Receiver<ShutdownRequest>,
     pid_cell: Arc<AtomicU32>,
@@ -561,6 +603,7 @@ impl SupervisorTask {
                         instance_id = %self.instance_id,
                         "sidecar supervisor exiting after clean shutdown"
                     );
+                    self.drain_emitter().await;
                     return;
                 }
                 LifecycleOutcome::Crashed(reason) => {
@@ -589,6 +632,7 @@ impl SupervisorTask {
                             "sidecar exhausted retry budget; escalating to BackgroundAgentCompleted (failure)"
                         );
                         self.emit_failure(reason).await;
+                        self.drain_emitter().await;
                         return;
                     }
 
@@ -650,6 +694,7 @@ impl SupervisorTask {
                                     "sidecar restart-after-crash budget exhausted; escalating"
                                 );
                                 self.emit_failure(format!("restart failed: {e}")).await;
+                                self.drain_emitter().await;
                                 return;
                             }
                             // Otherwise sleep briefly to avoid a hot
@@ -677,6 +722,7 @@ impl SupervisorTask {
                                     );
                                     self.emit_failure(format!("relaunch retry failed: {e2}"))
                                         .await;
+                                    self.drain_emitter().await;
                                     return;
                                 }
                             }
@@ -853,12 +899,21 @@ impl SupervisorTask {
     async fn handle_inbound(&self, frame: SidecarMessage) -> Option<String> {
         match frame {
             SidecarMessage::Event(ev) => {
-                if let Err(e) = self.event_sink.emit(ev.event).await {
+                // F-658: route routine events through the bounded
+                // channel. `send().await` parks the read loop when the
+                // channel is full — that's the daemon-side backpressure
+                // signal that propagates back through the kernel UDS
+                // buffer to the sidecar's writer. A `Closed` error
+                // means the emitter task has exited (sink dropped or
+                // panicked); log and continue rather than taking the
+                // supervisor down on a downstream subscriber's
+                // collapse.
+                if let Err(e) = self.event_tx.send(ev.event).await {
                     warn!(
                         target: "forge_session::sidecar",
                         instance_id = %self.instance_id,
                         error = %e,
-                        "event_sink emit failed"
+                        "event channel closed; emitter task gone"
                     );
                 }
                 None
@@ -937,6 +992,31 @@ impl SupervisorTask {
         let _ = tokio::fs::remove_file(&self.socket_path).await;
     }
 
+    /// Close the event channel and await the emitter task's final
+    /// drain so callers observing the supervisor's exit are guaranteed
+    /// every accepted frame has reached the sink. Idempotent — calling
+    /// twice is a no-op because the JoinHandle has been taken.
+    async fn drain_emitter(&mut self) {
+        // Replace `event_tx` with a fresh, unconnected sender so the
+        // original is dropped here; the emitter task observes
+        // `recv() -> None` and exits. We can't simply move out of
+        // `self.event_tx` because the surrounding methods take `&mut self`
+        // for the duration of the supervisor's run.
+        let (sentinel_tx, _) = mpsc::channel::<Event>(1);
+        let closing = std::mem::replace(&mut self.event_tx, sentinel_tx);
+        drop(closing);
+        if let Some(join) = self.emitter_join.take() {
+            if let Err(e) = join.await {
+                warn!(
+                    target: "forge_session::sidecar",
+                    instance_id = %self.instance_id,
+                    error = %e,
+                    "event emitter task did not exit cleanly"
+                );
+            }
+        }
+    }
+
     /// Drop crash-log entries older than [`RETRY_WINDOW`].
     fn prune_crash_log(&mut self, now: Instant) {
         while let Some(&front) = self.crash_log.front() {
@@ -947,6 +1027,49 @@ impl SupervisorTask {
             }
         }
     }
+}
+
+/// F-658: spawn the event emitter task that drains a bounded channel
+/// of `Event`s into a real [`EventSink`].
+///
+/// The supervisor's IPC read loop pushes inbound `SidecarMessage::Event`
+/// payloads onto the paired [`mpsc::Sender`] using `send().await`. When
+/// the sink is slow, the channel fills, the read loop parks, the kernel
+/// UDS read buffer fills, and the sidecar's writer blocks — end-to-end
+/// flow control with a documented memory ceiling
+/// ([`EVENT_CHANNEL_DEPTH`]).
+///
+/// Sink errors are logged at `warn!` and **do not** stop the task —
+/// dropping the entire pump on a single transient failure would leave
+/// the daemon's read loop wedged on a saturated channel forever. The
+/// task exits only when its receiver closes (sender dropped), which
+/// happens on the supervisor's shutdown / failure-escalation path.
+///
+/// Exposed as a free function (rather than baked into the supervisor)
+/// so the F-658 regression test can drive the same drain logic without
+/// spawning a real `forged-agent` binary.
+pub fn spawn_event_emitter(
+    mut rx: mpsc::Receiver<Event>,
+    sink: Arc<dyn EventSink>,
+    instance_id: AgentInstanceId,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            if let Err(e) = sink.emit(event).await {
+                warn!(
+                    target: "forge_session::sidecar",
+                    instance_id = %instance_id,
+                    error = %e,
+                    "event_sink emit failed"
+                );
+            }
+        }
+        debug!(
+            target: "forge_session::sidecar",
+            instance_id = %instance_id,
+            "event emitter task drained; exiting"
+        );
+    })
 }
 
 /// Mode-700 the per-supervisor socket dir. Idempotent: a pre-existing
