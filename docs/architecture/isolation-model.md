@@ -103,7 +103,7 @@ and broadened in F-680 to host more than one runtime
 |---|---|
 | `detect()` | Probe the host and classify failure into one of the canonical `OciError` variants (`RuntimeMissing`, `RuntimeBroken`, `RootlessUnavailable`). |
 | `pull(image)` | Idempotent image fetch into the local store. |
-| `create(image, argv: &[&str])` | Create a container with the given in-container command. Argv is borrowed `&str` slices so callers don't have to allocate. |
+| `create(image, argv: &[&str], opts: &SecurityOpts)` | Create a container with the given in-container command and security-hardening flags. Argv is borrowed `&str` slices so callers don't have to allocate. The `opts` parameter is the F-642 plumbing point — see *Security hardening defaults* below. |
 | `start(handle)` / `stop(handle)` / `remove(handle)` | Lifecycle transitions. |
 | `exec(handle, argv: &[&str])` | Run a command inside a started container. |
 | `stats(handle)` | Snapshot resource usage. Implementations call `parse_stats` after fetching the runtime's stats blob. |
@@ -157,6 +157,59 @@ delegates to `session.exec_step(argv)`. The unified return shape is
 > `SandboxedCommand` instances per turn that all need to share the
 > same pre-warmed container, and `Box` cannot be cloned across those
 > handles.
+
+#### Security hardening defaults
+
+Rootless podman alone is not sufficient — the container's effective
+capability set, `NoNewPrivs` flag, network namespace, rootfs writability,
+and user namespace mapping all default to permissive values that leave
+escape-class CVEs in the kernel, podman, or `runc` exploitable from
+inside the sandbox (NIST SP 800-190 §4.5; CWE-269). F-642 closes that
+gap by routing every Level 2 `create` through `forge_oci::SecurityOpts`,
+applied as `podman create` flags between the verb and the IMAGE
+positional. The strict preset returned by `SecurityOpts::hardened_default`
+is what `Level2Session::create` ships, and what every production caller
+should reach for.
+
+| Flag rendered | Field | Default | Threat addressed |
+|---|---|---|---|
+| `--security-opt no-new-privileges` | `no_new_privileges: bool` | `true` | setuid binaries / file-cap escalation inside the container |
+| `--cap-drop ALL` | `cap_drop: Vec<String>` | `["ALL"]` | rootless-default capability set (`CAP_SETUID`, `CAP_NET_RAW`, etc.) |
+| `--cap-add <CAP>` (none) | `cap_add: Vec<String>` | `[]` (empty allow-list) | adds capabilities back after `cap-drop`. The `sleep infinity` init and `podman exec`'d agent commands need none; future tools requiring a capability must add it explicitly here, not by shrinking `cap_drop`. |
+| `--read-only` | `read_only_rootfs: bool` | `true` | persistence and anti-forensic writes to `/usr`, `/etc`, `/lib`, and the tmpfs-style runtime state directories |
+| `--network none` | `network: NetworkPolicy` | `NetworkPolicy::None` | data exfiltration / lateral movement / SSRF from inside the sandbox |
+| `--userns keep-id` | `userns: UserNsPolicy` | `UserNsPolicy::KeepId` | nested rootless mapping that turns workspace mounts hostile in either direction |
+
+The flag rendering is deterministic (pinned by
+`SecurityOpts::to_create_flags` and asserted by both unit and
+integration tests); ordering is `--security-opt` → `--cap-drop` →
+`--cap-add` → `--read-only` → `--network` → `--userns`. Operators
+auditing the daemon's `tracing` log can grep for the same fixed shape.
+
+> **Capability allow-list is intentionally empty.** Phase 3 Level 2
+> only ships a `sleep infinity` init and runs caller argv through
+> `podman exec`. Neither needs a non-zero capability, so the strict
+> default drops everything and adds nothing back. When a future
+> tool genuinely needs a capability (e.g. `CAP_NET_BIND_SERVICE` for
+> a privileged-port MCP server), the call site adds it explicitly to
+> `SecurityOpts::cap_add`. The rule: `cap_drop` stays at `["ALL"]`
+> forever — relaxations live in `cap_add`.
+
+> **Mounts and tmpfs.** `--read-only` makes the rootfs immutable,
+> but most agent tooling needs *some* writable scratch space.
+> Wiring named tmpfs / volume mounts (`/workspace`, `/tmp`,
+> `~/.config/forge/certs/`) is downstream work — see *Mounts (future
+> work)* below, and the F-642 follow-ups in the Phase 3 audit batch.
+> Until those land, agents that need to write fall back to Level 1
+> via the auto-fallback path or fail loudly inside the container.
+
+> **Drop-cleanup path.** The synchronous panic-safety net
+> (`Level2Session::drop`) shells out to `podman rm -f <id>`, not
+> `podman create`, so security flags don't apply there — the only
+> work the cleanup does is reap the already-created container.
+> If a future runtime grows its own teardown shape, the safety-net
+> argv abstraction would inherit the same "no `create` flags here"
+> property.
 
 #### Resource limits
 
@@ -268,10 +321,18 @@ level.
 - `~/.config/forge/certs/` mounted at `/etc/forge/certs/` for provider access.
 - No home dir, no `/tmp` cross-mount.
 
-#### Network (future work)
+#### Network
 
-- Default: no network.
+- **Default: `--network none`** (F-642). The container has only loopback
+  inside its own namespace; no inbound or outbound traffic is
+  reachable. This is the strictest interpretation of the F-642 DoD's
+  "restricted network" requirement and the same default Phase 3
+  ships unless a tool declares otherwise.
 - Declared hosts (for MCP or tools): CNI policy allows only those.
+  Tracked as future work — until it lands, tools that need network
+  must run at Level 1 or be wrapped in a Level 2 session whose
+  `SecurityOpts::network` is explicitly relaxed by the call site
+  (rare; document the relaxation).
 
 #### Trade-offs vs Level 1
 
@@ -280,7 +341,7 @@ level.
 | Blast radius of a compromised tool | Process tree of one sandbox | Container rootfs + namespace |
 | Cold-start cost | Microseconds (fork+exec) | Image pull (one-off) + container create+start (~hundreds of ms, once per session) |
 | Per-step cost | fork+exec | `podman exec` (~tens of ms) |
-| Network containment | None (open network) | CNI policy (future); default-deny once mounts are wired |
+| Network containment | None (open network) | `--network none` by default (F-642); CNI policy for declared hosts is future work |
 | Filesystem containment | `forge-fs` path checks | Container rootfs by construction |
 | Resource limits | `setrlimit` (per-process / per-uid) + cgroup v2 `pids.max` (per-sandbox) | cgroup v2 `cpu.max` / `memory.max` / `pids.max` (per-container) |
 | Operator burden | Linux + cgroup v2 | Linux + cgroup v2 + rootless `podman` |
