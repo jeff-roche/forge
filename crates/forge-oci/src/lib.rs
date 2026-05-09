@@ -240,6 +240,192 @@ pub enum OciError {
     },
 }
 
+/// Network policy applied at container create time.
+///
+/// Maps directly onto `podman create --network <value>`. The default for
+/// Level 2 sandboxes is [`NetworkPolicy::None`] — no inbound or outbound
+/// traffic — because containers ship without any tool-declared host
+/// allow-list today (CNI policy is future work, see
+/// `docs/architecture/isolation-model.md` §8.3).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum NetworkPolicy {
+    /// `--network none` — no network namespace beyond loopback.
+    None,
+    /// Inherit the host network namespace (`--network host`). Reserved for
+    /// trusted callers; never the default for Level 2.
+    Host,
+    /// Use a named podman network. The string is passed verbatim to
+    /// `--network <name>`.
+    Named(String),
+}
+
+impl NetworkPolicy {
+    /// Render as the value passed after `--network`. Returns `None` when
+    /// the policy is "use the runtime default" — currently nothing maps to
+    /// this, but it leaves room for future variants without churning the
+    /// argv-shaping call sites.
+    pub fn as_arg(&self) -> Option<&str> {
+        match self {
+            NetworkPolicy::None => Some("none"),
+            NetworkPolicy::Host => Some("host"),
+            NetworkPolicy::Named(name) => Some(name.as_str()),
+        }
+    }
+}
+
+/// User-namespace policy applied at container create time.
+///
+/// `--userns keep-id` anchors the container's user namespace to the host
+/// uid/gid so file ownership round-trips cleanly between mounts. Without
+/// it, rootless podman applies its default mapping (uid 0 inside maps to
+/// the rootless uid outside) which makes workspace mounts hostile to read
+/// in either direction.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum UserNsPolicy {
+    /// `--userns keep-id` — caller's uid/gid is preserved inside the
+    /// container.
+    KeepId,
+    /// Use the runtime default (rootless podman: nested mapping). No
+    /// `--userns` flag emitted.
+    Default,
+}
+
+/// Security hardening options applied at container create time.
+///
+/// Every field maps to a concrete `podman create` flag; the defaults are
+/// the strict "Level 2" preset documented in
+/// `docs/architecture/isolation-model.md` §8.3. Callers that need a
+/// permissive policy (tests, legacy code paths) should construct this
+/// explicitly with [`SecurityOpts::permissive`].
+///
+/// Threat model: rootless podman alone leaves `NoNewPrivs=0`, the default
+/// rootless capability set, an open network namespace, and a writable
+/// rootfs — every escape-class CVE in the kernel, podman, or runc that
+/// these flags would otherwise defeat is exploitable from inside the
+/// container.
+///
+/// Field ordering in [`SecurityOpts::to_create_flags`] is deterministic so
+/// argv assertions can pin the rendering.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SecurityOpts {
+    /// `--security-opt no-new-privileges` — once set, processes inside
+    /// the container cannot gain privileges via setuid binaries or file
+    /// capabilities. Default `true`.
+    pub no_new_privileges: bool,
+
+    /// Capabilities to drop. `["ALL"]` drops every capability and is the
+    /// hardened default; downstream issues that need specific
+    /// capabilities should add them to [`Self::cap_add`] rather than
+    /// shrinking this list.
+    pub cap_drop: Vec<String>,
+
+    /// Capabilities to add back after the cap-drop. The hardened default
+    /// is empty — the `sleep infinity` init process and the agent
+    /// commands run via `podman exec` need none.
+    pub cap_add: Vec<String>,
+
+    /// `--read-only` — rootfs is mounted read-only. Writable workspace
+    /// directories are surfaced as explicit tmpfs / volume mounts (future
+    /// work tracked alongside the F-642 follow-ups). Default `true`.
+    pub read_only_rootfs: bool,
+
+    /// Network policy. Default [`NetworkPolicy::None`] — the strictest
+    /// interpretation of the F-642 DoD "restricted network".
+    pub network: NetworkPolicy,
+
+    /// User-namespace policy. Default [`UserNsPolicy::KeepId`].
+    pub userns: UserNsPolicy,
+}
+
+impl SecurityOpts {
+    /// Strict Level-2 baseline: no-new-privileges, cap-drop ALL,
+    /// read-only rootfs, no network, keep-id user namespace.
+    ///
+    /// This is what [`crate::ContainerRuntime::create`] callers should
+    /// pass unless they have a specific reason to relax a flag — and
+    /// every relaxation should be documented at the call site.
+    pub fn hardened_default() -> Self {
+        Self {
+            no_new_privileges: true,
+            cap_drop: vec!["ALL".to_string()],
+            cap_add: Vec::new(),
+            read_only_rootfs: true,
+            network: NetworkPolicy::None,
+            userns: UserNsPolicy::KeepId,
+        }
+    }
+
+    /// Permissive preset — every hardening flag disabled. Reserved for
+    /// tests that need a baseline argv without security flags interleaved
+    /// in their assertions. Production callers must not use this.
+    pub fn permissive() -> Self {
+        Self {
+            no_new_privileges: false,
+            cap_drop: Vec::new(),
+            cap_add: Vec::new(),
+            read_only_rootfs: false,
+            network: NetworkPolicy::Named("default".to_string()), // inherit runtime default
+            userns: UserNsPolicy::Default,
+        }
+    }
+
+    /// Render into the canonical podman create flag list. The order is
+    /// pinned by tests so the exact argv is deterministic:
+    ///
+    /// 1. `--security-opt no-new-privileges` (if set)
+    /// 2. one `--cap-drop <CAP>` per entry in `cap_drop`, in input order
+    /// 3. one `--cap-add <CAP>` per entry in `cap_add`, in input order
+    /// 4. `--read-only` (if set)
+    /// 5. `--network <value>` (always emitted unless the variant maps to
+    ///    `None`, which currently never happens)
+    /// 6. `--userns keep-id` (if `KeepId`)
+    ///
+    /// The flags are inserted between `podman create` and the IMAGE
+    /// positional so podman parses them as runtime options. See
+    /// [`crate::ContainerRuntime::create`] docs for the positional grammar.
+    pub fn to_create_flags(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.no_new_privileges {
+            out.push("--security-opt".to_string());
+            out.push("no-new-privileges".to_string());
+        }
+        for cap in &self.cap_drop {
+            out.push("--cap-drop".to_string());
+            out.push(cap.clone());
+        }
+        for cap in &self.cap_add {
+            out.push("--cap-add".to_string());
+            out.push(cap.clone());
+        }
+        if self.read_only_rootfs {
+            out.push("--read-only".to_string());
+        }
+        if let Some(value) = self.network.as_arg() {
+            // SecurityOpts::permissive uses Named("default") as a sentinel
+            // for "do not pin --network" — emit nothing in that case so
+            // the runtime's default network namespace is inherited.
+            if !(matches!(self.network, NetworkPolicy::Named(ref n) if n == "default")) {
+                out.push("--network".to_string());
+                out.push(value.to_string());
+            }
+        }
+        if matches!(self.userns, UserNsPolicy::KeepId) {
+            out.push("--userns".to_string());
+            out.push("keep-id".to_string());
+        }
+        out
+    }
+}
+
+impl Default for SecurityOpts {
+    /// Defaults to the strict [`Self::hardened_default`]. Production
+    /// callers should never have to think about security defaults; opting
+    /// out is the explicit step.
+    fn default() -> Self {
+        Self::hardened_default()
+    }
+}
+
 /// One line of captured container output.
 ///
 /// Surfaced by [`ContainerLogs::logs`]. The runtime hands back stdout and
@@ -298,7 +484,21 @@ pub trait ContainerRuntime: Send + Sync {
 
     /// Create a container from `image` with `argv` as the command. The
     /// container is created but not started; call [`Self::start`] separately.
-    async fn create(&self, image: &ImageRef, argv: &[&str]) -> Result<ContainerHandle, OciError>;
+    ///
+    /// `opts` carries the security-hardening flags rendered between
+    /// `podman create` and the IMAGE positional. Production callers
+    /// should pass [`SecurityOpts::hardened_default`] (the strict Level-2
+    /// baseline); see `docs/architecture/isolation-model.md` §8.3 for the
+    /// documented allow-list. The argv-parsing grammar is unchanged:
+    /// caller-supplied `argv` still terminates flag parsing at the IMAGE
+    /// positional (the `--privileged` flag-injection regression test in
+    /// `crates/forge-oci/src/podman.rs` pins this).
+    async fn create(
+        &self,
+        image: &ImageRef,
+        argv: &[&str],
+        opts: &SecurityOpts,
+    ) -> Result<ContainerHandle, OciError>;
 
     /// Start a created container.
     async fn start(&self, handle: &ContainerHandle) -> Result<(), OciError>;
@@ -427,6 +627,7 @@ mod tests {
             &self,
             _image: &ImageRef,
             _argv: &[&str],
+            _opts: &SecurityOpts,
         ) -> Result<ContainerHandle, OciError> {
             Ok(ContainerHandle::new("mock"))
         }
@@ -474,7 +675,10 @@ mod tests {
         rt.pull(&img).await.unwrap();
         // `create`/`exec` accept caller-borrowed `&str` slices directly —
         // no `.into()` allocation required.
-        let h = rt.create(&img, &["echo", "hi"]).await.unwrap();
+        let h = rt
+            .create(&img, &["echo", "hi"], &SecurityOpts::hardened_default())
+            .await
+            .unwrap();
         rt.start(&h).await.unwrap();
         let res = rt.exec(&h, &["true"]).await.unwrap();
         assert_eq!(res.exit_code, Some(0));
@@ -507,7 +711,108 @@ mod tests {
         let rt: &dyn ContainerRuntime = &MockRuntime;
         let img = ImageRef::parse("alpine:3.19").unwrap();
         let argv: [&str; 2] = ["echo", "hi"];
-        let _ = rt.create(&img, &argv).await.unwrap();
+        let _ = rt
+            .create(&img, &argv, &SecurityOpts::hardened_default())
+            .await
+            .unwrap();
         let _ = rt.exec(&ContainerHandle::new("x"), &argv).await.unwrap();
+    }
+
+    // ── F-642: SecurityOpts hardening defaults ───────────────────────
+
+    #[test]
+    fn hardened_default_includes_every_dod_flag() {
+        // F-642: this is the load-bearing security invariant. If the
+        // hardened default ever silently relaxes one of these flags,
+        // the Level 2 sandbox loses an escape-class CVE mitigation.
+        // Every assertion is keyed off the issue's DoD checklist.
+        let opts = SecurityOpts::hardened_default();
+        assert!(
+            opts.no_new_privileges,
+            "no-new-privileges must be enabled by default"
+        );
+        assert_eq!(
+            opts.cap_drop,
+            vec!["ALL".to_string()],
+            "cap-drop must default to ALL"
+        );
+        assert!(
+            opts.cap_add.is_empty(),
+            "cap-add allow-list must default to empty (sleep-infinity init needs none)"
+        );
+        assert!(opts.read_only_rootfs, "rootfs must be read-only by default");
+        assert_eq!(
+            opts.network,
+            NetworkPolicy::None,
+            "network must be `none` by default"
+        );
+        assert!(
+            matches!(opts.userns, UserNsPolicy::KeepId),
+            "user namespace must default to keep-id"
+        );
+    }
+
+    #[test]
+    fn hardened_default_renders_canonical_flag_order() {
+        // The order is pinned because the integration test asserts the
+        // exact rendered argv. Any reorder is a breaking change to
+        // operators reading the audit trail.
+        let flags = SecurityOpts::hardened_default().to_create_flags();
+        assert_eq!(
+            flags,
+            vec![
+                "--security-opt".to_string(),
+                "no-new-privileges".to_string(),
+                "--cap-drop".to_string(),
+                "ALL".to_string(),
+                "--read-only".to_string(),
+                "--network".to_string(),
+                "none".to_string(),
+                "--userns".to_string(),
+                "keep-id".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn default_trait_returns_hardened() {
+        // Production callers that fall back to `Default` should get the
+        // strict policy, never a permissive accident. F-654 will extend
+        // this trait, not relax it.
+        assert_eq!(SecurityOpts::default(), SecurityOpts::hardened_default());
+    }
+
+    #[test]
+    fn permissive_emits_no_hardening_flags() {
+        // The permissive preset exists for tests that want a clean argv
+        // baseline. If any flag leaks through, those tests would silently
+        // start asserting against the hardening flags.
+        let flags = SecurityOpts::permissive().to_create_flags();
+        assert!(
+            flags.is_empty(),
+            "permissive preset must render zero flags, got {flags:?}"
+        );
+    }
+
+    #[test]
+    fn cap_add_entries_render_after_cap_drop() {
+        // Order matters: podman applies --cap-drop then --cap-add, so
+        // the rendered argv mirroring that order is what an operator
+        // grepping for the audit trail expects.
+        let opts = SecurityOpts {
+            cap_add: vec!["NET_BIND_SERVICE".to_string()],
+            ..SecurityOpts::hardened_default()
+        };
+        let flags = opts.to_create_flags();
+        let drop_idx = flags
+            .iter()
+            .position(|s| s == "--cap-drop")
+            .expect("cap-drop must be present");
+        let add_idx = flags
+            .iter()
+            .position(|s| s == "--cap-add")
+            .expect("cap-add must be present");
+        assert!(drop_idx < add_idx, "cap-drop must precede cap-add");
+        assert_eq!(flags[add_idx + 1], "NET_BIND_SERVICE");
     }
 }
