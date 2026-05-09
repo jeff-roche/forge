@@ -1,3 +1,4 @@
+#![allow(deprecated)] // F-652: tests/benches still drive the deprecated bare read_frame helpers.
 //! F-601: integration tests for cross-session memory injection.
 //!
 //! These tests cover the seam that `serve_with_session` uses — they

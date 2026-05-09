@@ -8,7 +8,7 @@
 use crate::runner::{CommandOutcome, CommandRunner, TokioCommandRunner};
 use crate::{
     ContainerHandle, ContainerLogs, ContainerRuntime, ExecResult, ImageRef, LogLine, OciError,
-    Stats,
+    SecurityOpts, Stats,
 };
 use async_trait::async_trait;
 
@@ -33,6 +33,35 @@ impl PodmanRuntime {
         Self { runner }
     }
 
+    async fn run_or_fail(&self, args: &[&str]) -> Result<CommandOutcome, OciError> {
+        let outcome = self
+            .runner
+            .run(PODMAN, args)
+            .await
+            .map_err(|source| OciError::Io {
+                tool: PODMAN,
+                source,
+            })?;
+        if !outcome.success() {
+            return Err(OciError::CommandFailed {
+                tool: PODMAN,
+                args: args.iter().map(|s| s.to_string()).collect(),
+                exit_code: outcome.exit_code,
+                stderr: String::from_utf8_lossy(&outcome.stderr).to_string(),
+            });
+        }
+        Ok(outcome)
+    }
+}
+
+impl Default for PodmanRuntime {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl ContainerRuntime for PodmanRuntime {
     /// Probe the host: confirm `podman --version` works AND `podman info`
     /// reports rootless mode is available.
     ///
@@ -46,7 +75,7 @@ impl PodmanRuntime {
     /// - [`OciError::RootlessUnavailable`] if `podman info` JSON parsed and
     ///   explicitly reports `host.security.rootless = false`.
     /// - [`OciError::InvalidJson`] if `podman info` JSON didn't parse.
-    pub async fn detect(&self) -> Result<(), OciError> {
+    async fn detect(&self) -> Result<(), OciError> {
         let version = self
             .runner
             .run(PODMAN, &["--version"])
@@ -99,42 +128,18 @@ impl PodmanRuntime {
         Ok(())
     }
 
-    async fn run_or_fail(&self, args: &[&str]) -> Result<CommandOutcome, OciError> {
-        let outcome = self
-            .runner
-            .run(PODMAN, args)
-            .await
-            .map_err(|source| OciError::Io {
-                tool: PODMAN,
-                source,
-            })?;
-        if !outcome.success() {
-            return Err(OciError::CommandFailed {
-                tool: PODMAN,
-                args: args.iter().map(|s| s.to_string()).collect(),
-                exit_code: outcome.exit_code,
-                stderr: String::from_utf8_lossy(&outcome.stderr).to_string(),
-            });
-        }
-        Ok(outcome)
-    }
-}
-
-impl Default for PodmanRuntime {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait]
-impl ContainerRuntime for PodmanRuntime {
     async fn pull(&self, image: &ImageRef) -> Result<(), OciError> {
         let img = image.to_image_string();
         self.run_or_fail(&["pull", &img]).await?;
         Ok(())
     }
 
-    async fn create(&self, image: &ImageRef, argv: &[String]) -> Result<ContainerHandle, OciError> {
+    async fn create(
+        &self,
+        image: &ImageRef,
+        argv: &[&str],
+        opts: &SecurityOpts,
+    ) -> Result<ContainerHandle, OciError> {
         let img = image.to_image_string();
         // `podman create [options] IMAGE [COMMAND [ARG...]]` — podman's
         // argument grammar terminates flag parsing at the IMAGE positional, so
@@ -145,8 +150,20 @@ impl ContainerRuntime for PodmanRuntime {
         // "executable file `--` not found"). The flag-injection regression
         // test in this module pins that behaviour by feeding `--privileged`
         // through and asserting podman does not apply it as a runtime flag.
-        let mut args: Vec<&str> = vec!["create", &img];
-        args.extend(argv.iter().map(String::as_str));
+        //
+        // F-642: SecurityOpts flags are inserted between `create` and the
+        // IMAGE positional so podman parses them as runtime options. Order
+        // is pinned by `SecurityOpts::to_create_flags` and asserted by both
+        // unit tests in this module and the integration test in
+        // `tests/podman_integration.rs`.
+        let security_flags = opts.to_create_flags();
+        let mut args: Vec<&str> = Vec::with_capacity(2 + security_flags.len() + argv.len());
+        args.push("create");
+        for flag in &security_flags {
+            args.push(flag.as_str());
+        }
+        args.push(&img);
+        args.extend_from_slice(argv);
         let outcome = self.run_or_fail(&args).await?;
         let id = String::from_utf8_lossy(&outcome.stdout).trim().to_string();
         if id.is_empty() {
@@ -165,11 +182,7 @@ impl ContainerRuntime for PodmanRuntime {
         Ok(())
     }
 
-    async fn exec(
-        &self,
-        handle: &ContainerHandle,
-        argv: &[String],
-    ) -> Result<ExecResult, OciError> {
+    async fn exec(&self, handle: &ContainerHandle, argv: &[&str]) -> Result<ExecResult, OciError> {
         // `podman exec [options] CONTAINER COMMAND [ARG...]` — same positional
         // grammar as `create`: podman stops parsing flags at the CONTAINER
         // positional, so caller-supplied argv elements that begin with `--`
@@ -178,7 +191,7 @@ impl ContainerRuntime for PodmanRuntime {
         // it would be passed verbatim to crun as the command. The
         // flag-injection regression test pins this.
         let mut args: Vec<&str> = vec!["exec", &handle.id];
-        args.extend(argv.iter().map(String::as_str));
+        args.extend_from_slice(argv);
         // exec captures the inner program's stdout/stderr/exit even on a
         // non-zero exit — that's a meaningful signal, not a runtime failure.
         // So we go around `run_or_fail` here.
@@ -212,8 +225,26 @@ impl ContainerRuntime for PodmanRuntime {
         let outcome = self
             .run_or_fail(&["stats", "--no-stream", "--format", "json", &handle.id])
             .await?;
+        // Delegate parsing to the trait method so the podman-specific JSON
+        // schema (`cpu_percent`, `mem_usage`, `pids`) is not baked into the
+        // lifecycle code. A future runtime emitting different field names or
+        // unit conventions would supply its own `parse_stats`; the lifecycle
+        // shape (run command → parse blob) stays the same.
+        self.parse_stats(&outcome.stdout)
+    }
+
+    fn parse_stats(&self, raw: &[u8]) -> Result<Stats, OciError> {
+        // Podman emits a JSON array; the first entry is the requested
+        // container. Field names and unit conventions are podman's:
+        //   - `cpu_percent`: string like `"1.35%"`
+        //   - `mem_usage`: string like `"178.3MB / 67.31GB"` (we surface only
+        //     the first number)
+        //   - `pids`: string or integer
+        // Missing/transitional fields are surfaced as `None` rather than
+        // failing the call — see `parse_size_first` for the `"-- / --"`
+        // placeholder podman emits while a container is mid-state.
         let parsed: serde_json::Value =
-            serde_json::from_slice(&outcome.stdout).map_err(|source| OciError::InvalidJson {
+            serde_json::from_slice(raw).map_err(|source| OciError::InvalidJson {
                 tool: PODMAN,
                 subcommand: "stats",
                 source,
@@ -377,6 +408,10 @@ mod tests {
         PodmanRuntime::with_runner(Box::new(runner))
     }
 
+    // `ContainerRuntime` is already in scope via `use super::*;` — tests
+    // call detect/create/exec/parse_stats through that trait surface so any
+    // accidental migration back to inherent methods would fail to link.
+
     #[tokio::test]
     async fn detect_succeeds_when_version_and_rootless_ok() {
         let runner = RecordingRunner::new();
@@ -468,12 +503,14 @@ mod tests {
         let runtime = rt(runner);
         let img = ImageRef::parse("alpine:3.19").unwrap();
         let h = runtime
-            .create(&img, &["echo".into(), "hi".into()])
+            .create(&img, &["echo", "hi"], &SecurityOpts::permissive())
             .await
             .unwrap();
         assert_eq!(h.id, "abc1234deadbeef");
 
         let calls = calls.lock().unwrap();
+        // SecurityOpts::permissive emits zero flags, keeping the
+        // historical argv shape for tests that pre-date F-642.
         assert_eq!(calls[0].1, vec!["create", "alpine:3.19", "echo", "hi"]);
     }
 
@@ -494,7 +531,7 @@ mod tests {
         let runtime = rt(runner);
         let img = ImageRef::parse("alpine:3.19").unwrap();
         runtime
-            .create(&img, &["--privileged".into(), "sh".into()])
+            .create(&img, &["--privileged", "sh"], &SecurityOpts::permissive())
             .await
             .unwrap();
 
@@ -528,7 +565,11 @@ mod tests {
         runner.push(StubResponse::ok_stdout(b"".to_vec()));
         let runtime = rt(runner);
         let img = ImageRef::parse("alpine:3.19").unwrap();
-        let err = runtime.create(&img, &[]).await.unwrap_err();
+        let argv: [&str; 0] = [];
+        let err = runtime
+            .create(&img, &argv, &SecurityOpts::permissive())
+            .await
+            .unwrap_err();
         assert!(matches!(err, OciError::CommandFailed { .. }));
     }
 
@@ -559,10 +600,7 @@ mod tests {
 
         let runtime = rt(runner);
         let res = runtime
-            .exec(
-                &ContainerHandle::new("xyz"),
-                &["echo".into(), "hello".into()],
-            )
+            .exec(&ContainerHandle::new("xyz"), &["echo", "hello"])
             .await
             .unwrap();
         assert_eq!(res.stdout, "hello\n");
@@ -595,10 +633,7 @@ mod tests {
 
         let runtime = rt(runner);
         runtime
-            .exec(
-                &ContainerHandle::new("xyz"),
-                &["--user".into(), "root".into(), "id".into()],
-            )
+            .exec(&ContainerHandle::new("xyz"), &["--user", "root", "id"])
             .await
             .unwrap();
 
@@ -637,7 +672,7 @@ mod tests {
         });
 
         let res = rt(runner)
-            .exec(&ContainerHandle::new("xyz"), &["false".into()])
+            .exec(&ContainerHandle::new("xyz"), &["false"])
             .await
             .unwrap();
         assert_eq!(res.exit_code, Some(2));
@@ -706,6 +741,58 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, OciError::InvalidJson { .. }));
+    }
+
+    // ── F-680: trait-level stats parsing ─────────────────────────────
+
+    #[test]
+    fn parse_stats_handles_podman_json_payload() {
+        // F-680: `parse_stats` is a trait method — the podman-specific
+        // schema (`cpu_percent`, `mem_usage`, `pids` plus their string
+        // formats) is owned by `PodmanRuntime`'s impl, not by free
+        // helpers in the lifecycle path. Future runtimes will supply
+        // their own `parse_stats` translating their own JSON shape into
+        // the same `Stats` struct.
+        let runtime = PodmanRuntime::new();
+        let json = br#"[{"id":"xyz","cpu_percent":"2.5%","mem_usage":"64MB / 1GB","pids":"7"}]"#;
+        let stats = runtime.parse_stats(json).unwrap();
+        assert_eq!(stats.cpu_percent, Some(2.5));
+        assert_eq!(stats.memory_bytes, Some(64_000_000));
+        assert_eq!(stats.pids, Some(7));
+    }
+
+    #[test]
+    fn parse_stats_callable_through_trait_object() {
+        // Pinning the dyn-trait callability separately so a future
+        // refactor cannot accidentally make `parse_stats` an inherent
+        // method — that would defeat the whole abstraction.
+        let runtime: Box<dyn ContainerRuntime> = Box::new(PodmanRuntime::new());
+        let json = br#"[{"id":"x"}]"#;
+        let stats = runtime.parse_stats(json).unwrap();
+        assert!(stats.cpu_percent.is_none());
+    }
+
+    #[test]
+    fn parse_stats_surfaces_invalid_json_as_typed_error() {
+        let runtime = PodmanRuntime::new();
+        let err = runtime.parse_stats(b"not json").unwrap_err();
+        assert!(matches!(err, OciError::InvalidJson { tool: "podman", .. }));
+    }
+
+    // ── F-680: detect on the trait surface ───────────────────────────
+
+    #[tokio::test]
+    async fn detect_callable_through_trait_object() {
+        // F-680: `detect` is part of the trait. Callers that want to
+        // probe a runtime without knowing the concrete type call it
+        // through `&dyn ContainerRuntime`.
+        let runner = RecordingRunner::new();
+        runner.push(StubResponse::ok_stdout(b"podman version 5.0\n".to_vec()));
+        runner.push(StubResponse::ok_stdout(
+            br#"{"host":{"security":{"rootless":true}}}"#.to_vec(),
+        ));
+        let runtime: Box<dyn ContainerRuntime> = Box::new(rt(runner));
+        runtime.detect().await.unwrap();
     }
 
     #[tokio::test]
@@ -836,6 +923,124 @@ mod tests {
         assert_eq!(l.stream, "stdout");
         assert_eq!(l.line, "hello world");
         assert_eq!(l.timestamp.as_deref(), Some("2025-04-26T10:00:00Z"));
+    }
+
+    // ── F-642: SecurityOpts plumbed through `create` ─────────────────
+
+    #[tokio::test]
+    async fn create_emits_every_hardened_default_flag_before_image() {
+        // Load-bearing: the F-642 DoD says PodmanRuntime::create must
+        // inject no-new-privileges + cap-drop ALL + restricted network
+        // + read-only rootfs by default. This test pins the exact argv
+        // shape so a regression that drops a flag (or moves it past
+        // the IMAGE positional, where podman would treat it as the
+        // in-container command) fails the test loudly.
+        let runner = RecordingRunner::new();
+        runner.push(StubResponse::ok_stdout(b"abc1234\n".to_vec()));
+        let calls = runner.calls.clone();
+
+        let runtime = rt(runner);
+        let img = ImageRef::parse("alpine:3.19").unwrap();
+        runtime
+            .create(
+                &img,
+                &["sleep", "infinity"],
+                &SecurityOpts::hardened_default(),
+            )
+            .await
+            .unwrap();
+
+        let calls = calls.lock().unwrap();
+        let argv = &calls[0].1;
+        // Every hardening flag must be present before the IMAGE positional.
+        let image_idx = argv
+            .iter()
+            .position(|a| a == "alpine:3.19")
+            .expect("argv must contain image positional");
+        let prefix = &argv[..image_idx];
+        for required in [
+            "--security-opt",
+            "no-new-privileges",
+            "--cap-drop",
+            "ALL",
+            "--read-only",
+            "--network",
+            "none",
+            "--userns",
+            "keep-id",
+        ] {
+            assert!(
+                prefix.iter().any(|a| a == required),
+                "missing hardening flag {required:?} in {argv:?}"
+            );
+        }
+        // Caller argv lands strictly after IMAGE.
+        let suffix = &argv[image_idx + 1..];
+        assert_eq!(suffix, &["sleep".to_string(), "infinity".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn create_renders_security_flags_in_canonical_order() {
+        // Pinning the exact rendered prefix so operators reading the
+        // audit log see a stable shape and so reorderings can't sneak
+        // through review. The order is documented on
+        // `SecurityOpts::to_create_flags`.
+        let runner = RecordingRunner::new();
+        runner.push(StubResponse::ok_stdout(b"abc1234\n".to_vec()));
+        let calls = runner.calls.clone();
+
+        let runtime = rt(runner);
+        let img = ImageRef::parse("alpine:3.19").unwrap();
+        runtime
+            .create(
+                &img,
+                &["sleep", "infinity"],
+                &SecurityOpts::hardened_default(),
+            )
+            .await
+            .unwrap();
+
+        let calls = calls.lock().unwrap();
+        let argv = &calls[0].1;
+        assert_eq!(
+            argv,
+            &vec![
+                "create".to_string(),
+                "--security-opt".to_string(),
+                "no-new-privileges".to_string(),
+                "--cap-drop".to_string(),
+                "ALL".to_string(),
+                "--read-only".to_string(),
+                "--network".to_string(),
+                "none".to_string(),
+                "--userns".to_string(),
+                "keep-id".to_string(),
+                "alpine:3.19".to_string(),
+                "sleep".to_string(),
+                "infinity".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn create_with_permissive_opts_emits_no_security_flags() {
+        // Regression guard for the test-only `permissive` preset:
+        // every test in this module that calls `create` with
+        // SecurityOpts::permissive expects a clean argv with no
+        // hardening flags interleaved.
+        let runner = RecordingRunner::new();
+        runner.push(StubResponse::ok_stdout(b"abc1234\n".to_vec()));
+        let calls = runner.calls.clone();
+
+        let runtime = rt(runner);
+        let img = ImageRef::parse("alpine:3.19").unwrap();
+        runtime
+            .create(&img, &["sh"], &SecurityOpts::permissive())
+            .await
+            .unwrap();
+
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls[0].1, vec!["create", "alpine:3.19", "sh"]);
     }
 
     #[test]

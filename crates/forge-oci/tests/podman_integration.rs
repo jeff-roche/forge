@@ -15,7 +15,7 @@
 
 #![cfg(target_os = "linux")]
 
-use forge_oci::{ContainerRuntime, ImageRef, PodmanRuntime};
+use forge_oci::{ContainerRuntime, ImageRef, PodmanRuntime, SecurityOpts};
 
 /// End-to-end flag-injection regression test for `create`.
 ///
@@ -45,12 +45,8 @@ async fn create_does_not_apply_caller_flags_as_runtime_flags() {
     let handle = runtime
         .create(
             &image,
-            &[
-                "--privileged".into(),
-                "sh".into(),
-                "-c".into(),
-                "true".into(),
-            ],
+            &["--privileged", "sh", "-c", "true"],
+            &SecurityOpts::permissive(),
         )
         .await
         .expect("create container");
@@ -102,13 +98,13 @@ async fn exec_does_not_apply_caller_flags_as_runtime_flags() {
     runtime.pull(&image).await.expect("pull alpine");
 
     let handle = runtime
-        .create(&image, &["sleep".into(), "30".into()])
+        .create(&image, &["sleep", "30"], &SecurityOpts::permissive())
         .await
         .expect("create container");
     runtime.start(&handle).await.expect("start container");
 
     let result = runtime
-        .exec(&handle, &["--user".into(), "root".into(), "id".into()])
+        .exec(&handle, &["--user", "root", "id"])
         .await
         .expect("exec returns even when in-container command fails");
 
@@ -145,14 +141,14 @@ async fn podman_full_lifecycle_against_alpine() {
     // Long-lived foreground process so `exec` has something to attach to.
     // `sleep 60` is plenty for the test to do its work and tear down.
     let handle = runtime
-        .create(&image, &["sleep".into(), "60".into()])
+        .create(&image, &["sleep", "60"], &SecurityOpts::permissive())
         .await
         .expect("create container");
 
     runtime.start(&handle).await.expect("start container");
 
     let result = runtime
-        .exec(&handle, &["echo".into(), "hello".into()])
+        .exec(&handle, &["echo", "hello"])
         .await
         .expect("exec echo");
     assert_eq!(result.stdout, "hello\n");
@@ -177,4 +173,78 @@ async fn podman_full_lifecycle_against_alpine() {
         "expected inspect to fail after remove; stdout={:?}",
         String::from_utf8_lossy(&inspect.stdout)
     );
+}
+
+/// End-to-end proof that the F-642 hardened defaults actually land on
+/// the resulting container.
+///
+/// The unit-level tests in `crates/forge-oci/src/podman.rs` pin the
+/// shape of the rendered argv. This test pins the *behaviour* — by
+/// asking `podman inspect` whether the security flags took effect, we
+/// catch any silent podman-side rejection (e.g. unsupported flag, kernel
+/// missing the seccomp profile, podman renaming a JSON field) that
+/// argv-shaping assertions would miss.
+///
+/// `cargo test -p forge-oci -- --ignored` to run.
+#[tokio::test]
+#[ignore = "requires rootless podman on PATH (run with --ignored)"]
+async fn create_with_hardened_defaults_applies_every_flag() {
+    let runtime = PodmanRuntime::new();
+    runtime.detect().await.expect("podman detect");
+    let image = ImageRef::parse("docker.io/library/alpine:3.19").expect("valid image ref");
+    runtime.pull(&image).await.expect("pull alpine");
+
+    let handle = runtime
+        .create(&image, &["sleep", "30"], &SecurityOpts::hardened_default())
+        .await
+        .expect("create container with hardened defaults");
+
+    // Each format string asks podman a separate behavioural question.
+    // Combined into one inspect invocation to keep the test fast.
+    let inspect = std::process::Command::new("podman")
+        .args([
+            "inspect",
+            "--format",
+            "{{.HostConfig.SecurityOpt}}|{{.HostConfig.CapDrop}}|{{.HostConfig.ReadonlyRootfs}}|{{.HostConfig.NetworkMode}}|{{.HostConfig.UsernsMode}}",
+            &handle.id,
+        ])
+        .output()
+        .expect("podman inspect spawn");
+    assert!(
+        inspect.status.success(),
+        "podman inspect failed: {}",
+        String::from_utf8_lossy(&inspect.stderr)
+    );
+    let out = String::from_utf8_lossy(&inspect.stdout).trim().to_string();
+    let parts: Vec<&str> = out.splitn(5, '|').collect();
+    assert_eq!(
+        parts.len(),
+        5,
+        "expected 5 inspect fields, got {parts:?} from {out:?}"
+    );
+    let (security_opt, cap_drop, readonly, network, userns) =
+        (parts[0], parts[1], parts[2], parts[3], parts[4]);
+
+    assert!(
+        security_opt.contains("no-new-privileges"),
+        "no-new-privileges missing from SecurityOpt: {security_opt}"
+    );
+    assert!(
+        cap_drop.contains("ALL") || cap_drop.contains("CAP_"),
+        "cap-drop ALL not visible in CapDrop: {cap_drop}"
+    );
+    assert!(
+        readonly == "true",
+        "ReadonlyRootfs must be true, got {readonly:?}"
+    );
+    assert!(
+        network.contains("none"),
+        "NetworkMode must be none, got {network:?}"
+    );
+    assert!(
+        userns.contains("keep-id"),
+        "UsernsMode must be keep-id, got {userns:?}"
+    );
+
+    runtime.remove(&handle).await.expect("remove container");
 }

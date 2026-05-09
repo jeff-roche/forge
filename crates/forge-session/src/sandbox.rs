@@ -719,14 +719,18 @@ mod imp {
                 SandboxLevel::Level1 => execute_level1(self).await,
                 SandboxLevel::Level2 { session } => {
                     let session = session.clone();
+                    // Materialize each argv element as an owned `String` so
+                    // the borrowed `&[&str]` slice we hand to `exec_step`
+                    // points into stable storage that outlives the call.
                     let argv: Vec<String> = self
                         .argv
                         .iter()
                         .map(|s| s.to_string_lossy().into_owned())
                         .collect();
                     drop(self); // we own no spawn-side state for Level 2.
+                    let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
                     session
-                        .exec_step(&argv)
+                        .exec_step(&argv_refs)
                         .await
                         .map_err(|e| io::Error::other(format!("level 2 exec: {e}")))
                 }
@@ -1464,6 +1468,10 @@ mod tests {
 
     #[async_trait]
     impl ContainerRuntime for LoggingRuntime {
+        async fn detect(&self) -> Result<(), OciError> {
+            self.record("detect");
+            Ok(())
+        }
         async fn pull(&self, _image: &OciImageRef) -> Result<(), OciError> {
             self.record("pull");
             Ok(())
@@ -1471,7 +1479,8 @@ mod tests {
         async fn create(
             &self,
             _image: &OciImageRef,
-            _argv: &[String],
+            _argv: &[&str],
+            _opts: &forge_oci::SecurityOpts,
         ) -> Result<OciContainerHandle, OciError> {
             self.record("create");
             Ok(OciContainerHandle::new("c-id"))
@@ -1483,7 +1492,7 @@ mod tests {
         async fn exec(
             &self,
             _h: &OciContainerHandle,
-            _argv: &[String],
+            _argv: &[&str],
         ) -> Result<ExecResult, OciError> {
             self.record("exec");
             Ok(self.exec.clone())
@@ -1497,6 +1506,13 @@ mod tests {
             Ok(())
         }
         async fn stats(&self, _h: &OciContainerHandle) -> Result<Stats, OciError> {
+            Ok(Stats {
+                cpu_percent: None,
+                memory_bytes: None,
+                pids: None,
+            })
+        }
+        fn parse_stats(&self, _raw: &[u8]) -> Result<Stats, OciError> {
             Ok(Stats {
                 cpu_percent: None,
                 memory_bytes: None,

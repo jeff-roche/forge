@@ -1,3 +1,4 @@
+#![allow(deprecated)] // F-652: tests/benches still drive the deprecated bare read_frame helpers.
 //! F-378: integration tests for the length-prefixed framing layer's bounds.
 //!
 //! `MAX_FRAME_SIZE` (4 MiB) is enforced at both the write side (pre-send

@@ -42,7 +42,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use forge_oci::{ContainerHandle, ContainerRuntime, ImageRef, OciError};
+use forge_oci::{ContainerHandle, ContainerRuntime, ImageRef, OciError, SecurityOpts};
 
 /// Binary used by [`Level2Session::drop`]'s panic-safety net to reap
 /// a leaked container. Hardcoded because the only `ContainerRuntime`
@@ -201,7 +201,17 @@ impl Level2Session {
         limits: ContainerLimits,
     ) -> Result<Self, OciError> {
         runtime.pull(&image).await?;
-        let handle = runtime.create(&image, &Self::default_init_argv()).await?;
+        // F-642: every Level 2 container is created with the strict
+        // hardening defaults — no-new-privileges, cap-drop ALL, read-only
+        // rootfs, no network, keep-id user namespace. Documented at
+        // `docs/architecture/isolation-model.md` §8.3.
+        let handle = runtime
+            .create(
+                &image,
+                Self::default_init_argv(),
+                &SecurityOpts::hardened_default(),
+            )
+            .await?;
         runtime.start(&handle).await?;
         // Operator-facing notice when limits are configured but not
         // yet enforced. Until follow-up #631 lands, the container
@@ -232,14 +242,14 @@ impl Level2Session {
     /// The init argv used by [`Self::create`]. `sleep infinity` is the
     /// idiom — minimal binary surface inside the image, no daemon
     /// behaviour, exits cleanly on `podman stop`.
-    pub fn default_init_argv() -> Vec<String> {
-        vec!["sleep".to_string(), "infinity".to_string()]
+    pub fn default_init_argv() -> &'static [&'static str] {
+        &["sleep", "infinity"]
     }
 
     /// Run a single step inside the pre-warmed container and capture
     /// its result. Mirrors [`ContainerRuntime::exec`] — non-zero exits
     /// are surfaced via [`StepOutcome::exit_code`], not `Err`.
-    pub async fn exec_step(&self, argv: &[String]) -> Result<StepOutcome, OciError> {
+    pub async fn exec_step(&self, argv: &[&str]) -> Result<StepOutcome, OciError> {
         let res = self.runtime.exec(&self.handle, argv).await?;
         Ok(StepOutcome {
             exit_code: res.exit_code,
@@ -453,6 +463,9 @@ mod tests {
         calls: Mutex<Vec<String>>,
         // Optional canned exec outcome.
         exec_outcome: Mutex<Option<ExecResult>>,
+        // Last SecurityOpts seen by `create`, captured for F-642 tests
+        // that need to verify the hardened defaults reached the trait.
+        last_create_opts: Mutex<Option<SecurityOpts>>,
     }
 
     impl MockRuntime {
@@ -462,10 +475,17 @@ mod tests {
         fn record(&self, name: &str) {
             self.calls.lock().unwrap().push(name.to_string());
         }
+        fn last_create_opts(&self) -> Option<SecurityOpts> {
+            self.last_create_opts.lock().unwrap().clone()
+        }
     }
 
     #[async_trait]
     impl ContainerRuntime for MockRuntime {
+        async fn detect(&self) -> Result<(), OciError> {
+            self.record("detect");
+            Ok(())
+        }
         async fn pull(&self, _image: &ImageRef) -> Result<(), OciError> {
             self.record("pull");
             Ok(())
@@ -473,9 +493,11 @@ mod tests {
         async fn create(
             &self,
             _image: &ImageRef,
-            _argv: &[String],
+            _argv: &[&str],
+            opts: &SecurityOpts,
         ) -> Result<ContainerHandle, OciError> {
             self.record("create");
+            *self.last_create_opts.lock().unwrap() = Some(opts.clone());
             Ok(ContainerHandle::new("mock-container"))
         }
         async fn start(&self, _handle: &ContainerHandle) -> Result<(), OciError> {
@@ -485,7 +507,7 @@ mod tests {
         async fn exec(
             &self,
             _handle: &ContainerHandle,
-            _argv: &[String],
+            _argv: &[&str],
         ) -> Result<ExecResult, OciError> {
             self.record("exec");
             Ok(self
@@ -509,6 +531,13 @@ mod tests {
         }
         async fn stats(&self, _handle: &ContainerHandle) -> Result<Stats, OciError> {
             self.record("stats");
+            Ok(Stats {
+                cpu_percent: None,
+                memory_bytes: None,
+                pids: None,
+            })
+        }
+        fn parse_stats(&self, _raw: &[u8]) -> Result<Stats, OciError> {
             Ok(Stats {
                 cpu_percent: None,
                 memory_bytes: None,
@@ -555,10 +584,7 @@ mod tests {
             .await
             .unwrap();
         session.disable_drop_cleanup();
-        let outcome = session
-            .exec_step(&["echo".into(), "hi".into()])
-            .await
-            .unwrap();
+        let outcome = session.exec_step(&["echo", "hi"]).await.unwrap();
         assert_eq!(outcome.exit_code, Some(2));
         assert_eq!(outcome.stdout, "out\n");
         assert_eq!(outcome.stderr, "err\n");
@@ -577,7 +603,7 @@ mod tests {
             .await
             .unwrap();
         for _ in 0..3 {
-            session.exec_step(&["true".into()]).await.unwrap();
+            session.exec_step(&["true"]).await.unwrap();
         }
         session.teardown().await.unwrap();
         assert_eq!(
@@ -654,6 +680,32 @@ mod tests {
         // Defuse for the actual drop in this test environment so we
         // don't fork off a real `podman rm -f`.
         session.disable_drop_cleanup();
+    }
+
+    // ── F-642: Level2Session passes hardened defaults to runtime.create ──
+
+    #[tokio::test]
+    async fn create_passes_hardened_security_opts_to_runtime() {
+        // Load-bearing F-642 invariant: every Level 2 container must be
+        // created with the strict hardening preset. If a refactor drops
+        // this propagation, the integration test would still pass with
+        // a mock runtime — this test pins the explicit opt-in.
+        let mock: Arc<MockRuntime> = Arc::new(MockRuntime::default());
+        let runtime: Arc<dyn ContainerRuntime> = mock.clone();
+
+        let session = Level2Session::create(runtime, alpine(), ContainerLimits::default())
+            .await
+            .unwrap();
+        session.disable_drop_cleanup();
+
+        let opts = mock
+            .last_create_opts()
+            .expect("runtime.create must have been invoked");
+        assert_eq!(
+            opts,
+            SecurityOpts::hardened_default(),
+            "Level2Session must pass the hardened SecurityOpts preset to runtime.create"
+        );
     }
 
     // ── ContainerLimits flag shaping ─────────────────────────────────
@@ -848,10 +900,7 @@ mod tests {
         let session = Level2Session::create(runtime, alpine(), ContainerLimits::default())
             .await
             .unwrap();
-        let outcome = session
-            .exec_step(&["echo".into(), "hello".into()])
-            .await
-            .unwrap();
+        let outcome = session.exec_step(&["echo", "hello"]).await.unwrap();
         assert_eq!(outcome.stdout, "hello\n");
         assert_eq!(outcome.exit_code, Some(0));
         session.teardown().await.unwrap();
@@ -869,6 +918,25 @@ mod tests {
         // create's argv ends with the init argv we shipped.
         let create_args = &calls[1].1;
         assert!(create_args.ends_with(&["sleep".into(), "infinity".into()]));
+        // F-642: every hardening flag must be present in the create argv —
+        // end-to-end proof that Level2Session ships the strict preset
+        // through the trait into PodmanRuntime's flag rendering.
+        for required in [
+            "--security-opt",
+            "no-new-privileges",
+            "--cap-drop",
+            "ALL",
+            "--read-only",
+            "--network",
+            "none",
+            "--userns",
+            "keep-id",
+        ] {
+            assert!(
+                create_args.iter().any(|a| a == required),
+                "create argv missing F-642 hardening flag {required:?}: {create_args:?}"
+            );
+        }
         // exec's argv carries the caller's command after the container id.
         let exec_args = &calls[3].1;
         assert!(exec_args.ends_with(&["echo".into(), "hello".into()]));
