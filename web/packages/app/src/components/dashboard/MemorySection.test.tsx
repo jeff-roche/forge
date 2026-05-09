@@ -71,6 +71,7 @@ function entry(partial: Partial<AgentMemoryEntry> & { agent_id: string }): Agent
     version: partial.version ?? null,
     def_enabled: partial.def_enabled ?? false,
     settings_override: partial.settings_override ?? null,
+    error: partial.error ?? null,
   };
 }
 
@@ -316,6 +317,7 @@ describe('MemorySection helpers', () => {
         version: null,
         def_enabled: false,
         settings_override: true,
+        error: null,
       }),
     ).toBe(true);
 
@@ -328,6 +330,7 @@ describe('MemorySection helpers', () => {
         version: null,
         def_enabled: true,
         settings_override: false,
+        error: null,
       }),
     ).toBe(false);
 
@@ -340,6 +343,7 @@ describe('MemorySection helpers', () => {
         version: null,
         def_enabled: true,
         settings_override: null,
+        error: null,
       }),
     ).toBe(true);
   });

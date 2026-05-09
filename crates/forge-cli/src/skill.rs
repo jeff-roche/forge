@@ -322,10 +322,15 @@ pub fn default_cache_root(home: &Path) -> PathBuf {
 
 /// Treat a CLI source string as a git URL when it looks like one.
 ///
-/// The set of recognized prefixes is intentionally narrow — `https://`,
-/// `http://`, `git://`, `ssh://`, plus the `user@host:path` SCP-style form.
-/// Anything else is a local path. We deliberately do not heuristically treat
-/// `<owner>/<repo>` as GitHub shorthand; the user must spell out the full URL.
+/// **F-641 (CVE-2017-1000117 family):** the accepted scheme set is a strict
+/// allowlist of `https://` and `ssh://`. SCP-style URLs (`user@host:path`),
+/// `git://`, and `http://` are *all* refused — SCP because its colon-suffix
+/// path can be smuggled past git's flag parser as `--upload-pack=…`, and the
+/// unauthenticated schemes because they invite MITM-injected payloads. Users
+/// who need SSH must spell out `ssh://git@host/owner/repo`.
+///
+/// We also do not heuristically treat `<owner>/<repo>` as GitHub shorthand;
+/// the user must spell out the full URL.
 pub fn looks_like_git_url(source: &str) -> bool {
     // Defense-in-depth against flag injection (e.g. `--upload-pack=/bin/evil`):
     // a URL that begins with `-` is never a real URL, and even if `--` would
@@ -337,23 +342,7 @@ pub fn looks_like_git_url(source: &str) -> bool {
     if source.starts_with('-') {
         return false;
     }
-    if source.starts_with("https://")
-        || source.starts_with("http://")
-        || source.starts_with("git://")
-        || source.starts_with("ssh://")
-        || source.starts_with("git@")
-    {
-        return true;
-    }
-    // SCP-style: `user@host:owner/repo`. The colon must come *before* any
-    // slash or path separator and the prefix must contain `@`.
-    if let Some(colon) = source.find(':') {
-        let head = &source[..colon];
-        if head.contains('@') && !head.contains('/') && !head.contains('\\') {
-            return true;
-        }
-    }
-    false
+    source.starts_with("https://") || source.starts_with("ssh://")
 }
 
 /// Install a resolved skill into `target`. Returns the destination directory
@@ -572,12 +561,12 @@ mod tests {
     }
 
     #[test]
-    fn looks_like_git_url_detects_https() {
+    fn looks_like_git_url_accepts_only_https_and_ssh() {
+        // F-641: SCP-style URLs (e.g. `git@host:path`) and unauthenticated
+        // schemes (`http://`, `git://`) are no longer accepted. Only the
+        // authenticated `https://` and `ssh://` schemes pass classification.
         assert!(looks_like_git_url("https://github.com/x/y.git"));
-        assert!(looks_like_git_url("http://example.com/x.git"));
         assert!(looks_like_git_url("ssh://git@github.com/x/y"));
-        assert!(looks_like_git_url("git@github.com:x/y.git"));
-        assert!(looks_like_git_url("git://github.com/x/y.git"));
     }
 
     #[test]
@@ -587,6 +576,35 @@ mod tests {
         assert!(!looks_like_git_url("relative/path"));
         assert!(!looks_like_git_url("C:\\windows\\path"));
         assert!(!looks_like_git_url(""));
+    }
+
+    #[test]
+    fn looks_like_git_url_rejects_scp_style_and_legacy_schemes() {
+        // F-641: SCP-style `user@host:path` form is the carrier for the
+        // CVE-2017-1000117 family (flag injection via `git@host:--upload-pack=`).
+        // We refuse the entire SCP form — users must spell out `ssh://` if
+        // they need SSH-based clones.
+        assert!(!looks_like_git_url("git@github.com:x/y.git"));
+        assert!(!looks_like_git_url("user@host.example:owner/repo"));
+        // Unauthenticated schemes are also out: `git://` is unencrypted and
+        // `http://` is plaintext. Both encourage MITM-injected payloads.
+        assert!(!looks_like_git_url("git://github.com/x/y.git"));
+        assert!(!looks_like_git_url("http://example.com/x.git"));
+    }
+
+    #[test]
+    fn looks_like_git_url_rejects_scp_style_flag_injection_poc() {
+        // F-641 PoC from issue #677. Pre-fix this returned `true`, which
+        // routed the string into `GitResolver` where `git clone` would
+        // interpret `--upload-pack=/tmp/evil_script` as a clone option and
+        // execute the named binary on the local filesystem.
+        assert!(!looks_like_git_url(
+            "git@github.com:--upload-pack=/tmp/evil_script/repo.git"
+        ));
+        // Same threat class with a different SCP host portion.
+        assert!(!looks_like_git_url(
+            "user@host.example:--config=core.gitProxy=http://evil"
+        ));
     }
 
     #[test]
