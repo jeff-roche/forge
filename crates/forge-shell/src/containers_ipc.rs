@@ -57,7 +57,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use forge_oci::{ContainerHandle, ContainerLogs, LogLine, OciError, PodmanRuntime};
+use forge_oci::{
+    ContainerHandle, ContainerLogs, ContainerRuntime, LogLine, OciError, PodmanRuntime,
+};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "webview")]
 use tauri::{AppHandle, Emitter, Manager, Runtime, State, Webview};
@@ -315,7 +317,6 @@ pub async fn stop_container<R: Runtime>(
 
     let runtime = PodmanRuntime::new();
     let handle = ContainerHandle::new(&container_id);
-    use forge_oci::ContainerRuntime;
     runtime.stop(&handle).await.map_err(|e| e.to_string())?;
     registry.mark_stopped(&container_id).await;
     let _ = app.emit(CONTAINERS_CHANGED_EVENT, &container_id);
@@ -335,7 +336,6 @@ pub async fn remove_container<R: Runtime>(
 
     let runtime = PodmanRuntime::new();
     let handle = ContainerHandle::new(&container_id);
-    use forge_oci::ContainerRuntime;
     runtime.remove(&handle).await.map_err(|e| e.to_string())?;
     registry.unregister(&container_id).await;
     let _ = app.emit(CONTAINERS_CHANGED_EVENT, &container_id);

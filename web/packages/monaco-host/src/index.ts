@@ -24,10 +24,21 @@ const editor = mountEditor(host);
 // origin equals the iframe's origin. If the iframe is ever hosted on a
 // foreign origin (e.g. Tauri asset-protocol change, CDN), pass the real
 // parent origin to both factories — never fall back to `'*'`.
+const post = browserPost();
 const handles = createIframeProtocol({
   editor,
-  post: browserPost(),
+  post,
   subscribe: browserSubscribe(),
+});
+
+// F-687: forward Escape to the parent so modals embedding this iframe
+// (e.g. MemoryEditor) can close on a keyboard-only user's first try
+// even while focus is trapped inside Monaco. Currently scoped to
+// `Escape`; extend the allowlist when more keys need passthrough.
+const FORWARDED_KEYS = new Set(['Escape']);
+window.addEventListener('keydown', (event) => {
+  if (!FORWARDED_KEYS.has(event.key)) return;
+  post({ kind: 'keydown', key: event.key });
 });
 
 // Construct the LSP client eagerly so the transport path is verified at

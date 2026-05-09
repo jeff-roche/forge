@@ -2084,11 +2084,7 @@ describe('ToolCallCard Phase 3 — expand/collapse (F-447)', () => {
     // awaiting-approval cards open by default
     expect(card).toHaveAttribute('data-expanded', 'true');
 
-    const row = getByTestId('tool-call-row-tc-aa-kb');
-    // Row must not be in the tab order while the outer card owns activation.
-    expect(row).not.toHaveAttribute('tabindex', '0');
-
-    fireEvent.keyDown(row, { key: 'Enter' });
+    fireEvent.keyDown(getByTestId('tool-call-row-tc-aa-kb'), { key: 'Enter' });
     // Row handler was a no-op — body is still expanded.
     expect(card).toHaveAttribute('data-expanded', 'true');
   });
@@ -2114,6 +2110,70 @@ describe('ToolCallCard Phase 3 — expand/collapse (F-447)', () => {
     const row = getByTestId('tool-call-row-tc-aa-sp');
     fireEvent.keyDown(row, { key: ' ' });
     expect(card).toHaveAttribute('data-expanded', 'true');
+  });
+
+  // F-688 / Issue #724: keyboard activation target on the awaiting-approval
+  // card must agree with ARIA semantics (WCAG 2.4.3). The single activation
+  // target is the inner row — it carries `role="button"`, `tabIndex={0}`,
+  // and the click handler. The outer card must NOT have a tabIndex (so it
+  // can't appear in the tab order without a role) and Enter on the row must
+  // bubble to the ApprovalPrompt's container listener and dispatch approval.
+  it('places the awaiting-approval activation target on the row with role+tabindex+onClick agreed', () => {
+    pushEvent(SID, {
+      kind: 'ToolCallStarted',
+      tool_call_id: 'tc-a11y-1',
+      tool_name: 'fs.edit',
+      args_json: JSON.stringify({ path: '/src/foo.ts' }),
+    });
+    pushEvent(SID, {
+      kind: 'ToolCallApprovalRequested',
+      tool_call_id: 'tc-a11y-1',
+      tool_name: 'fs.edit',
+      args_json: JSON.stringify({ path: '/src/foo.ts' }),
+      preview: { description: 'Edit /src/foo.ts' },
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    const card = getByTestId('tool-call-card-tc-a11y-1');
+    const row = getByTestId('tool-call-row-tc-a11y-1');
+
+    // The outer card must not be in the tab order — no tabIndex attribute.
+    expect(card).not.toHaveAttribute('tabindex');
+
+    // The row is the single activation target: role="button", tabindex=0,
+    // and an onClick handler (the click toggles when not awaiting; during
+    // awaiting-approval Enter/Space bubble through to approve via the
+    // prompt's container-level listener).
+    expect(row).toHaveAttribute('role', 'button');
+    expect(row).toHaveAttribute('tabindex', '0');
+  });
+
+  it('keyboard Enter on the awaiting-approval row dispatches session_approve_tool', () => {
+    pushEvent(SID, {
+      kind: 'ToolCallStarted',
+      tool_call_id: 'tc-a11y-enter',
+      tool_name: 'fs.edit',
+      args_json: JSON.stringify({ path: '/src/foo.ts' }),
+    });
+    pushEvent(SID, {
+      kind: 'ToolCallApprovalRequested',
+      tool_call_id: 'tc-a11y-enter',
+      tool_name: 'fs.edit',
+      args_json: JSON.stringify({ path: '/src/foo.ts' }),
+      preview: { description: 'Edit /src/foo.ts' },
+    });
+    const { getByTestId } = render(() => <ChatPane />);
+    const row = getByTestId('tool-call-row-tc-a11y-enter');
+    invokeMock.mockClear();
+
+    // fireEvent.keyDown bubbles by default; the ApprovalPrompt's container
+    // listener (attached on the outer card) sees Enter and approves Once.
+    fireEvent.keyDown(row, { key: 'Enter', bubbles: true });
+
+    expect(invokeMock).toHaveBeenCalledWith('session_approve_tool', {
+      sessionId: SID,
+      toolCallId: 'tc-a11y-enter',
+      scope: 'Once',
+    });
   });
 });
 

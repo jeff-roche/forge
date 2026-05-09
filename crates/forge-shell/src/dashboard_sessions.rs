@@ -208,7 +208,9 @@ const PING_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_millis
 #[async_trait]
 impl Pinger for UdsPinger {
     async fn ping(&self, socket: &Path) -> bool {
-        use forge_ipc::{read_frame, write_frame, ClientInfo, Hello, IpcMessage, PROTO_VERSION};
+        use forge_ipc::{
+            read_frame_with_deadline, write_frame, ClientInfo, Hello, IpcMessage, PROTO_VERSION,
+        };
         use tokio::net::UnixStream;
 
         let connect = tokio::time::timeout(PING_CONNECT_TIMEOUT, UnixStream::connect(socket));
@@ -231,7 +233,15 @@ impl Pinger for UdsPinger {
             )
             .await
             .ok()?;
-            match read_frame(&mut stream).await.ok()? {
+            // F-652: explicit deadline on the ack read. The outer
+            // PING_TOTAL_TIMEOUT already bounds the whole handshake;
+            // wiring `read_frame_with_deadline` here keeps the code
+            // path off the deprecated bare `read_frame` and pins the
+            // protection at the framing helper itself.
+            match read_frame_with_deadline(&mut stream, PING_TOTAL_TIMEOUT)
+                .await
+                .ok()?
+            {
                 IpcMessage::HelloAck(_) => Some(()),
                 _ => None,
             }

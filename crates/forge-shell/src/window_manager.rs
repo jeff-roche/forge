@@ -128,8 +128,8 @@ pub fn run() -> Result<()> {
             crate::ipc::list_agents,
             crate::ipc::list_providers,
             // F-587: per-provider credential management. The Dashboard's
-            // settings panel is the only call site; `authz_check` enforces
-            // the `dashboard` window label inside each command.
+            // settings panel is the only call site; `require_window_label`
+            // enforces the `dashboard` window label inside each command.
             crate::credentials_ipc::login_provider,
             crate::credentials_ipc::logout_provider,
             crate::credentials_ipc::has_credential,

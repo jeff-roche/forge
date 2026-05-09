@@ -533,18 +533,30 @@ pub(crate) async fn run_request_loop<P: Provider>(
     // companion event when the turn ends.
     let mut step_index: u32 = 0;
 
+    // F-653: orchestrator-side pause-epoch view. Threaded into every
+    // `wait_if_paused` call so the checkpoint can detect a `try_pause` /
+    // `try_resume` cycle that completed entirely between the previous
+    // step and this one. Without it, a fast cycle could leave the flag
+    // clear by the time the checkpoint loads it, the orchestrator would
+    // proceed, and a tool effect could fire after `SessionPaused` was
+    // acknowledged on the wire.
+    let mut pause_epoch_seen: u64 = 0;
+
     loop {
         // F-603: between-step pause checkpoint. Sits *before* the next
         // `StepStarted(Model)` emission so a pause request takes effect on
         // a clean step boundary — any in-flight tool call from the
         // previous iteration has already returned and `StepFinished`
         // landed before we arrived here. Returns immediately when the
-        // session is running; parks on `resume_notify` while paused and
-        // wakes on the `Paused → Running` transition. Tool-in-flight
-        // invariant: the checkpoint never sits inside the stream loop
-        // or the dispatcher, so a mid-stream pause request waits one
-        // step before taking effect.
-        session.wait_if_paused().await;
+        // session is running and no unobserved pause cycle has occurred;
+        // parks on `resume_notify` otherwise. F-653: the checkpoint
+        // also parks when the pause epoch has advanced since
+        // `pause_epoch_seen` (a paused→running cycle that raced past
+        // us), guaranteeing the `SessionPaused`-then-tool-effect race
+        // window is closed. Tool-in-flight invariant: the checkpoint
+        // never sits inside the stream loop or the dispatcher, so a
+        // mid-stream pause request waits one step before taking effect.
+        session.wait_if_paused(&mut pause_epoch_seen).await;
 
         // F-139: open a `Model` step around each provider pass. The step
         // envelopes every event this iteration emits (AssistantMessage*,

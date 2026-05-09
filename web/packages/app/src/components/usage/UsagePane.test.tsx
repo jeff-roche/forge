@@ -131,12 +131,21 @@ describe('UsagePane helpers', () => {
 // ---------------------------------------------------------------------------
 
 describe('<UsagePane>', () => {
-  it('renders the loading state during the IPC fetch', async () => {
+  it('renders a skeleton loading state during the IPC fetch (F-684)', async () => {
     invokeMock.mockImplementation(() => new Promise(() => undefined));
-    const { findByText } = render(() => (
+    const { findByTestId, queryByText } = render(() => (
       <UsagePane workspaceRoot="/ws/a" />
     ));
-    expect(await findByText(/usage · probing/i)).toBeTruthy();
+    const skeletonHost = await findByTestId('usage-loading');
+    // Skeleton primitive carries `role="status"` + `aria-busy="true"`; one
+    // for the chart, one for the table rows.
+    const statuses = skeletonHost.querySelectorAll('[role="status"]');
+    expect(statuses.length).toBe(2);
+    for (const s of Array.from(statuses)) {
+      expect(s.getAttribute('aria-busy')).toBe('true');
+    }
+    // Plain-text loading copy must be gone — F-684 replaces it with skeletons.
+    expect(queryByText(/usage · probing/i)).toBeFalsy();
   });
 
   it('renders the empty state when no usage exists in range', async () => {

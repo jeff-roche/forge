@@ -68,11 +68,22 @@ const EVENT_CHANNEL_CAPACITY: usize = 128;
 /// timeouts on the [`reqwest::RequestBuilder`] continue to work because
 /// they override the client default. `connect_timeout` is identical
 /// across all MCP servers so the shared default is correct.
+///
+/// F-645: built on top of `forge_core::http::secure_client_builder()` so
+/// every connect runs through the DNS-rebinding-safe resolver from F-644
+/// (resolved IPs are filtered against the `url_safety` policy before
+/// reqwest opens a socket). We also pin `Policy::none()` for redirects:
+/// MCP JSON-RPC has no legitimate use for 3xx hops, and following them
+/// would let a hostile endpoint pivot the request to an internal target
+/// (e.g. IMDS at 169.254.169.254) without re-running `ssrf::check_url`
+/// against the redirect target. With redirects disabled the 302 surfaces
+/// as a non-2xx response in [`Http::send`] and the request fails closed.
 fn shared_client() -> &'static reqwest::Client {
     static SHARED: OnceLock<reqwest::Client> = OnceLock::new();
     SHARED.get_or_init(|| {
-        reqwest::Client::builder()
+        forge_core::http::secure_client_builder()
             .connect_timeout(CONNECT_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             // The only documented failure path is "no TLS backend compiled
             // in" — we always link rustls (see Cargo.toml). Falling back to

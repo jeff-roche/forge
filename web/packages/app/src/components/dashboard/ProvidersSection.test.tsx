@@ -85,6 +85,22 @@ afterEach(() => {
 });
 
 describe('ProvidersSection (F-586)', () => {
+  it('renders a skeleton loading state during the IPC fetch (F-684)', async () => {
+    // Pending forever — the resource never settles, so the snapshot stays in
+    // its `loading` branch.
+    invokeMock.mockImplementation(() => new Promise(() => undefined));
+    const { findByTestId, queryByText } = render(() => <ProvidersSection />);
+
+    const skeleton = await findByTestId('providers-loading');
+    expect(skeleton.getAttribute('role')).toBe('status');
+    expect(skeleton.getAttribute('aria-busy')).toBe('true');
+    // Plain-text "providers · probing" copy must be gone — replaced by
+    // a card-shaped skeleton matching the live grid layout.
+    expect(queryByText(/providers · probing/i)).toBeFalsy();
+    // The skeleton renders one placeholder per expected card slot.
+    expect(skeleton.querySelectorAll('.forge-skeleton--card').length).toBe(4);
+  });
+
   it('renders a card per provider returned by list_providers', async () => {
     setupInvokeMock();
     const { findAllByRole } = render(() => <ProvidersSection />);

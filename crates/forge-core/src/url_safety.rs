@@ -111,7 +111,14 @@ fn is_host_loopback(host: &url::Host<&str>) -> bool {
     }
 }
 
-fn check_ipv4(addr: std::net::Ipv4Addr, raw: &str) -> Result<()> {
+/// Apply the IPv4 range policy used by [`check_url`] to a single address.
+///
+/// Exposed for [`crate::http`]: the SSRF-aware DNS resolver runs every
+/// resolved IPv4 from `getaddrinfo` through the same checks `check_url`
+/// would apply if the URL had been an IP literal. Loopback is *not*
+/// rejected here — it's the caller's job to pre-filter loopback per the
+/// [`check_url`] scheme/build-profile rules.
+pub fn check_ipv4(addr: std::net::Ipv4Addr, raw: &str) -> Result<()> {
     let o = addr.octets();
 
     // 10.0.0.0/8
@@ -134,7 +141,13 @@ fn check_ipv4(addr: std::net::Ipv4Addr, raw: &str) -> Result<()> {
     Ok(())
 }
 
-fn check_ipv6(addr: std::net::Ipv6Addr, raw: &str) -> Result<()> {
+/// Apply the IPv6 range policy used by [`check_url`] to a single address.
+///
+/// Exposed for [`crate::http`]: the SSRF-aware DNS resolver runs every
+/// resolved IPv6 through the same checks `check_url` would apply. Loopback
+/// (`::1`) is *not* rejected here — callers must pre-filter loopback if
+/// their scheme/build-profile rules require it.
+pub fn check_ipv6(addr: std::net::Ipv6Addr, raw: &str) -> Result<()> {
     let s = addr.segments();
 
     // fc00::/7 — unique-local (fc00:: through fdff::)

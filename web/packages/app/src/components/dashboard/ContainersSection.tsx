@@ -30,7 +30,7 @@ import {
   onMount,
   Show,
 } from 'solid-js';
-import { Button } from '@forge/design';
+import { Button, Skeleton } from '@forge/design';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import {
   CONTAINERS_CHANGED_EVENT,
@@ -44,6 +44,7 @@ import {
   type RuntimeStatus,
 } from '../../ipc/containers';
 import { useFocusTrap } from '../../lib/useFocusTrap';
+import { pushToast } from '../toast';
 import './ContainersSection.css';
 
 /** Anchor for cross-section links. */
@@ -63,6 +64,10 @@ export const ContainersSection: Component = () => {
   });
   const [activeLogsId, setActiveLogsId] = createSignal<string | null>(null);
   const [actionError, setActionError] = createSignal<string | null>(null);
+  // Pending REMOVE confirmation. `null` = no modal open. The id is the
+  // full container_id of the row whose REMOVE button was clicked.
+  const [pendingRemoveId, setPendingRemoveId] = createSignal<string | null>(null);
+  const [removePending, setRemovePending] = createSignal(false);
 
   // Refresh on the existing event channel so the list stays in sync with
   // backend mutations (stop/remove from another tab, session teardown).
@@ -87,21 +92,48 @@ export const ContainersSection: Component = () => {
     try {
       await stopContainer(id);
       await refetch();
+      // Per WCAG 3.3.4: stop is recoverable, so confirmation lives in a
+      // post-action toast rather than a pre-action modal. Short-id keeps
+      // the surface compact; the full id is still in the row's title.
+      pushToast(
+        'info',
+        `Container ${id.slice(0, 12)} stopped — restart from session view`,
+      );
     } catch (err: unknown) {
       setActionError(err instanceof Error ? err.message : String(err));
     }
   };
 
-  const onRemove = async (id: string) => {
+  // REMOVE is destructive (the container and any state inside it are gone)
+  // so we gate it behind an explicit confirm step per WCAG 3.3.4. The
+  // modal mirrors the credentials rotation confirm so the dashboard's
+  // destructive surfaces share one visual contract.
+  const requestRemove = (id: string) => {
     setActionError(null);
+    setPendingRemoveId(id);
+  };
+
+  const cancelRemove = () => {
+    if (removePending()) return;
+    setPendingRemoveId(null);
+  };
+
+  const confirmRemove = async () => {
+    const id = pendingRemoveId();
+    if (id === null) return;
+    setRemovePending(true);
     try {
       await removeContainer(id);
       // Close the logs flyout if we just removed the container it was
       // tracking — the container_id is gone and any logs poll would 404.
       if (activeLogsId() === id) setActiveLogsId(null);
       await refetch();
+      setPendingRemoveId(null);
     } catch (err: unknown) {
       setActionError(err instanceof Error ? err.message : String(err));
+      setPendingRemoveId(null);
+    } finally {
+      setRemovePending(false);
     }
   };
 
@@ -116,7 +148,13 @@ export const ContainersSection: Component = () => {
       </header>
 
       <Show when={containers.loading}>
-        <p class="containers-section__hint">containers · loading</p>
+        <Skeleton
+          variant="block"
+          count={3}
+          label="Loading containers"
+          class="containers-section__skeleton"
+          data-testid="containers-loading"
+        />
       </Show>
 
       <Show when={!containers.loading && (containers() ?? []).length === 0}>
@@ -144,7 +182,7 @@ export const ContainersSection: Component = () => {
                 setActiveLogsId((cur) => (cur === c.container_id ? null : c.container_id))
               }
               onStop={() => void onStop(c.container_id)}
-              onRemove={() => void onRemove(c.container_id)}
+              onRemove={() => requestRemove(c.container_id)}
             />
           )}
         </For>
@@ -155,6 +193,17 @@ export const ContainersSection: Component = () => {
           <LogsFlyout
             containerId={id()}
             onClose={() => setActiveLogsId(null)}
+          />
+        )}
+      </Show>
+
+      <Show when={pendingRemoveId()}>
+        {(id) => (
+          <RemoveConfirm
+            containerId={id()}
+            pending={removePending()}
+            onCancel={cancelRemove}
+            onConfirm={() => void confirmRemove()}
           />
         )}
       </Show>
@@ -232,6 +281,98 @@ const ContainerRow: Component<ContainerRowProps> = (props) => {
         </Button>
       </div>
     </li>
+  );
+};
+
+// ---------------------------------------------------------------------------
+// Remove confirmation modal
+// ---------------------------------------------------------------------------
+
+interface RemoveConfirmProps {
+  containerId: string;
+  pending: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}
+
+/**
+ * Destructive-action confirmation for REMOVE. Mirrors the credentials
+ * rotation modal so the dashboard's destructive surfaces share one
+ * visual contract: role="dialog", aria-modal, focus trap, Escape and
+ * backdrop dismiss.
+ */
+const RemoveConfirm: Component<RemoveConfirmProps> = (props) => {
+  let dialogRef: HTMLDivElement | undefined;
+  useFocusTrap(() => dialogRef);
+
+  // WAI-ARIA APG Dialog pattern: Escape must dismiss regardless of focus
+  // location. A window-level listener supersedes any internal focus
+  // traversal so screen-reader and shortcut-driven focus moves still
+  // get caught.
+  onMount(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        props.onCancel();
+      }
+    };
+    window.addEventListener('keydown', handler);
+    onCleanup(() => window.removeEventListener('keydown', handler));
+  });
+
+  const shortId = () => props.containerId.slice(0, 12);
+
+  return (
+    <div
+      class="containers-section__modal-backdrop"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) props.onCancel();
+      }}
+      data-testid="container-remove-modal-backdrop"
+    >
+      <div
+        ref={dialogRef}
+        class="containers-section__modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="container-remove-title"
+        data-testid="container-remove-modal"
+      >
+        <header class="containers-section__modal-head">
+          <h3
+            id="container-remove-title"
+            class="containers-section__modal-title"
+          >
+            REMOVE CONTAINER?
+          </h3>
+        </header>
+        <p class="containers-section__modal-body">
+          Remove container <strong>{shortId()}</strong>? This cannot be undone — any state inside
+          the container will be lost.
+        </p>
+        <div class="containers-section__modal-actions">
+          <Button
+            variant="ghost"
+            size="sm"
+            data-testid="container-remove-cancel"
+            disabled={props.pending}
+            onClick={props.onCancel}
+          >
+            CANCEL
+          </Button>
+          <Button
+            variant="primary"
+            size="sm"
+            data-testid="container-remove-confirm"
+            aria-busy={props.pending}
+            disabled={props.pending}
+            onClick={props.onConfirm}
+          >
+            YES, REMOVE
+          </Button>
+        </div>
+      </div>
+    </div>
   );
 };
 
