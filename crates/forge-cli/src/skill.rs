@@ -2002,4 +2002,5 @@ mod tests {
             msg.contains("creating cache parent"),
             "expected cache-parent context, got: {msg}",
         );
-    }}
+    }
+}
