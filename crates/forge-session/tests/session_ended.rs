@@ -1,3 +1,4 @@
+#![allow(deprecated)] // F-652: tests/benches still drive the deprecated bare read_frame helpers.
 //! Integration tests: SessionEnded emission for ephemeral sessions.
 //!
 //! Verifies that forged emits `SessionEnded { reason: Completed }` after a

@@ -218,10 +218,10 @@ pub fn is_known_provider_id(settings: &forge_core::settings::AppSettings, id: &s
     false
 }
 
-/// Per-field byte cap on the inbound `provider_id` argument. Slugs are
-/// short; 128 bytes is a generous upper bound that still rejects a
-/// hostile renderer driving megabyte calls.
-pub const MAX_PROVIDER_ID_BYTES: usize = 128;
+// F-675: `MAX_PROVIDER_ID_BYTES` is defined canonically in `crate::ipc` so
+// the credentials and providers IPC surfaces share one cap. Re-import here
+// rather than redeclaring.
+use crate::ipc::MAX_PROVIDER_ID_BYTES;
 
 /// Pure validation helper exposed for unit tests.
 pub fn validate_provider_id(provider_id: &str) -> Result<(), String> {

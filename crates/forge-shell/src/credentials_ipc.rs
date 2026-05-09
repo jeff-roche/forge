@@ -17,8 +17,10 @@
 //! Credential commands are dashboard-scoped — only the `dashboard` window
 //! label is permitted to invoke them. A session window has no business
 //! managing keys; routing them to the dashboard's settings panel is the
-//! intended UX flow. The internal `authz_check` helper matches the existing
-//! IPC pattern (label-bound, never an open invocation surface).
+//! intended UX flow. Each command delegates to the canonical
+//! `crate::ipc::require_window_label` helper (label-bound, never an open
+//! invocation surface) so authz semantics and rejection logging stay in
+//! lockstep with the rest of the IPC surface.
 //!
 //! # Logging
 //!
@@ -47,9 +49,10 @@ pub const CREDENTIALS_OWNER_LABEL: &str = "dashboard";
 /// `login_provider` calls.
 pub const MAX_API_KEY_BYTES: usize = 8 * 1024;
 
-/// Per-field byte cap on `provider_id`. Provider IDs are short, lowercase
-/// ASCII slugs.
-pub const MAX_PROVIDER_ID_BYTES: usize = 64;
+// F-675: `MAX_PROVIDER_ID_BYTES` is defined canonically in `crate::ipc` so
+// the credentials and providers IPC surfaces share one cap. Re-import here
+// rather than redeclaring.
+use crate::ipc::MAX_PROVIDER_ID_BYTES;
 
 /// Tauri-managed handle to the credential store. Held as an
 /// `Arc<dyn Credentials>` so the same state can wrap any `Credentials`
@@ -107,22 +110,6 @@ pub fn manage_credentials_with<R: Runtime>(app: &AppHandle<R>, store: Arc<dyn Cr
     }
 }
 
-#[allow(dead_code)] // used by tauri::command bodies (cfg-gated) and tests.
-fn authz_check(label: &str, command: &'static str) -> Result<(), String> {
-    if label == CREDENTIALS_OWNER_LABEL {
-        Ok(())
-    } else {
-        tracing::warn!(
-            target: "forge_shell::ipc::authz",
-            actual = label,
-            expected = CREDENTIALS_OWNER_LABEL,
-            command = command,
-            "credentials command rejected: window label mismatch"
-        );
-        Err("forbidden: window label mismatch".to_string())
-    }
-}
-
 fn require_size(field: &'static str, value: &str, cap: usize) -> Result<(), String> {
     if value.len() > cap {
         return Err(format!(
@@ -165,7 +152,7 @@ pub async fn login_provider<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, CredentialsState>,
 ) -> Result<(), String> {
-    authz_check(webview.label(), "login_provider")?;
+    crate::ipc::require_window_label(&webview, CREDENTIALS_OWNER_LABEL, "login_provider")?;
     validate_login_inputs(&provider_id, &key)?;
 
     // Wrap the inbound key in `SecretString` immediately. Past this point
@@ -198,7 +185,7 @@ pub async fn logout_provider<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, CredentialsState>,
 ) -> Result<(), String> {
-    authz_check(webview.label(), "logout_provider")?;
+    crate::ipc::require_window_label(&webview, CREDENTIALS_OWNER_LABEL, "logout_provider")?;
     validate_provider_id(&provider_id)?;
 
     state.inner.remove(&provider_id).await.map_err(|e| {
@@ -226,7 +213,7 @@ pub async fn has_credential<R: Runtime>(
     webview: Webview<R>,
     state: State<'_, CredentialsState>,
 ) -> Result<bool, String> {
-    authz_check(webview.label(), "has_credential")?;
+    crate::ipc::require_window_label(&webview, CREDENTIALS_OWNER_LABEL, "has_credential")?;
     validate_provider_id(&provider_id)?;
 
     let present = state.inner.has(&provider_id).await.map_err(|e| {
@@ -285,11 +272,32 @@ mod tests {
         validate_login_inputs("openai", &openai_shaped).expect("realistic openai key");
     }
 
+    /// Pin the canonical authz contract for the credential commands: only
+    /// the dashboard window label is admitted. The helper itself lives in
+    /// `crate::ipc`; this test guards the policy choice (dashboard-only)
+    /// rather than the helper's mechanics (covered by `ipc_authz_tracing`).
     #[test]
-    fn authz_check_rejects_non_dashboard_label() {
-        assert!(authz_check("session-abc", "login_provider").is_err());
-        assert!(authz_check("forge://dashboard", "login_provider").is_err());
-        assert!(authz_check(CREDENTIALS_OWNER_LABEL, "login_provider").is_ok());
+    fn credentials_dashboard_authz_policy() {
+        use crate::ipc::require_window_label_for_test;
+
+        assert!(require_window_label_for_test(
+            "session-abc",
+            CREDENTIALS_OWNER_LABEL,
+            "login_provider"
+        )
+        .is_err());
+        assert!(require_window_label_for_test(
+            "forge://dashboard",
+            CREDENTIALS_OWNER_LABEL,
+            "login_provider"
+        )
+        .is_err());
+        assert!(require_window_label_for_test(
+            CREDENTIALS_OWNER_LABEL,
+            CREDENTIALS_OWNER_LABEL,
+            "login_provider"
+        )
+        .is_ok());
     }
 
     /// Pin the trait wiring of `CredentialsState`: the inner `Arc` round-trips

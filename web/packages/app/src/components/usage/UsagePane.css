@@ -78,13 +78,28 @@
  * State copy
  * ------------------------------------------------------------------------ */
 
-.usage-pane__loading,
 .usage-pane__empty {
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--color-text-secondary);
   letter-spacing: 0.2em;
   margin: 0;
+}
+
+/* F-684: usage loading state — chart-then-rows skeleton matching the
+ * post-resolve layout (chart card on top, three table rows beneath). */
+.usage-pane__skeletons {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+.usage-pane__skeleton-chart .forge-skeleton {
+  height: var(--sp-12);
+}
+
+.usage-pane__skeleton-rows .forge-skeleton {
+  height: var(--sp-6);
 }
 
 .usage-pane__error {

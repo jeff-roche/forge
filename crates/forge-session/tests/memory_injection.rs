@@ -1,3 +1,4 @@
+#![allow(deprecated)] // F-652: tests/benches still drive the deprecated bare read_frame helpers.
 //! F-601: integration tests for cross-session memory injection.
 //!
 //! These tests cover the seam that `serve_with_session` uses — they
@@ -18,7 +19,8 @@
 use std::sync::Arc;
 
 use forge_agents::{
-    assemble_system_prompt, Memory, MemoryFrontmatter, MemoryStore, WriteMode, MEMORY_HEADING,
+    assemble_system_prompt, Memory, MemoryFrontmatter, MemoryStore, WriteMode,
+    MEMORY_ENVELOPE_CLOSE, MEMORY_HEADING,
 };
 use forge_ipc::{ClientInfo, Hello, IpcMessage, PROTO_VERSION};
 use forge_providers::MockProvider;
@@ -45,8 +47,13 @@ fn memory_body_injects_after_agents_md_under_memory_heading() {
         "AGENTS.md must precede Memory heading; got: {assembled}"
     );
     assert!(
-        assembled.ends_with(memory_body),
-        "memory body must close out the prompt; got: {assembled}"
+        assembled.contains(memory_body),
+        "memory body must appear in the prompt; got: {assembled}"
+    );
+    // F-650: the envelope close tag is the final structural element.
+    assert!(
+        assembled.ends_with(MEMORY_ENVELOPE_CLOSE),
+        "envelope close must be last; got: {assembled}"
     );
     assert!(
         assembled.contains(MEMORY_HEADING.trim()),
@@ -59,7 +66,8 @@ fn memory_alone_still_uses_memory_heading() {
     let memory_body = "no agents.md, just memory";
     let assembled = assemble_system_prompt(None, Some(memory_body)).unwrap();
     assert!(assembled.contains("## Memory"));
-    assert!(assembled.ends_with(memory_body));
+    assert!(assembled.contains(memory_body));
+    assert!(assembled.ends_with(MEMORY_ENVELOPE_CLOSE));
 }
 
 #[test]

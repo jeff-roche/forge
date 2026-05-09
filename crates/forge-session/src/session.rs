@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -54,20 +54,30 @@ pub struct Session {
     /// Set by `try_pause` on the daemon's IPC handler thread; observed by
     /// `wait_if_paused` between steps in the orchestrator's request loop.
     /// `try_resume` clears the flag and notifies any waiter so the next
-    /// step opens immediately — `Notify::notify_waiters` only fires on a
-    /// real `Paused → Running` transition (the IPC handler suppresses
-    /// redundant calls), so a parked orchestrator reliably wakes exactly
-    /// once per resume. Tool-in-flight semantics: the checkpoint sits
-    /// **between** steps, so a paused orchestrator never aborts an
+    /// step opens immediately. Tool-in-flight semantics: the checkpoint
+    /// sits **between** steps, so a paused orchestrator never aborts an
     /// in-flight model stream or tool call mid-flight; it parks at the
     /// next clean step boundary.
     paused: Arc<AtomicBool>,
+    /// F-653: monotonic counter incremented on every `Running → Paused`
+    /// transition (i.e. on every `try_pause` that performs the flip).
+    /// The orchestrator captures this epoch at the top of each request
+    /// loop iteration and passes it back into [`Self::wait_if_paused`];
+    /// the checkpoint parks not only when the flag is currently set but
+    /// also when the epoch has advanced since the orchestrator last
+    /// observed it. Without the epoch, a tight `try_pause` → `try_resume`
+    /// cycle that completed entirely *between* the orchestrator's prior
+    /// step and the next checkpoint would leave the flag clear, the
+    /// checkpoint would not park, and a tool effect could fire after
+    /// `SessionPaused` was acknowledged on the wire.
+    pause_epoch: Arc<AtomicU64>,
     /// F-603: paired with `paused`. The orchestrator's pause checkpoint
     /// awaits this `Notify` while the flag is set; `try_resume` calls
-    /// `notify_waiters` to wake it. `Notify` is sufficient (no payload)
-    /// — the wakers re-check the flag and decide whether to keep
-    /// looping; they do **not** trust the wake itself as a state
-    /// transition signal.
+    /// `notify_one` to wake it. F-653: switched from `notify_waiters` to
+    /// `notify_one` so a resume that lands *before* the orchestrator
+    /// reaches the checkpoint retains a permit; the next `notified()`
+    /// consumes it without parking, so the orchestrator never stalls
+    /// after a pause/resume cycle that raced ahead of it.
     resume_notify: Arc<Notify>,
     /// F-604: orchestrator interrupt request flag (in-memory only, not
     /// persisted). Set by `request_interrupt` on the daemon's IPC
@@ -113,6 +123,7 @@ impl Session {
             compacting: Arc::new(AtomicBool::new(false)),
             parallel_group_seq: Arc::new(AtomicU32::new(1)),
             paused: Arc::new(AtomicBool::new(false)),
+            pause_epoch: Arc::new(AtomicU64::new(0)),
             resume_notify: Arc::new(Notify::new()),
             interrupt_requested: Arc::new(AtomicBool::new(false)),
             interrupt_capture: Arc::new(Mutex::new(None)),
@@ -124,10 +135,21 @@ impl Session {
     /// the `Running → Paused` transition (caller should emit
     /// `Event::SessionPaused`); `false` if the session was already paused
     /// (caller logs `debug!` and emits no event — idempotency contract).
+    ///
+    /// F-653: a successful transition also bumps `pause_epoch` so a
+    /// subsequent [`Self::wait_if_paused`] can detect a pause that
+    /// occurred (and possibly already resumed) since the orchestrator's
+    /// last observed epoch. The bump happens **after** the CAS so a lost
+    /// race never advances the epoch.
     pub fn try_pause(&self) -> bool {
-        self.paused
+        let transitioned = self
+            .paused
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
+            .is_ok();
+        if transitioned {
+            self.pause_epoch.fetch_add(1, Ordering::SeqCst);
+        }
+        transitioned
     }
 
     /// F-603: clear the pause flag and wake any orchestrator parked at the
@@ -135,17 +157,34 @@ impl Session {
     /// `Paused → Running` transition (caller should emit
     /// `Event::SessionResumed`); `false` if the session was already
     /// running (caller logs `debug!` and emits no event — idempotency
-    /// contract). `notify_waiters` only fires on a real transition, so a
-    /// no-op resume does not spuriously wake the orchestrator.
+    /// contract).
+    ///
+    /// F-653: uses `notify_one` instead of `notify_waiters`. The
+    /// difference is permit retention: `notify_one` stores a single
+    /// permit when no waiter is registered, which the next
+    /// `notified().await` consumes without parking. This closes the
+    /// race where the orchestrator captures `last_observed_epoch < N`,
+    /// the IPC handler completes a full pause/resume cycle (epoch → N,
+    /// `notify_waiters` fires into the void), and the orchestrator's
+    /// next checkpoint would otherwise stall on the now-defunct notify.
     pub fn try_resume(&self) -> bool {
         let transitioned = self
             .paused
             .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok();
         if transitioned {
-            self.resume_notify.notify_waiters();
+            self.resume_notify.notify_one();
         }
         transitioned
+    }
+
+    /// F-653: read the current pause epoch. The orchestrator captures
+    /// this at the top of each request-loop iteration and threads it
+    /// back into [`Self::wait_if_paused`] so the checkpoint can detect
+    /// pause/resume cycles that completed before the orchestrator
+    /// arrived.
+    pub fn pause_epoch(&self) -> u64 {
+        self.pause_epoch.load(Ordering::SeqCst)
     }
 
     /// F-603: observe the pause flag without mutating it. Used in tests
@@ -156,28 +195,56 @@ impl Session {
         self.paused.load(Ordering::SeqCst)
     }
 
-    /// F-603: orchestrator's between-step checkpoint. Returns immediately
-    /// when the session is running; parks on `resume_notify` when the
-    /// session is paused, re-checking the flag on each wake to defend
-    /// against spurious notifications. Cancellation-safe — dropping the
-    /// returned future leaves both the flag and the notify in a
-    /// consistent state because `Notify::notified()` does not consume a
-    /// permit until polled to readiness.
-    pub async fn wait_if_paused(&self) {
-        while self.paused.load(Ordering::SeqCst) {
-            // Register interest BEFORE re-checking the flag to defeat the
-            // pause/notify/wait race: if `try_resume` flips the flag and
-            // calls `notify_waiters` between our load above and the
-            // `notified().await` below, registering first guarantees the
-            // notification is delivered to us rather than dropped.
+    /// F-603: orchestrator's between-step checkpoint.
+    ///
+    /// F-653: race-free against tight `try_pause` → `try_resume` cycles
+    /// that complete before the orchestrator arrives. `last_observed_epoch`
+    /// is the orchestrator-side counter — initialised to `0` outside the
+    /// request loop and updated on each return. The checkpoint exits
+    /// only when both:
+    ///
+    ///   * the pause flag is currently clear, **and**
+    ///   * the pause epoch matches the caller's `last_observed_epoch`
+    ///     (no pause-cycle has slipped past unobserved).
+    ///
+    /// Otherwise the checkpoint parks on `resume_notify` and re-evaluates
+    /// after each wake. Because `try_resume` uses `notify_one` (permit
+    /// retention), a resume that fired before the call arrived simply
+    /// satisfies the next `notified().await` without parking — the
+    /// orchestrator picks up the bumped epoch on its next iteration and
+    /// returns.
+    ///
+    /// Cancellation-safe — `Notify::notified()` does not consume a
+    /// permit until polled to readiness, so dropping the future leaves
+    /// pause state and any pending wake intact.
+    pub async fn wait_if_paused(&self, last_observed_epoch: &mut u64) {
+        loop {
+            // Register interest BEFORE reading state so a `try_resume`
+            // that lands between the load and the await is delivered to
+            // us. (Permit retention via `notify_one` covers the case
+            // where the resume completes BEFORE registration too.)
             let notified = self.resume_notify.notified();
             tokio::pin!(notified);
-            // Re-check after registration; resume may have landed in
-            // between the outer `load` and the registration above.
-            if !self.paused.load(Ordering::SeqCst) {
-                break;
+
+            let cur_epoch = self.pause_epoch.load(Ordering::SeqCst);
+            let cur_paused = self.paused.load(Ordering::SeqCst);
+
+            if !cur_paused && cur_epoch == *last_observed_epoch {
+                // Steady state: no pause is active and no cycle has
+                // happened since the orchestrator last checked.
+                return;
             }
+
+            // Either currently paused (wake comes from the next
+            // `try_resume`) or a pause/resume cycle raced past us
+            // (wake is the retained `notify_one` permit, consumed
+            // immediately).
             notified.await;
+
+            // Advance the caller's epoch view to whatever we observed
+            // post-wake; the loop re-evaluates and either returns or
+            // parks again if a fresh pause has since landed.
+            *last_observed_epoch = self.pause_epoch.load(Ordering::SeqCst);
         }
     }
 
@@ -389,12 +456,14 @@ mod tests {
     async fn wait_if_paused_returns_immediately_when_running() {
         let (_dir, session) = fresh_session().await;
         // Without a pause, the future should resolve right away.
+        let mut epoch = 0u64;
         tokio::time::timeout(
             std::time::Duration::from_millis(50),
-            session.wait_if_paused(),
+            session.wait_if_paused(&mut epoch),
         )
         .await
         .expect("wait_if_paused must return immediately when running");
+        assert_eq!(epoch, 0, "no pause cycle so observed epoch stays at 0");
     }
 
     #[tokio::test]
@@ -403,7 +472,11 @@ mod tests {
         session.try_pause();
 
         let session_clone = Arc::clone(&session);
-        let waiter = tokio::spawn(async move { session_clone.wait_if_paused().await });
+        let waiter = tokio::spawn(async move {
+            let mut epoch = 0u64;
+            session_clone.wait_if_paused(&mut epoch).await;
+            epoch
+        });
 
         // Confirm the waiter has not yet resolved.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -411,10 +484,137 @@ mod tests {
 
         // Resume; the waiter should now complete.
         session.try_resume();
-        tokio::time::timeout(std::time::Duration::from_millis(500), waiter)
+        let observed = tokio::time::timeout(std::time::Duration::from_millis(500), waiter)
             .await
             .expect("waiter must wake on resume")
             .unwrap();
+        assert_eq!(observed, 1, "wake must advance observed epoch to 1");
+    }
+
+    // ---------- F-653: race-free pause/resume around the checkpoint ----------
+
+    /// F-653: `try_pause` increments the epoch only on a real
+    /// `Running → Paused` transition; idempotent calls do not.
+    #[tokio::test]
+    async fn try_pause_bumps_epoch_only_on_transition() {
+        let (_dir, session) = fresh_session().await;
+        assert_eq!(session.pause_epoch(), 0);
+        assert!(session.try_pause());
+        assert_eq!(session.pause_epoch(), 1);
+        assert!(!session.try_pause(), "redundant pause is a no-op");
+        assert_eq!(
+            session.pause_epoch(),
+            1,
+            "redundant pause must not bump the epoch",
+        );
+        assert!(session.try_resume());
+        assert_eq!(
+            session.pause_epoch(),
+            1,
+            "resume does not advance the epoch",
+        );
+        assert!(session.try_pause());
+        assert_eq!(session.pause_epoch(), 2);
+    }
+
+    /// F-653: a `try_pause` → `try_resume` cycle that completes BEFORE
+    /// the orchestrator arrives at `wait_if_paused` must still cause the
+    /// checkpoint to consume the resume permit and acknowledge the new
+    /// epoch — without hanging. This is the regression the issue calls
+    /// out: the previous `notify_waiters` implementation dropped the
+    /// resume signal because there was no waiter parked yet.
+    #[tokio::test]
+    async fn wait_if_paused_handles_cycle_completed_before_arrival() {
+        let (_dir, session) = fresh_session().await;
+        // Full pause/resume cycle BEFORE the orchestrator arrives.
+        assert!(session.try_pause());
+        assert!(session.try_resume());
+        assert!(!session.is_paused());
+        assert_eq!(session.pause_epoch(), 1);
+
+        // Orchestrator's last-observed epoch is still 0 — it never saw
+        // the cycle. The checkpoint must NOT hang; the retained
+        // `notify_one` permit satisfies the await, and the loop returns
+        // with the epoch ack'd.
+        let mut epoch = 0u64;
+        tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            session.wait_if_paused(&mut epoch),
+        )
+        .await
+        .expect(
+            "wait_if_paused must not hang after a pause/resume cycle that completed \
+             before the orchestrator arrived",
+        );
+        assert_eq!(
+            epoch, 1,
+            "wait_if_paused must ack the epoch advanced by the missed cycle",
+        );
+    }
+
+    /// F-653: after the orchestrator has already ack'd epoch N, a
+    /// no-op call to `wait_if_paused(&mut N)` returns immediately
+    /// without consuming any further permits.
+    #[tokio::test]
+    async fn wait_if_paused_returns_immediately_when_epoch_already_observed() {
+        let (_dir, session) = fresh_session().await;
+        assert!(session.try_pause());
+        assert!(session.try_resume());
+        let mut epoch = session.pause_epoch();
+        assert_eq!(epoch, 1);
+
+        // Orchestrator has already ack'd this epoch (or initialised
+        // to it). Subsequent calls must be a fast path.
+        tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            session.wait_if_paused(&mut epoch),
+        )
+        .await
+        .expect("ack'd epoch must be a no-op fast path");
+        assert_eq!(epoch, 1, "epoch unchanged on no-op");
+    }
+
+    /// F-653: after a missed cycle is ack'd, a fresh pause that lands
+    /// AFTER the ack must still park the orchestrator.
+    #[tokio::test]
+    async fn wait_if_paused_parks_on_fresh_pause_after_acked_cycle() {
+        let (_dir, session) = fresh_session().await;
+        // Missed cycle.
+        assert!(session.try_pause());
+        assert!(session.try_resume());
+
+        // Orchestrator catches up.
+        let session_a = Arc::clone(&session);
+        let mut epoch = 0u64;
+        tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            session_a.wait_if_paused(&mut epoch),
+        )
+        .await
+        .unwrap();
+        assert_eq!(epoch, 1);
+
+        // Fresh pause — orchestrator's next checkpoint must park.
+        assert!(session.try_pause());
+
+        let session_b = Arc::clone(&session);
+        let waiter = tokio::spawn(async move {
+            let mut e = epoch;
+            session_b.wait_if_paused(&mut e).await;
+            e
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            !waiter.is_finished(),
+            "checkpoint must park on a fresh pause that lands after a previous ack",
+        );
+
+        assert!(session.try_resume());
+        let observed = tokio::time::timeout(std::time::Duration::from_millis(500), waiter)
+            .await
+            .expect("waiter must wake on the second resume")
+            .unwrap();
+        assert_eq!(observed, 2, "second cycle advances the epoch to 2");
     }
 
     // ---------- F-604: interrupt / refine primitive ----------

@@ -29,9 +29,16 @@
 
 .containers-section__hint {
   margin: 0;
-  font-size: 13px;
+  font-size: var(--type-mono-md);
   color: var(--color-text-secondary);
   line-height: 1.5;
+}
+
+/* F-684: row-shaped loading state. The skeleton group's gap matches the
+ * gap between live `.containers-section__row` entries so the surface does
+ * not re-layout when the resource resolves. */
+.containers-section__skeleton.forge-skeleton-group {
+  gap: var(--sp-4);
 }
 
 .containers-section__error {
@@ -41,7 +48,7 @@
   border-left: 3px solid var(--color-error);
   border-radius: var(--r-sm);
   color: var(--color-text-primary);
-  font-size: 13px;
+  font-size: var(--type-mono-md);
 }
 
 .containers-section__list {
@@ -78,12 +85,12 @@
 
 .containers-section__id {
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: var(--type-mono-md);
   color: var(--color-text-primary);
 }
 
 .containers-section__image {
-  font-size: 13px;
+  font-size: var(--type-mono-md);
   color: var(--color-text-secondary);
 }
 
@@ -103,7 +110,7 @@
   display: flex;
   gap: var(--sp-3);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   color: var(--color-text-tertiary);
 }
 
@@ -117,6 +124,61 @@
   gap: var(--sp-2);
   justify-content: flex-end;
   flex-wrap: wrap;
+}
+
+/* ---- Remove confirmation modal ----------------------------------------- */
+
+.containers-section__modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: var(--sp-5);
+}
+
+.containers-section__modal {
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-border-2);
+  border-radius: var(--r-md);
+  padding: var(--sp-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  width: 100%;
+  max-width: 420px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+}
+
+.containers-section__modal-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+.containers-section__modal-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.125rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--color-ember-300);
+}
+
+.containers-section__modal-body {
+  margin: 0;
+  font-size: 14px;
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+}
+
+.containers-section__modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-3);
 }
 
 /* ---- Logs flyout ------------------------------------------------------- */
@@ -169,7 +231,7 @@
   border-radius: var(--r-sm);
   padding: var(--sp-3);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--type-body-sm);
   color: var(--color-text-secondary);
   line-height: 1.5;
   white-space: pre;
@@ -232,14 +294,14 @@
 
 .containers-banner__headline {
   margin: 0;
-  font-size: 13px;
+  font-size: var(--type-mono-md);
   font-weight: 600;
   color: var(--color-text-primary);
 }
 
 .containers-banner__detail {
   margin: 0;
-  font-size: 12px;
+  font-size: var(--type-body-sm);
   color: var(--color-text-secondary);
   line-height: 1.5;
 }

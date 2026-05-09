@@ -20,7 +20,7 @@
 
 use std::sync::Arc;
 
-use forge_agents::{MemoryStore, WriteMode};
+use forge_agents::{MemoryStore, WriteMode, MEMORY_WRITE_CONTENT_CAP};
 use forge_core::ApprovalPreview;
 
 use super::{get_required_str, Tool, ToolCtx};
@@ -77,6 +77,22 @@ impl Tool for MemoryWriteTool {
             Ok(c) => c.to_owned(),
             Err(e) => return serde_json::json!({ "error": e.to_string() }),
         };
+        // F-650: cap the content size at the IPC entrypoint so an oversize
+        // payload never reaches `spawn_blocking` / disk. The store enforces
+        // the same bound for defence-in-depth — the duplicate guard here
+        // shaves a thread hop and keeps the wire error message anchored to
+        // the tool name. Distinct shape from path-traversal rejections so
+        // callers can distinguish the two without string-matching.
+        if content.len() > MEMORY_WRITE_CONTENT_CAP {
+            return serde_json::json!({
+                "error": format!(
+                    "tool.{}: content is {} bytes, which exceeds the {}-byte cap",
+                    Self::NAME,
+                    content.len(),
+                    MEMORY_WRITE_CONTENT_CAP,
+                )
+            });
+        }
         let mode_str = match get_required_str(args, Self::NAME, "mode") {
             Ok(m) => m.to_owned(),
             Err(e) => return serde_json::json!({ "error": e.to_string() }),
@@ -184,6 +200,79 @@ mod tests {
         assert!(
             result["error"].as_str().unwrap().contains("'clobber'"),
             "unexpected error shape: {result}"
+        );
+    }
+
+    /// F-650: tool-level guard rejects oversize content with a clear,
+    /// tool-scoped error string distinct from the path-traversal failure
+    /// shape (`invalid agent name ...`). Callers can match on
+    /// `"exceeds the"` (or the typed `Error::MemoryContentTooLarge` at
+    /// the store layer) to distinguish the two failure modes.
+    #[tokio::test]
+    async fn oversize_content_is_rejected_at_tool_layer() {
+        let dir = tempdir().unwrap();
+        let tool = fresh_tool(dir.path(), "scribe");
+        let oversize = "z".repeat(MEMORY_WRITE_CONTENT_CAP + 1);
+        let result = tool
+            .invoke(
+                &json!({"content": oversize, "mode": "append"}),
+                &ToolCtx::default(),
+            )
+            .await;
+        let err = result["error"].as_str().expect("error string present");
+        assert!(
+            err.starts_with(&format!("tool.{}: ", MemoryWriteTool::NAME)),
+            "error must be tool-scoped; got: {err}",
+        );
+        assert!(
+            err.contains("exceeds") && err.contains(&MEMORY_WRITE_CONTENT_CAP.to_string()),
+            "error must mention the cap; got: {err}",
+        );
+        // The error shape must not look like a path-traversal rejection
+        // (which begins with `invalid agent name`).
+        assert!(
+            !err.contains("invalid agent name"),
+            "size-cap error must be distinct from path-traversal error; got: {err}",
+        );
+    }
+
+    /// F-650 boundary: a payload at exactly the cap goes through.
+    #[tokio::test]
+    async fn content_at_exact_cap_is_accepted() {
+        let dir = tempdir().unwrap();
+        let tool = fresh_tool(dir.path(), "scribe");
+        let payload = "p".repeat(MEMORY_WRITE_CONTENT_CAP);
+        let result = tool
+            .invoke(
+                &json!({"content": payload, "mode": "replace"}),
+                &ToolCtx::default(),
+            )
+            .await;
+        assert_eq!(
+            result["ok"].as_bool(),
+            Some(true),
+            "exactly-at-cap must be accepted; got: {result}",
+        );
+    }
+
+    /// F-650: an oversize rejection at the tool layer must not touch the
+    /// filesystem — the guard runs before `spawn_blocking` so no tmp file
+    /// is staged, no rename happens, no memory file is created.
+    #[tokio::test]
+    async fn oversize_content_rejection_does_not_touch_filesystem() {
+        let dir = tempdir().unwrap();
+        let tool = fresh_tool(dir.path(), "scribe");
+        let oversize = "q".repeat(MEMORY_WRITE_CONTENT_CAP + 1);
+        let _ = tool
+            .invoke(
+                &json!({"content": oversize, "mode": "replace"}),
+                &ToolCtx::default(),
+            )
+            .await;
+        let memory_root = dir.path().join("forge").join("memory");
+        assert!(
+            !memory_root.join("scribe.md").exists(),
+            "oversize tool call must not create the memory file",
         );
     }
 

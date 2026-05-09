@@ -1,0 +1,85 @@
+name: Link Check
+
+# F-705: markdown link-rot gate. Two lanes:
+#
+# - PR / push: offline-only — internal cross-references against the
+#   working tree. Fast, deterministic, no network flakes. Required
+#   to remain green.
+#
+# - Nightly: full sweep including external URLs. Tagged
+#   continue-on-error so a transient outage on a third-party host
+#   doesn't page the on-call. Failures land as a workflow_run summary
+#   that we triage manually.
+#
+# Both lanes share lychee.toml (excludes superpowers/audits dumps,
+# loopback addresses, and bounds redirects/timeout). Per-URL
+# allowlist lives in .lycheeignore.
+#
+# This workflow is intentionally NOT in branch protection on first
+# landing — flip to required after the corpus stabilises.
+
+on:
+  pull_request:
+    paths:
+      - '**/*.md'
+      - '.github/workflows/link-check.yml'
+      - 'lychee.toml'
+      - '.lycheeignore'
+  push:
+    branches: [main]
+    paths:
+      - '**/*.md'
+      - '.github/workflows/link-check.yml'
+      - 'lychee.toml'
+      - '.lycheeignore'
+  schedule:
+    # 09:17 UTC daily — off-peak, avoids the top-of-hour cron stampede.
+    - cron: '17 9 * * *'
+  workflow_dispatch:
+
+jobs:
+  internal-links:
+    name: Internal links (offline)
+    runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: lychee --offline
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: >-
+            --offline
+            --no-progress
+            'docs/**/*.md'
+            'crates/**/README.md'
+            'web/packages/**/README.md'
+            README.md
+            CHANGELOG.md
+            AGENTS.md
+          fail: true
+
+  external-links:
+    name: External links (nightly)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: lychee (full sweep)
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: >-
+            --no-progress
+            'docs/**/*.md'
+            'crates/**/README.md'
+            'web/packages/**/README.md'
+            README.md
+            CHANGELOG.md
+            AGENTS.md
+          fail: false
+        env:
+          # Authenticated GitHub requests dodge the unauth rate limit
+          # that otherwise flags every issue/PR cross-link as 429.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -17,6 +17,7 @@ import {
 } from 'solid-js';
 import { Button } from '@forge/design';
 import type { GroupBy, UsageRange } from '@forge/ipc';
+import { Skeleton } from '@forge/design';
 import {
   fetchUsageSummary,
   type UsageBreakdownView,
@@ -174,7 +175,20 @@ export const UsagePane: Component<UsagePaneProps> = (props) => {
       </header>
 
       <Show when={data.loading}>
-        <p class="usage-pane__loading">usage · probing</p>
+        <div class="usage-pane__skeletons" data-testid="usage-loading">
+          <Skeleton
+            variant="block"
+            count={1}
+            label="Loading usage chart"
+            class="usage-pane__skeleton-chart"
+          />
+          <Skeleton
+            variant="block"
+            count={3}
+            label="Loading usage tables"
+            class="usage-pane__skeleton-rows"
+          />
+        </div>
       </Show>
 
       <Show when={errorDetail()}>

@@ -1,3 +1,4 @@
+#![allow(deprecated)] // F-652: tests/benches still drive the deprecated bare read_frame helpers.
 //! F-144: Re-run Branch variant — both versions co-exist, BranchSelected gates display.
 //!
 //! Scenario:

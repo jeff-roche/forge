@@ -31,10 +31,8 @@
 use std::path::Path;
 
 use chrono::{DateTime, Datelike, Utc};
-use forge_core::usage::{
-    monthly_path_in, user_usage_dir, MonthlyAggregate, SessionUsage, UsageBucket,
-};
-use forge_core::{read_since, Event, Result, SessionId, WorkspaceId};
+use forge_core::usage::{monthly_path_in, user_usage_dir, MonthlyAggregate, UsageBucket};
+use forge_core::{read_since, Event, Result, SessionId, SessionUsage, WorkspaceId};
 use forge_providers::pricing::PriceTable;
 
 /// Read every [`Event::UsageTick`] in `log_path` and merge it into the
@@ -407,6 +405,55 @@ mod tests {
         assert_eq!(loaded.buckets.len(), 1, "same key, single bucket");
         assert_eq!(loaded.buckets[0].tokens_in, 200);
         assert_eq!(loaded.buckets[0].tokens_out, 100);
+    }
+
+    #[tokio::test]
+    async fn flush_ignores_event_reported_cost_usd() {
+        // F-669: `Event::UsageTick.cost_usd` is provider-reported and NOT
+        // authoritative. The flush aggregator must reprice every tick via the
+        // embedded `PriceTable` and discard the event's wire value, even when
+        // the wire value is wildly out of band.
+        let tmp = TempDir::new().unwrap();
+        let log = tmp.path().join("events.jsonl");
+        write_events(
+            &log,
+            &[Event::UsageTick {
+                session_id: Some(fixture_session()),
+                provider: provider("anthropic"),
+                model: "claude-3-5-sonnet-20241022".into(),
+                tokens_in: 1000,
+                tokens_out: 500,
+                // Bogus provider-reported cost. The aggregate must NOT carry
+                // this value through.
+                cost_usd: 999_999.0,
+                scope: RosterScope::SessionWide,
+            }],
+        )
+        .await;
+
+        let usage_dir = tmp.path().join("usage");
+        flush_session_usage(&log, &ws("w1"), &usage_dir)
+            .await
+            .unwrap();
+
+        let path = monthly_path_in(&usage_dir, Utc::now());
+        let loaded = MonthlyAggregate::load_or_default(&path).await;
+        let cost = loaded.buckets[0]
+            .cost
+            .as_ref()
+            .expect("priced model yields Some(cost)");
+        // PriceTable cost for 1000 in / 500 out @ claude-3-5-sonnet:
+        //   1000 * 3 / 1e6 + 500 * 15 / 1e6 = 0.0105
+        assert!(
+            (cost.amount - 0.0105).abs() < 1e-9,
+            "aggregate cost must be PriceTable-computed (got {})",
+            cost.amount,
+        );
+        assert!(
+            cost.amount < 1.0,
+            "event.cost_usd ({}) must not leak into aggregate",
+            999_999.0,
+        );
     }
 
     #[tokio::test]

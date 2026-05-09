@@ -614,3 +614,253 @@ async fn sse_sixteen_mib_no_boundary_surfaces_malformed() {
         }
     }
 }
+
+/// F-661 DoD regression: a POST response body larger than the cap
+/// (`MAX_SSE_FRAME_BYTES`) must be rejected with a clear error rather than
+/// fully buffered into memory. A hostile MCP HTTP server could otherwise
+/// answer one JSON-RPC request with a multi-GiB body and exhaust daemon
+/// memory.
+///
+/// Two shapes need coverage:
+/// * advertised oversize via `Content-Length` — must fail fast before any
+///   body bytes are streamed,
+/// * unadvertised (chunked) oversize where the accumulator only learns
+///   the body is too big partway through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn post_oversize_advertised_body_is_rejected() {
+    let server = MockServer::start().await;
+
+    // Body strictly larger than the cap. wiremock writes `Content-Length`
+    // automatically from `set_body_bytes`, so reqwest sees the advertised
+    // size before any body byte is read.
+    let oversize = MAX_SSE_FRAME_BYTES + 1;
+    let body = vec![b'A'; oversize];
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .set_body_bytes(body),
+        )
+        .mount(&server)
+        .await;
+    // Empty SSE stream so the reader settles.
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(""),
+        )
+        .mount(&server)
+        .await;
+
+    let t = Http::connect(&http_spec(&server.uri(), "Bearer token"))
+        .await
+        .expect("connect");
+
+    let err = t
+        .send(serde_json::json!({"jsonrpc":"2.0","id":1}))
+        .await
+        .expect_err("oversize body must be rejected");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.to_ascii_lowercase().contains("response body")
+            || msg.to_ascii_lowercase().contains("body"),
+        "error should mention the body: {msg}"
+    );
+    assert!(
+        msg.contains(&MAX_SSE_FRAME_BYTES.to_string()) || msg.to_ascii_lowercase().contains("cap"),
+        "error should mention the cap: {msg}"
+    );
+}
+
+/// F-661: even when the server omits `Content-Length` (chunked transfer),
+/// the streaming accumulator must abort once it has buffered more than the
+/// cap. This is the path that actually defends against an
+/// infinite-stream-without-Content-Length attack.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn post_oversize_chunked_body_is_rejected() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let shutdown = Arc::new(Notify::new());
+    let server_shutdown = Arc::clone(&shutdown);
+
+    let handle = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = server_shutdown.notified() => return,
+                accept = listener.accept() => {
+                    let Ok((mut sock, _)) = accept else { return };
+                    tokio::spawn(async move {
+                        // Read request head, then stream a chunked body
+                        // that exceeds the cap so the transport's
+                        // streaming accumulator triggers — Content-Length
+                        // is absent on POST and present-but-tiny on GET.
+                        let mut buf = Vec::with_capacity(1024);
+                        let mut tmp = [0u8; 1024];
+                        loop {
+                            match sock.read(&mut tmp).await {
+                                Ok(0) | Err(_) => return,
+                                Ok(n) => {
+                                    buf.extend_from_slice(&tmp[..n]);
+                                    if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                                        break;
+                                    }
+                                    if buf.len() > 16 * 1024 {
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                        let head = std::str::from_utf8(&buf).unwrap_or("");
+                        if head.starts_with("POST ") {
+                            // Drain request body if any.
+                            let header_end = buf.windows(4).position(|w| w == b"\r\n\r\n").unwrap_or(buf.len()) + 4;
+                            let content_length = head
+                                .lines()
+                                .find_map(|l| l.strip_prefix("Content-Length: ")
+                                    .or_else(|| l.strip_prefix("content-length: ")))
+                                .and_then(|v| v.trim().parse::<usize>().ok())
+                                .unwrap_or(0);
+                            let already = buf.len().saturating_sub(header_end);
+                            let mut remaining = content_length.saturating_sub(already);
+                            while remaining > 0 {
+                                let n = match sock.read(&mut tmp).await {
+                                    Ok(0) | Err(_) => return,
+                                    Ok(n) => n,
+                                };
+                                remaining = remaining.saturating_sub(n);
+                            }
+
+                            // Stream a chunked body well beyond the cap.
+                            // No Content-Length — transfer-encoding: chunked
+                            // forces the streaming accumulator path.
+                            let resp = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+                            if sock.write_all(resp.as_bytes()).await.is_err() {
+                                return;
+                            }
+                            // 64 KiB chunks; cap is 4 MiB so anything
+                            // beyond ~64 chunks must trigger the abort.
+                            let chunk_size = 64 * 1024;
+                            let chunk = vec![b'A'; chunk_size];
+                            let chunk_header = format!("{:x}\r\n", chunk_size);
+                            let mut written = 0usize;
+                            // Bound the loop generously above the cap so
+                            // we don't accidentally buffer forever if the
+                            // implementation regresses to "no cap".
+                            let max_total = MAX_SSE_FRAME_BYTES * 4;
+                            while written < max_total {
+                                if sock.write_all(chunk_header.as_bytes()).await.is_err() {
+                                    return;
+                                }
+                                if sock.write_all(&chunk).await.is_err() {
+                                    return;
+                                }
+                                if sock.write_all(b"\r\n").await.is_err() {
+                                    return;
+                                }
+                                written += chunk_size;
+                            }
+                            // Terminating zero-length chunk.
+                            let _ = sock.write_all(b"0\r\n\r\n").await;
+                            let _ = sock.shutdown().await;
+                        } else if head.starts_with("GET ") {
+                            // Empty SSE stream so the reader settles.
+                            let resp = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                            let _ = sock.write_all(resp.as_bytes()).await;
+                            let _ = sock.shutdown().await;
+                        }
+                    });
+                }
+            }
+        }
+    });
+
+    let url = format!("http://{}/", addr);
+    let t = Http::connect(&http_spec(&url, "Bearer token"))
+        .await
+        .expect("connect");
+
+    let err = tokio::time::timeout(
+        Duration::from_secs(30),
+        t.send(serde_json::json!({"jsonrpc":"2.0","id":1})),
+    )
+    .await
+    .expect("send must not hang on oversize body — cap is missing")
+    .expect_err("oversize chunked body must surface as Err");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.to_ascii_lowercase().contains("body")
+            || msg.to_ascii_lowercase().contains("cap")
+            || msg.contains(&MAX_SSE_FRAME_BYTES.to_string()),
+        "error should mention the body cap: {msg}"
+    );
+
+    shutdown.notify_waiters();
+    handle.abort();
+}
+
+/// F-645: SSRF redirect-pivot regression. A hostile MCP endpoint that
+/// answers a JSON-RPC POST with `302 Location: http://169.254.169.254/...`
+/// must NOT be followed by the shared client. With redirects enabled,
+/// reqwest would re-issue the POST against IMDS without re-running
+/// `url_safety::check_url`. The transport's redirect policy must treat the
+/// 302 as the final response so the request fails and IMDS is never hit.
+///
+/// We assert two things:
+/// 1. `send()` returns `Err` (the 302 surfaces as a non-2xx HTTP status,
+///    same as any other unexpected response).
+/// 2. The redirect target server records zero hits — proving the redirect
+///    was never followed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn post_does_not_follow_redirect_to_internal_target() {
+    // The "internal target" — stands in for IMDS. If the redirect is ever
+    // followed, this server records a hit and we fail the test.
+    let internal = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/latest/meta-data"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("SECRET"))
+        .expect(0) // must never be hit
+        .mount(&internal)
+        .await;
+
+    // The "attacker" MCP endpoint — answers POSTs with a 302 redirect to
+    // the internal target. GET (for SSE) returns an empty event stream so
+    // the reader task settles cleanly.
+    let attacker = MockServer::start().await;
+    let redirect_to = format!("{}/latest/meta-data", internal.uri());
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(302).insert_header("Location", redirect_to.as_str()))
+        .mount(&attacker)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(""),
+        )
+        .mount(&attacker)
+        .await;
+
+    let t = Http::connect(&http_spec(&attacker.uri(), "Bearer token"))
+        .await
+        .expect("connect");
+
+    let err = t
+        .send(serde_json::json!({"jsonrpc":"2.0","id":1}))
+        .await
+        .expect_err("302 redirect must not be followed and must surface as an error");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("302"),
+        "error should mention the 302 status: {msg}",
+    );
+
+    // Belt-and-braces: explicitly assert the internal target saw no
+    // request. wiremock's `expect(0)` is verified on drop.
+    drop(internal);
+    drop(attacker);
+}

@@ -278,3 +278,37 @@ async fn chat_line_too_long_yields_typed_error_and_terminates() {
         "stream must terminate after a fatal error"
     );
 }
+
+// F-647: OpenAI provider must not follow HTTP redirects. A misconfigured
+// proxy or network-layer attacker can inject `302 Location: 169.254.169.254`
+// and the default reqwest client would follow blindly to IMDS or another
+// internal target. With the SSRF-safe redirect policy in place, the 302
+// surfaces to the caller as an error rather than being silently followed.
+#[tokio::test(flavor = "multi_thread")]
+async fn chat_does_not_follow_redirects() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(302).insert_header("location", "https://example.com/elsewhere"),
+        )
+        .mount(&server)
+        .await;
+
+    let provider = OpenAiProvider::new(server.uri(), "sk-test", "gpt-4o");
+    let req = ChatRequest {
+        system: None,
+        messages: vec![user_msg("hi")],
+        parallel_tool_calls_allowed: false,
+    };
+    let err = match provider.chat(req).await {
+        Ok(_) => panic!("redirect must surface as an error, not be followed"),
+        Err(e) => e,
+    };
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("302"),
+        "error must reflect the upstream 302 status: {msg}"
+    );
+}

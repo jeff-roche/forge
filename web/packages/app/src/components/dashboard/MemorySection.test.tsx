@@ -4,6 +4,7 @@ import { setInvokeForTesting } from '../../lib/tauri';
 import { resetSettingsStore } from '../../stores/settings';
 import { effectiveEnabled, formatBytes, MemorySection } from './MemorySection';
 import type { AgentMemoryEntry } from '../../ipc/memory';
+import { clearToastsForTesting, toasts } from '../toast';
 
 type InvokeMock = ReturnType<typeof vi.fn>;
 
@@ -71,6 +72,7 @@ function entry(partial: Partial<AgentMemoryEntry> & { agent_id: string }): Agent
     version: partial.version ?? null,
     def_enabled: partial.def_enabled ?? false,
     settings_override: partial.settings_override ?? null,
+    error: partial.error ?? null,
   };
 }
 
@@ -78,11 +80,13 @@ describe('MemorySection (F-602)', () => {
   beforeEach(() => {
     setInvokeForTesting(null);
     resetSettingsStore();
+    clearToastsForTesting();
   });
 
   afterEach(() => {
     setInvokeForTesting(null);
     cleanup();
+    clearToastsForTesting();
   });
 
   it('renders one row per agent returned by list_agent_memory', async () => {
@@ -281,6 +285,23 @@ describe('MemorySection (F-602)', () => {
     await waitFor(() => expect(queryByTestId('memory-clear-modal')).toBeNull());
     expect(state.bodies['alpha']).toBe('something');
 
+    // F-685 — error must dispatch a persistent toast carrying the verbatim
+    // technical identifier (per docs/design/ai-patterns.md §Interaction
+    // states; "error" toasts persist until actioned per
+    // component-principles.md §Toasts, so kind: 'error' is sufficient).
+    await waitFor(() => {
+      const queue = toasts();
+      expect(queue).toHaveLength(1);
+      expect(queue[0]?.kind).toBe('error');
+      expect(queue[0]?.message).toBe('disk on fire');
+    });
+
+    // F-685 — the affected surface must carry the ember-400 border. The CSS
+    // file pins the declaration (MemorySection.css.test.ts); here we assert
+    // the live element is the one carrying the marker class so a future
+    // refactor cannot drop the surface treatment.
+    expect(err.classList.contains('memory-section__error')).toBe(true);
+
     // Initial mount triggers one list_agent_memory call; the post-clear
     // refetch must add a second one.
     const listCalls = wrapped.mock.calls.filter((c) => c[0] === 'list_agent_memory');
@@ -316,6 +337,7 @@ describe('MemorySection helpers', () => {
         version: null,
         def_enabled: false,
         settings_override: true,
+        error: null,
       }),
     ).toBe(true);
 
@@ -328,6 +350,7 @@ describe('MemorySection helpers', () => {
         version: null,
         def_enabled: true,
         settings_override: false,
+        error: null,
       }),
     ).toBe(false);
 
@@ -340,6 +363,7 @@ describe('MemorySection helpers', () => {
         version: null,
         def_enabled: true,
         settings_override: null,
+        error: null,
       }),
     ).toBe(true);
   });
