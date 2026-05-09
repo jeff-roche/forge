@@ -117,7 +117,9 @@ When memory is enabled and the file exists, the assembled system prompt is:
 
 ---
 ## Memory
+<memory>
 <memory body>
+</memory>
 ```
 
 Both halves are optional and assembled by `forge_agents::assemble_system_prompt`:
@@ -126,8 +128,17 @@ Both halves are optional and assembled by `forge_agents::assemble_system_prompt`
 |-------------|-------------|----------------------------------------|
 | absent      | absent      | `None` — no system prompt              |
 | present     | absent      | AGENTS.md prefix only                  |
-| absent      | present     | `## Memory` heading + body             |
-| present     | present     | AGENTS.md prefix, then `## Memory`     |
+| absent      | present     | `## Memory` heading + fenced body      |
+| present     | present     | AGENTS.md prefix, then `## Memory`, then fenced body |
+
+### F-650: fenced envelope
+
+The memory body is wrapped in a literal `<memory>...</memory>` envelope.
+A body that contains markdown headers (`# ...`), code-fence delimiters
+(`` ``` ``), or YAML frontmatter delimiters (`---`) cannot reshape the
+prompt's structural envelope — the close tag pins the structural
+boundary the model sees. The envelope tags are exposed as
+`forge_agents::MEMORY_ENVELOPE_OPEN` and `MEMORY_ENVELOPE_CLOSE`.
 
 The session does the assembly **once** per session start and stores the
 result as `Arc<str>` so per-turn cost stays at the existing refcount bump.
@@ -190,10 +201,32 @@ Returns:
 { "ok": true, "version": 7, "updated_at": "2026-04-26T12:00:00Z" }
 ```
 
-On failure (missing arg, unknown mode, IO error) the tool returns
-`{ "error": "<message>" }` rather than propagating an exception — the
-dispatcher contract is that `invoke` always succeeds and the model
-decides what to do with the JSON result.
+On failure (missing arg, unknown mode, IO error, oversize content) the
+tool returns `{ "error": "<message>" }` rather than propagating an
+exception — the dispatcher contract is that `invoke` always succeeds
+and the model decides what to do with the JSON result.
+
+### F-650: content size cap
+
+`memory.write` rejects payloads larger than
+`forge_agents::MEMORY_WRITE_CONTENT_CAP` (64 KiB) with a tool-scoped
+error string of the form
+`tool.memory.write: content is <size> bytes, which exceeds the 65536-byte cap`.
+The same bound is enforced inside `MemoryStore::write` as the typed
+`Error::MemoryContentTooLarge { size, limit }` variant — distinct from
+the F-649 `InvalidAgentName` path-traversal error so callers can match
+on the error class without parsing strings.
+
+The cap exists to prevent two failure modes:
+
+1. **DoS** — an unbounded blob persisted to disk and re-injected into
+   every subsequent system prompt would exhaust context windows and
+   provider tokens.
+2. **Persistent prompt injection** — a large payload magnifies the
+   surface area for crafted control sequences in the system prompt.
+
+The fenced envelope (above) closes the second loophole at the
+injection layer; the size cap closes both at the write layer.
 
 The tool is gated on the per-agent flag: it is registered on the
 dispatcher only when the active agent has `memory_enabled: true`. An
