@@ -24,6 +24,34 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// 64-char lowercase hex literal — a syntactically valid sha256 digest.
 const SHA: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
+/// Pinned digest of the **multi-arch OCI index** for `docker.io/library/alpine:3.19`.
+///
+/// This is the digest of the index manifest, not a single-arch image, so
+/// `podman pull` resolves it to whichever platform the test host is running
+/// (amd64, arm64/v8, arm/v6, arm/v7, 386, ppc64le, s390x — verified at
+/// capture). Tests can run on Linux amd64 *and* Linux arm64 without a
+/// per-arch fixture.
+///
+/// **Captured:** 2026-05-09. **Review cadence:** every 6 months, or sooner
+/// if any of the integration tests below start failing with a digest
+/// mismatch (the Alpine team can rebuild the 3.19 index at any time).
+///
+/// **Regeneration:**
+///
+/// ```sh
+/// # Pull a fresh anonymous registry token, ask for the index media type,
+/// # and read the Docker-Content-Digest response header.
+/// TOKEN=$(curl -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/alpine:pull" \
+///   | jq -r .token)
+/// curl -sI \
+///   -H "Authorization: Bearer $TOKEN" \
+///   -H "Accept: application/vnd.oci.image.index.v1+json" \
+///   "https://registry-1.docker.io/v2/library/alpine/manifests/3.19" \
+///   | grep -i docker-content-digest
+/// ```
+const ALPINE_DIGEST: &str =
+    "sha256:6baf43584bcb78f2e5847d1de515f23499913ac9f12bdf834811a3145eb11ca1";
+
 /// End-to-end flag-injection regression test for `create`.
 ///
 /// Proves empirically that `podman create <image> --privileged sh` does NOT
@@ -53,13 +81,9 @@ async fn create_does_not_apply_caller_flags_as_runtime_flags() {
     );
     runtime.detect().await.expect("podman detect");
     // F-643: tag-only refs are rejected for non-allowlisted sources; pin
-    // by digest. We use a known-good alpine 3.19 amd64 digest. If alpine's
-    // multi-arch index changes, this digest needs to be regenerated with
-    // `podman pull docker.io/library/alpine:3.19 && podman image inspect ...`.
-    let image = ImageRef::parse(
-        "docker.io/library/alpine@sha256:c5b1261d6d3e43071626931fc004f70149baeba2c8ec672bd4f27761f8e1ad6b",
-    )
-    .expect("valid image ref");
+    // by digest. See `ALPINE_DIGEST` (top of file) for regeneration.
+    let image = ImageRef::parse(&format!("docker.io/library/alpine@{ALPINE_DIGEST}"))
+        .expect("valid image ref");
     runtime.pull(&image).await.expect("pull alpine");
 
     // Caller argv begins with `--privileged`. If podman wrongly treated this
@@ -127,13 +151,9 @@ async fn exec_does_not_apply_caller_flags_as_runtime_flags() {
     );
     runtime.detect().await.expect("podman detect");
     // F-643: tag-only refs are rejected for non-allowlisted sources; pin
-    // by digest. We use a known-good alpine 3.19 amd64 digest. If alpine's
-    // multi-arch index changes, this digest needs to be regenerated with
-    // `podman pull docker.io/library/alpine:3.19 && podman image inspect ...`.
-    let image = ImageRef::parse(
-        "docker.io/library/alpine@sha256:c5b1261d6d3e43071626931fc004f70149baeba2c8ec672bd4f27761f8e1ad6b",
-    )
-    .expect("valid image ref");
+    // by digest. See `ALPINE_DIGEST` (top of file) for regeneration.
+    let image = ImageRef::parse(&format!("docker.io/library/alpine@{ALPINE_DIGEST}"))
+        .expect("valid image ref");
     runtime.pull(&image).await.expect("pull alpine");
 
     let handle = runtime
@@ -183,13 +203,9 @@ async fn podman_full_lifecycle_against_alpine() {
         .expect("podman detect: rootless podman must be configured");
 
     // F-643: tag-only refs are rejected for non-allowlisted sources; pin
-    // by digest. We use a known-good alpine 3.19 amd64 digest. If alpine's
-    // multi-arch index changes, this digest needs to be regenerated with
-    // `podman pull docker.io/library/alpine:3.19 && podman image inspect ...`.
-    let image = ImageRef::parse(
-        "docker.io/library/alpine@sha256:c5b1261d6d3e43071626931fc004f70149baeba2c8ec672bd4f27761f8e1ad6b",
-    )
-    .expect("valid image ref");
+    // by digest. See `ALPINE_DIGEST` (top of file) for regeneration.
+    let image = ImageRef::parse(&format!("docker.io/library/alpine@{ALPINE_DIGEST}"))
+        .expect("valid image ref");
 
     runtime.pull(&image).await.expect("pull alpine");
 
@@ -246,7 +262,8 @@ async fn podman_full_lifecycle_against_alpine() {
 async fn create_with_hardened_defaults_applies_every_flag() {
     let runtime = PodmanRuntime::new();
     runtime.detect().await.expect("podman detect");
-    let image = ImageRef::parse("docker.io/library/alpine:3.19").expect("valid image ref");
+    let image = ImageRef::parse(&format!("docker.io/library/alpine@{ALPINE_DIGEST}"))
+        .expect("valid image ref");
     runtime.pull(&image).await.expect("pull alpine");
 
     let handle = runtime
@@ -321,7 +338,8 @@ async fn create_with_hardened_defaults_applies_every_flag() {
 async fn create_with_conservative_limits_applies_every_cgroup_cap() {
     let runtime = PodmanRuntime::new();
     runtime.detect().await.expect("podman detect");
-    let image = ImageRef::parse("docker.io/library/alpine:3.19").expect("valid image ref");
+    let image = ImageRef::parse(&format!("docker.io/library/alpine@{ALPINE_DIGEST}"))
+        .expect("valid image ref");
     runtime.pull(&image).await.expect("pull alpine");
 
     // Use a distinct, easy-to-verify limit set so the inspect output
@@ -410,7 +428,8 @@ async fn create_with_conservative_limits_applies_every_cgroup_cap() {
 async fn pids_limit_bounds_a_fork_bomb_inside_the_container() {
     let runtime = PodmanRuntime::new();
     runtime.detect().await.expect("podman detect");
-    let image = ImageRef::parse("docker.io/library/alpine:3.19").expect("valid image ref");
+    let image = ImageRef::parse(&format!("docker.io/library/alpine@{ALPINE_DIGEST}"))
+        .expect("valid image ref");
     runtime.pull(&image).await.expect("pull alpine");
 
     let limits = ContainerLimits {
