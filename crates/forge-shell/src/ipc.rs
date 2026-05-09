@@ -19,6 +19,37 @@
 //! Solid store. The per-sink `session_id` is bound at construction in
 //! `session_subscribe` (already label-authenticated), not re-read from the
 //! event payload.
+//!
+//! ## Authorization pattern (canonical)
+//!
+//! Every Tauri command in the forge-shell crate gates its body on the
+//! calling webview's label. There are exactly two helpers — pick the one
+//! that matches the command's scope and use no other shape:
+//!
+//! 1. `require_window_label` — strict, single-label match. Use when the
+//!    command is bound to one specific window:
+//!    - dashboard-only: `require_window_label(&webview, "dashboard", "<cmd>")`
+//!    - session-bound: `require_window_label(&webview, &format!("session-{id}"), "<cmd>")`
+//!
+//! 2. `require_window_label_in` — permissive, allow-list + optional
+//!    session-window admission. Use when the command's artifact is not
+//!    bound to a single window (workspace-level, user-level, or shared
+//!    between dashboard and any session):
+//!    - dashboard-or-any-session: `require_window_label_in(&webview, &["dashboard"], true, "<cmd>")`
+//!    - any session window only:  `require_window_label_in(&webview, &[], true, "<cmd>")`
+//!
+//! The third boolean argument `allow_any_session` is load-bearing: `false`
+//! restricts the gate to labels listed in `exact`; `true` additionally
+//! admits any `session-*` label without binding to a specific session id.
+//! For dashboard-only commands prefer `require_window_label` over
+//! `require_window_label_in(&webview, &["dashboard"], false, ...)` — both
+//! are functionally equivalent, but the strict helper makes the single-label
+//! intent obvious at the call site.
+//!
+//! Both helpers emit a structured `tracing::warn!` on rejection with target
+//! `forge_shell::ipc::authz` and fields `actual`, `expected` / `allowed`,
+//! `command`. The success path is silent. See `tests/ipc_authz_tracing.rs`
+//! for the schema contract.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -66,13 +97,13 @@ fn authz_check(label: &str, expected: &str, command: &'static str) -> Result<(),
 fn authz_check_in(
     label: &str,
     exact: &[&str],
-    allow_session_prefix: bool,
+    allow_any_session: bool,
     command: &'static str,
 ) -> Result<(), String> {
     if exact.contains(&label) {
         return Ok(());
     }
-    if allow_session_prefix && label.starts_with("session-") {
+    if allow_any_session && label.starts_with("session-") {
         return Ok(());
     }
     tracing::warn!(
@@ -96,10 +127,10 @@ pub fn require_window_label_for_test(
 pub fn require_window_label_in_for_test(
     actual: &str,
     exact: &[&str],
-    allow_session_prefix: bool,
+    allow_any_session: bool,
     command: &'static str,
 ) -> Result<(), String> {
-    authz_check_in(actual, exact, allow_session_prefix, command)
+    authz_check_in(actual, exact, allow_any_session, command)
 }
 
 /// F-068 / L4 (T7): per-field byte caps on untyped-string inputs to session
@@ -578,8 +609,8 @@ pub fn build_invoke_handler<R: Runtime>() -> Box<dyn Fn(tauri::ipc::Invoke<R>) -
         context_fetch_url,
         set_context_allowed_hosts,
         // F-587: per-provider credential management. Dashboard-scoped — the
-        // `authz_check` inside each command rejects any window label other
-        // than `dashboard`.
+        // `require_window_label` gate inside each command rejects any window
+        // label other than `dashboard`.
         crate::credentials_ipc::login_provider,
         crate::credentials_ipc::logout_provider,
         crate::credentials_ipc::has_credential,
@@ -602,7 +633,7 @@ pub fn build_invoke_handler<R: Runtime>() -> Box<dyn Fn(tauri::ipc::Invoke<R>) -
         crate::containers_ipc::remove_container,
         crate::containers_ipc::container_logs,
         // F-602: Dashboard Memory section commands. Dashboard-scoped — the
-        // `require_window_label_in` inside each rejects every window label
+        // `require_window_label` gate inside each rejects every window label
         // other than `dashboard`.
         crate::memory_ipc::list_agent_memory,
         crate::memory_ipc::read_agent_memory,
@@ -1008,19 +1039,28 @@ fn upsert_entry(cfg: &mut ApprovalConfig, entry: ApprovalEntry) {
     }
 }
 
-/// Lightweight window-label gate that allows either the dashboard or any
-/// session window (`session-*` prefix) to invoke a command. Used by the F-036
-/// approval commands which are user-scoped, not per-session, but should still
-/// be unreachable from other surfaces. Keeping this as a separate helper from
-/// [`require_window_label`] preserves that helper's strict single-label
-/// semantics for F-051.
+/// Lightweight window-label gate that admits any caller in `exact` and,
+/// when `allow_any_session` is set, any `session-*` window. Used by surfaces
+/// that are not bound to a single session (e.g. the F-036 approval commands,
+/// the F-082 layouts read/write, the F-155 catalog roster commands), but
+/// must still be unreachable from arbitrary webviews.
+///
+/// `allow_any_session` is **load-bearing**: `false` restricts the gate to
+/// the labels listed in `exact` (typical: `&["dashboard"]` for dashboard-only
+/// commands). `true` additionally admits every `session-*` label without
+/// binding to a specific session id — used when the artifact is workspace-
+/// or user-level rather than per-session, and a session window has a
+/// legitimate need to read/write it.
+///
+/// Keeping this as a separate helper from [`require_window_label`] preserves
+/// that helper's strict single-label semantics for F-051.
 pub(crate) fn require_window_label_in<R: Runtime>(
     webview: &Webview<R>,
     exact: &[&str],
-    allow_session_prefix: bool,
+    allow_any_session: bool,
     command: &'static str,
 ) -> Result<(), String> {
-    authz_check_in(webview.label(), exact, allow_session_prefix, command)
+    authz_check_in(webview.label(), exact, allow_any_session, command)
 }
 
 // ---------------------------------------------------------------------------
