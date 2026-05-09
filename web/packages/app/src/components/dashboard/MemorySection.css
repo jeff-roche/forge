@@ -29,7 +29,7 @@
 
 .memory-section__warn {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   letter-spacing: 0.05em;
   color: var(--color-warning);
   background: var(--color-warning-bg);
@@ -75,13 +75,13 @@
 
 .memory-section__meta {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   color: var(--color-text-tertiary);
 }
 
 .memory-section__path {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   color: var(--color-text-tertiary);
   word-break: break-all;
 }
@@ -102,7 +102,7 @@
 
 .memory-section__toggle-label {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--color-text-secondary);
@@ -116,7 +116,7 @@
  * the failure remains visible if the user scrolls away. */
 .memory-section__error {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   color: var(--color-danger, var(--color-warning));
   border-left: 3px solid var(--color-ember-400);
   background: rgba(255, 74, 18, 0.06);
@@ -126,7 +126,7 @@
 
 .memory-section__empty {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   color: var(--color-text-tertiary);
   font-style: italic;
 }
@@ -169,7 +169,7 @@
 
 .memory-editor__path {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   color: var(--color-text-tertiary);
   word-break: break-all;
   flex: 1;
@@ -185,7 +185,7 @@
   border-bottom: 1px solid var(--color-warning-border);
   padding: var(--sp-2) var(--sp-4);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
 }
 
 .memory-editor__body {
@@ -205,7 +205,7 @@
   background: var(--color-bg-1);
   color: var(--color-text-primary);
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: var(--type-mono-md);
   line-height: 1.5;
   outline: 0;
 }
@@ -228,7 +228,7 @@
 
 .memory-editor__status {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   color: var(--color-text-tertiary);
 }
 
@@ -244,7 +244,7 @@
   padding: var(--sp-2) var(--sp-4);
   border-bottom: 1px solid var(--color-border-1);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
 }
 
 .memory-editor--small {

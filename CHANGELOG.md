@@ -24,6 +24,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **IPC response-shape rule documented (F-677).** `docs/architecture/ipc-contracts.md`
+  §4.0 now codifies when a new IPC message takes an **inline-paired response**
+  (queries, synchronous acks, computed handoff payloads) versus an
+  **event-driven** shape (outcome already on `session:event` or another typed
+  event channel, or fire-and-forget side-effects). Includes the four-step
+  decision procedure, anti-patterns, and a full audit of Phase 3 `IpcMessage`
+  variants confirming each existing message matches the rule. No code changes
+  — purely the missing convention that F-155, F-603, F-604, F-640 were each
+  re-deriving in PR review.
+
 - **AgentMonitor Phase-3 chrome completion (F-449).** Inspector now exposes
   Pause / Resume (F-603 `session_pause` / `session_resume`),
   Interrupt + refine (F-604 `session_interrupt_and_refine` returning
