@@ -706,31 +706,34 @@ async fn dispatch_loop(
     // tokio mutex.
     let event_sink = IpcEventSink::new(writer.clone(), seq.clone());
     let mut buf = Vec::new();
-    // F-652: deadline-bounded reads on the daemon → sidecar dispatch
-    // loop. A wedged or malicious daemon (or any same-uid attacker
-    // that can connect to the sidecar's UDS, post-F-651 peer-cred
-    // check) must not be able to pin this task forever by sending
-    // zero bytes. 60 s comfortably exceeds any realistic gap between
-    // daemon commands; on timeout we loop and try again.
-    const DAEMON_FRAME_DEADLINE: Duration = Duration::from_secs(60);
+    // F-652 / Issue #784: deadline-bounded reads on the daemon → sidecar
+    // dispatch loop, riding on the crate-level
+    // `forge_ipc::DEFAULT_PUMP_DEADLINE`. A wedged or malicious daemon (or
+    // any same-uid attacker that can connect to the sidecar's UDS, post-
+    // F-651 peer-cred check) must not be able to pin this task forever by
+    // sending zero bytes. 60 s comfortably exceeds any realistic gap
+    // between daemon commands; on timeout we loop and try again.
     loop {
-        let frame: SidecarMessage =
-            match forge_ipc::read_frame_into_with_deadline(reader, &mut buf, DAEMON_FRAME_DEADLINE)
-                .await
-            {
-                Ok(m) => m,
-                Err(e) if e.downcast_ref::<forge_ipc::IpcReadTimeout>().is_some() => {
-                    // Idle window — daemon simply has nothing to send.
-                    continue;
-                }
-                Err(e) => {
-                    // EOF or any read error is treated as the peer going
-                    // away. The sidecar drops the connection and exits;
-                    // the supervisor's restart logic owns the rest.
-                    debug!(error = %e, "read loop: peer closed or error");
-                    return Ok(LoopExit::PeerClosed);
-                }
-            };
+        let frame: SidecarMessage = match forge_ipc::read_frame_into_with_deadline(
+            reader,
+            &mut buf,
+            forge_ipc::DEFAULT_PUMP_DEADLINE,
+        )
+        .await
+        {
+            Ok(m) => m,
+            Err(e) if e.downcast_ref::<forge_ipc::IpcReadTimeout>().is_some() => {
+                // Idle window — daemon simply has nothing to send.
+                continue;
+            }
+            Err(e) => {
+                // EOF or any read error is treated as the peer going
+                // away. The sidecar drops the connection and exits;
+                // the supervisor's restart logic owns the rest.
+                debug!(error = %e, "read loop: peer closed or error");
+                return Ok(LoopExit::PeerClosed);
+            }
+        };
         match frame {
             SidecarMessage::RunTurn(turn) => {
                 pending_turns.fetch_add(1, Ordering::Relaxed);

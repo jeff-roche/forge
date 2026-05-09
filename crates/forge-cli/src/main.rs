@@ -270,17 +270,18 @@ async fn session_tail(id: &str) -> Result<()> {
     use forge_core::Event;
     use forge_ipc::{
         read_frame_with_deadline, write_frame, ClientInfo, Hello, IpcMessage, IpcReadTimeout,
-        Subscribe, PROTO_VERSION,
+        Subscribe, DEFAULT_PUMP_DEADLINE, PROTO_VERSION,
     };
     use std::time::Duration;
     use tokio::net::UnixStream;
 
-    // F-652: per-frame deadlines on `forge session tail`. The
-    // handshake bound is short (5 s); the steady-state event read
-    // uses a longer idle window, and a deadline alone is not a
-    // teardown signal — it just means the daemon is between events.
+    // F-652 / Issue #784: per-frame deadlines on `forge session tail`. The
+    // handshake bound is short (5 s) and stays site-local — a daemon that
+    // hasn't framed an `HelloAck` in five seconds is wedged. The
+    // steady-state event read uses `DEFAULT_PUMP_DEADLINE`; a deadline-only
+    // error there is not a teardown signal — it just means the daemon is
+    // between events.
     const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(5);
-    const TAIL_FRAME_DEADLINE: Duration = Duration::from_secs(60);
 
     let sock = forge_cli::socket::socket_path(id)?;
     let mut stream = UnixStream::connect(&sock)
@@ -309,7 +310,7 @@ async fn session_tail(id: &str) -> Result<()> {
         // (`read_u32` fails), malformed bodies, **and** the F-652
         // idle deadline. The first two end the tail; the deadline
         // alone is just an idle window — loop and try again.
-        match read_frame_with_deadline(&mut stream, TAIL_FRAME_DEADLINE).await {
+        match read_frame_with_deadline(&mut stream, DEFAULT_PUMP_DEADLINE).await {
             Ok(IpcMessage::Event(ipc_event)) => {
                 // F-112: IpcEvent.event is typed — no Value decode.
                 let event = ipc_event.event;
@@ -349,16 +350,15 @@ async fn run_agent(name: &str, input_source: &str) -> Result<()> {
     use forge_core::Event;
     use forge_ipc::{
         read_frame_with_deadline, write_frame, ClientInfo, Hello, IpcMessage, IpcReadTimeout,
-        SendUserMessage, Subscribe, PROTO_VERSION,
+        SendUserMessage, Subscribe, DEFAULT_PUMP_DEADLINE, PROTO_VERSION,
     };
     use std::time::Duration;
     use tokio::net::UnixStream;
 
-    // F-652: same shape as `session_tail` — short handshake bound,
-    // longer per-frame idle deadline, deadline-only errors do not
-    // stop streaming.
+    // F-652 / Issue #784: same shape as `session_tail` — short handshake
+    // bound stays site-local, the per-frame idle deadline rides on
+    // `DEFAULT_PUMP_DEADLINE`, deadline-only errors do not stop streaming.
     const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(5);
-    const RUN_FRAME_DEADLINE: Duration = Duration::from_secs(60);
 
     let text = if input_source == "-" {
         use tokio::io::AsyncReadExt;
@@ -425,7 +425,7 @@ async fn run_agent(name: &str, input_source: &str) -> Result<()> {
     // determine the outcome.
     let mut event_exit_code = 0i32;
     loop {
-        match read_frame_with_deadline(&mut stream, RUN_FRAME_DEADLINE).await {
+        match read_frame_with_deadline(&mut stream, DEFAULT_PUMP_DEADLINE).await {
             Ok(IpcMessage::Event(ipc_event)) => {
                 // F-112: IpcEvent.event is typed — no Value decode.
                 let event = ipc_event.event;
