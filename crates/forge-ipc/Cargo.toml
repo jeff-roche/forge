@@ -26,6 +26,10 @@ tokio = { version = "1", features = ["io-util", "net", "time"] }
 # `session_interrupt_and_refine`; ts-rs emits its TypeScript declaration
 # under web/packages/ipc/src/generated/.
 ts-rs = "12"
+# F-659: `SecretBytes` derives `Zeroize` + `ZeroizeOnDrop` so credential
+# buffers crossing the sidecar wire are wiped before the freed heap slot
+# can be observed by a heap dump or core file. CWE-312.
+zeroize = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 chrono = { version = "0.4", features = ["serde"] }
