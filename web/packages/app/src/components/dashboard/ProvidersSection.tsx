@@ -106,25 +106,34 @@ export const ProvidersSection: Component = () => {
 
       <Show when={snapshot.state === 'ready' && snapshot()}>
         {(data) => (
-          <Tabs
-            variant="radio"
-            class="providers__grid"
-            aria-label="Active provider"
-            aria-busy={isSubmitting()}
-            ref={setGridRef as never}
+          <Show
+            when={(data().entries?.length ?? 0) > 0}
+            fallback={
+              <p class="providers__empty" data-testid="providers-empty">
+                // no providers configured
+              </p>
+            }
           >
-            <For each={data().entries}>
-              {(entry) => (
-                <ProviderCard
-                  entry={entry}
-                  active={data().active === entry.id}
-                  pending={pendingId() === entry.id}
-                  disabled={isSubmitting()}
-                  onSelect={handleSelect}
-                />
-              )}
-            </For>
-          </Tabs>
+            <Tabs
+              variant="radio"
+              class="providers__grid"
+              aria-label="Active provider"
+              aria-busy={isSubmitting()}
+              ref={setGridRef as never}
+            >
+              <For each={data().entries}>
+                {(entry) => (
+                  <ProviderCard
+                    entry={entry}
+                    active={data().active === entry.id}
+                    pending={pendingId() === entry.id}
+                    disabled={isSubmitting()}
+                    onSelect={handleSelect}
+                  />
+                )}
+              </For>
+            </Tabs>
+          </Show>
         )}
       </Show>
     </section>

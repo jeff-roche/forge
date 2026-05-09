@@ -234,6 +234,14 @@ describe('ProvidersSection (F-586)', () => {
     expect(alert.textContent).toMatch(/keyring backend down/i);
   });
 
+  it('empty-state uses canonical mono noun-phrase copy when no providers configured (F-691)', async () => {
+    setupInvokeMock({ entries: [], active: null });
+    const { findByTestId } = render(() => <ProvidersSection />);
+    await waitForFetch();
+    const empty = await findByTestId('providers-empty');
+    expect(empty.textContent).toBe('// no providers configured');
+  });
+
   it('drops a second click while the first switch is in flight', async () => {
     // F-586 review: double-tap guard. The first `setActiveProvider` IPC
     // is still pending (its promise hasn't resolved), so a second click
