@@ -10,6 +10,23 @@
 //! public-API surface (used by integration tests) and second `request_client`
 //! both diverge from the SSE-streaming providers and were intentionally left
 //! untouched by the F-679 refactor.
+//!
+//! ## SSRF posture (F-647)
+//!
+//! [`build_stream_client`] is the single construction site for the
+//! `reqwest::Client` used by `AnthropicProvider`, `OpenAiProvider`, and
+//! `CustomOpenAiProvider`. It wires in two SSRF defences:
+//!
+//! - **DNS policy resolver** ([`forge_core::http::secure_client_builder`])
+//!   — every resolved `SocketAddr` is re-validated against `url_safety`,
+//!   so a TTL=0 DNS rebinding answer of `169.254.169.254` cannot reach the
+//!   socket layer even if `check_url` originally accepted the hostname.
+//! - **No-redirect policy** (`reqwest::redirect::Policy::none`) — a
+//!   misconfigured proxy or BGP-hijack injecting `302 Location: <internal>`
+//!   surfaces to the caller as an HTTP error rather than being silently
+//!   followed. The official-vendor APIs (Anthropic, OpenAI) do not redirect
+//!   on `/v1/messages` or `/v1/chat/completions`, so disabling redirects
+//!   has no behavioural cost.
 
 use std::time::Duration;
 
@@ -44,12 +61,17 @@ impl Default for HttpClientConfig {
 }
 
 /// Build a streaming `reqwest::Client` with the SSE provider hardening
-/// posture (per-connect / per-read / TCP keepalive timeouts).
+/// posture: per-connect / per-read / TCP keepalive timeouts, the F-644
+/// SSRF-safe DNS resolver, and a no-redirect policy (F-647). The official
+/// Anthropic and OpenAI endpoints do not return 3xx on the streaming
+/// chat paths, so refusing to follow redirects costs nothing in normal
+/// operation while closing the redirect-to-internal-IP smuggling vector.
 pub(crate) fn build_stream_client(cfg: &HttpClientConfig) -> reqwest::Client {
-    reqwest::Client::builder()
+    forge_core::http::secure_client_builder()
         .connect_timeout(cfg.connect_timeout)
         .read_timeout(cfg.read_timeout)
         .tcp_keepalive(Some(cfg.tcp_keepalive))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("reqwest stream client builder — only fails if no TLS backend is available")
 }
