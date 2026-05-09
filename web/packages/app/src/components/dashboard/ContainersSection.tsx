@@ -503,7 +503,12 @@ const LogsFlyout: Component<LogsFlyoutProps> = (props) => {
             </p>
           )}
         </Show>
-        <pre class="containers-section__log-pane" tabIndex={0}>
+        <pre
+          class="containers-section__log-pane"
+          role="log"
+          aria-live="polite"
+          aria-label={`Container ${props.containerId.slice(0, 12)} logs`}
+        >
           <For each={lines()}>
             {(l) => (
               <div

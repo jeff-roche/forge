@@ -2330,6 +2330,29 @@ describe('ToolCallCard Phase 3 — parallel-reads grouping (F-447 §5.1)', () =>
     expect(getByTestId('tool-call-card-tc-xp-2')).toBeInTheDocument();
   });
 
+  // F-696: header is `role="button"` with summary text only — assistive tech
+  // benefits from an explicit aria-label that names the count and aggregate
+  // status so the full context announces alongside the role.
+  it('aggregate header carries an aria-label with count + aggregate status', () => {
+    for (const id of ['tc-lbl-1', 'tc-lbl-2', 'tc-lbl-3']) {
+      pushEvent(SID, {
+        kind: 'ToolCallStarted',
+        tool_call_id: id,
+        tool_name: 'fs.read',
+        args_json: JSON.stringify({ path: `${id}.txt` }),
+        batch_id: 'lbl',
+      });
+    }
+    const { getByTestId } = render(() => <ChatPane />);
+    const row = getByTestId('tool-call-group-row-lbl');
+    const label = row.getAttribute('aria-label');
+    expect(label).toBeTruthy();
+    expect(label).toMatch(/parallel reads/i);
+    expect(label).toMatch(/3 calls/);
+    // Aggregate status is in-progress while no children have completed.
+    expect(label).toMatch(/in-progress/i);
+  });
+
   it('renders a single call with batch_id as a standalone card (no group chrome)', () => {
     pushEvent(SID, {
       kind: 'ToolCallStarted',
