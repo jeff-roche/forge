@@ -101,6 +101,16 @@ impl fmt::Display for SkillScope {
 ///
 /// `source_dir` is what the install step copies; `skill` is the validated
 /// shape used to derive the target folder name (`skill.id`).
+///
+/// # F-656 — TOCTOU between resolve and install
+///
+/// `source_dir` is canonicalized at resolve time, but the install step that
+/// follows runs later and re-opens the path from a string. Without a pinned
+/// fingerprint, an attacker who can write inside `source_dir`'s parent could
+/// rename the validated tree away and replace it with a symlink to an
+/// attacker-controlled tree between the two calls. `source_fingerprint`
+/// records the validated directory's `(dev, ino)` so [`install_resolved`]
+/// can detect the substitution and refuse.
 #[derive(Debug)]
 pub struct ResolvedSkill {
     /// Parsed skill (validated via F-589).
@@ -108,6 +118,94 @@ pub struct ResolvedSkill {
     /// Folder containing the `SKILL.md` file. Whatever sits next to it
     /// (`scripts/`, `references/`, etc.) is copied along.
     pub source_dir: PathBuf,
+    /// Filesystem identity of `source_dir` at resolve time. The installer
+    /// re-stats the path and refuses on mismatch — see F-656.
+    pub(crate) source_fingerprint: SourceFingerprint,
+}
+
+/// Filesystem identity of a directory at a specific point in time, used to
+/// detect TOCTOU substitution between resolve and install (F-656).
+///
+/// On Unix this is `(st_dev, st_ino)` from `symlink_metadata`. On other
+/// platforms the fingerprint degrades to a structural check (the path must
+/// still resolve to a real directory, not a symlink) since stable inodes are
+/// not portably available through `std`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SourceFingerprint {
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+}
+
+impl SourceFingerprint {
+    /// Capture the fingerprint of `path`. Caller has already verified
+    /// `path` points at a real directory (post-canonicalize).
+    fn capture(path: &Path) -> Result<Self> {
+        // `symlink_metadata` does not follow a final-component symlink. Since
+        // `path` came out of `fs::canonicalize`, no component should be a
+        // symlink — but stat-ing without follow is the right primitive here:
+        // it pins exactly the inode we validated.
+        let meta = fs::symlink_metadata(path)
+            .with_context(|| format!("capturing source fingerprint for {}", path.display()))?;
+        if meta.file_type().is_symlink() {
+            bail!(
+                "source path {} is a symlink after canonicalize — refusing",
+                path.display()
+            );
+        }
+        if !meta.is_dir() {
+            bail!(
+                "source path {} is not a directory — refusing",
+                path.display()
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Ok(Self {
+                dev: meta.dev(),
+                ino: meta.ino(),
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(Self {})
+        }
+    }
+
+    /// Re-stat `path` and verify it still names the directory captured at
+    /// resolve time. Returns an error if the path is now missing, a symlink,
+    /// not a directory, or a different inode.
+    fn verify(&self, path: &Path) -> Result<()> {
+        let meta = fs::symlink_metadata(path)
+            .with_context(|| format!("re-stating source root {} (TOCTOU check)", path.display()))?;
+        if meta.file_type().is_symlink() {
+            bail!(
+                "source root {} became a symlink between resolve and install \
+                 (TOCTOU; refusing)",
+                path.display()
+            );
+        }
+        if !meta.is_dir() {
+            bail!(
+                "source root {} is no longer a directory (TOCTOU; refusing)",
+                path.display()
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if meta.dev() != self.dev || meta.ino() != self.ino {
+                bail!(
+                    "source root {} dev/ino changed between resolve and install \
+                     (TOCTOU; refusing)",
+                    path.display()
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Anything that produces a [`ResolvedSkill`] from a CLI-supplied source.
@@ -172,9 +270,14 @@ impl Resolver for LocalPathResolver {
         let skill = parse_skill_file(&skill_md)
             .map_err(|e| anyhow!("skill at {} failed validation: {e}", skill_md.display()))?;
 
+        // F-656: pin (dev, ino) so `install_resolved` can detect a swap of
+        // the source root between now and the copy.
+        let source_fingerprint = SourceFingerprint::capture(&canonical)?;
+
         Ok(ResolvedSkill {
             skill,
             source_dir: canonical,
+            source_fingerprint,
         })
     }
 }
@@ -308,9 +411,15 @@ impl Resolver for GitResolver<'_> {
         let skill = parse_skill_file(&skill_md)
             .map_err(|e| anyhow!("cloned skill failed validation: {e}"))?;
 
+        // F-656: clones land in a Forge-owned cache directory, but pin the
+        // fingerprint anyway so `install_resolved`'s TOCTOU check has a
+        // single contract that covers every resolver.
+        let source_fingerprint = SourceFingerprint::capture(&cache_dir)?;
+
         Ok(ResolvedSkill {
             skill,
             source_dir: cache_dir,
+            source_fingerprint,
         })
     }
 }
@@ -350,6 +459,13 @@ pub fn looks_like_git_url(source: &str) -> bool {
 ///
 /// Refuses to overwrite an existing skill with the same id in the same
 /// scope. Callers that want force-replace must first call [`remove_skill`].
+///
+/// # F-656 — TOCTOU guard
+///
+/// Re-validates `resolved.source_dir` against the fingerprint captured by
+/// [`Resolver::resolve`] before copying. If the path was swapped for a
+/// symlink or replaced with a different directory in the interval, the
+/// install refuses rather than copying the attacker tree.
 pub fn install_resolved(
     resolved: &ResolvedSkill,
     scope: SkillScope,
@@ -371,15 +487,36 @@ pub fn install_resolved(
         );
     }
 
+    // F-656: confirm the source root is still the directory we validated.
+    // Without this, an attacker can substitute the tree (or a symlink to
+    // an attacker tree) at the same path between resolve and install.
+    resolved
+        .source_fingerprint
+        .verify(&resolved.source_dir)
+        .with_context(|| {
+            format!(
+                "source root {} changed between resolve and install",
+                resolved.source_dir.display()
+            )
+        })?;
+
     // Copy into the target. On any failure, roll back the partial copy so
     // a refused install (e.g. an escape-symlink) leaves no trace behind.
-    if let Err(err) = copy_dir_recursive(&resolved.source_dir, &target).with_context(|| {
-        format!(
-            "copying {} -> {}",
-            resolved.source_dir.display(),
-            target.display()
-        )
-    }) {
+    //
+    // The traversal treats `resolved.source_dir` as already-canonical (the
+    // resolver validated it) and uses the captured fingerprint as the
+    // anchor for symlink-escape checks — this avoids re-canonicalizing the
+    // root, which would silently re-follow a swap-in symlink.
+    if let Err(err) =
+        copy_dir_recursive(&resolved.source_dir, &target, &resolved.source_fingerprint)
+            .with_context(|| {
+                format!(
+                    "copying {} -> {}",
+                    resolved.source_dir.display(),
+                    target.display()
+                )
+            })
+    {
         // Best-effort cleanup; if removal itself fails (e.g. permissions),
         // surface the original install error rather than the cleanup error.
         let _ = fs::remove_dir_all(&target);
@@ -489,13 +626,23 @@ pub fn render_list(rows: &[InstalledSkillRow], out: &mut impl Write) -> Result<(
 /// Path-traversal hardening (F-590 review): a malicious skill folder could
 /// contain `evil -> /etc/passwd`. Without an explicit escape check, the
 /// copy would happily exfiltrate the linked file into the user's installed
-/// scope. We canonicalize the source root once at the top of the recursion
-/// and pass it through; every symlink is canonicalized and rejected unless
-/// its resolved target stays under that root.
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
-    let source_root = fs::canonicalize(src)
-        .with_context(|| format!("canonicalizing source dir {}", src.display()))?;
-    copy_dir_recursive_inner(src, dst, &source_root)
+/// scope.
+///
+/// `src` is the resolver's already-canonical source directory, used directly
+/// as the symlink-escape boundary — re-canonicalizing here would silently
+/// re-follow a TOCTOU swap-in symlink at the root (F-656). The fingerprint
+/// is verified once more inside this call as defense-in-depth.
+fn copy_dir_recursive(src: &Path, dst: &Path, fingerprint: &SourceFingerprint) -> Result<()> {
+    // F-656 belt-and-suspenders: even though `install_resolved` verified the
+    // fingerprint already, repeating the check here means any future caller
+    // of `copy_dir_recursive` inherits the TOCTOU guard automatically.
+    fingerprint.verify(src).with_context(|| {
+        format!(
+            "source root {} no longer matches resolver fingerprint",
+            src.display()
+        )
+    })?;
+    copy_dir_recursive_inner(src, dst, src)
 }
 
 fn copy_dir_recursive_inner(src: &Path, dst: &Path, source_root: &Path) -> Result<()> {
@@ -831,6 +978,210 @@ mod tests {
             fs::read_to_string(installed.join("latest.txt")).unwrap(),
             "real contents",
         );
+    }
+
+    /// F-656 regression: an attacker who can write inside the source-root's
+    /// parent directory may rename the validated tree away and replace it with
+    /// a symlink pointing at a different tree, between
+    /// `LocalPathResolver::resolve` and `install_resolved`. The installer must
+    /// either still install the originally-validated tree or refuse. It must
+    /// NOT install the attacker's tree.
+    #[cfg(unix)]
+    #[test]
+    fn install_refuses_when_source_root_swapped_for_symlink_after_resolve() {
+        use std::os::unix::fs::symlink;
+
+        let src = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let home = tempdir().unwrap();
+
+        // The benign tree the user intends to install.
+        let skill_dir = src.path().join("planner");
+        write_skill_md(&skill_dir, good_frontmatter());
+        fs::write(skill_dir.join("note.txt"), "BENIGN").unwrap();
+
+        // The attacker tree the swap would silently install instead.
+        let attacker_dir = src.path().join("attacker");
+        write_skill_md(&attacker_dir, good_frontmatter());
+        fs::write(attacker_dir.join("note.txt"), "ATTACKER").unwrap();
+        // A "secret" file the attacker wants smuggled into the install scope.
+        fs::write(attacker_dir.join("loot.txt"), "ATTACKER_OWNED").unwrap();
+
+        let resolver = LocalPathResolver::new(&skill_dir, src.path());
+        let resolved = resolver.resolve().expect("resolve must succeed");
+
+        // Simulate the TOCTOU swap: rename the validated tree away and
+        // replace it with a symlink to the attacker tree at the same path.
+        let stash = src.path().join("planner.stash");
+        fs::rename(&skill_dir, &stash).unwrap();
+        symlink(&attacker_dir, &skill_dir).unwrap();
+
+        let result = install_resolved(&resolved, SkillScope::User, workspace.path(), home.path());
+
+        // Acceptable outcomes: refuse loudly, or install the originally-
+        // validated tree. Installing the attacker tree is the regression.
+        let installed_root = home.path().join(".skills").join("planner");
+        match result {
+            Err(err) => {
+                let msg = format!("{err:#}").to_lowercase();
+                assert!(
+                    msg.contains("toctou")
+                        || msg.contains("changed")
+                        || msg.contains("symlink")
+                        || msg.contains("source root"),
+                    "expected TOCTOU/symlink error, got: {err:#}",
+                );
+                assert!(
+                    !installed_root.exists(),
+                    "refusal must roll back the partial copy",
+                );
+            }
+            Ok(_) => {
+                let installed_note = fs::read_to_string(installed_root.join("note.txt"))
+                    .expect("install claimed success but note.txt missing");
+                assert_eq!(
+                    installed_note, "BENIGN",
+                    "installer copied the attacker tree instead of the validated one",
+                );
+                assert!(
+                    !installed_root.join("loot.txt").exists(),
+                    "attacker file leaked into install scope",
+                );
+            }
+        }
+    }
+
+    /// F-656 regression: even if the swap puts a *real* directory at the
+    /// validated path (rather than a symlink), the inode fingerprint must
+    /// surface the substitution. This is the bare TOCTOU case.
+    #[cfg(unix)]
+    #[test]
+    fn install_refuses_when_source_root_replaced_with_different_real_dir_after_resolve() {
+        let src = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let home = tempdir().unwrap();
+
+        let skill_dir = src.path().join("planner");
+        write_skill_md(&skill_dir, good_frontmatter());
+        fs::write(skill_dir.join("note.txt"), "BENIGN").unwrap();
+
+        let resolved = LocalPathResolver::new(&skill_dir, src.path())
+            .resolve()
+            .expect("resolve must succeed");
+
+        // Swap the validated dir for a different real dir at the same path.
+        let stash = src.path().join("planner.stash");
+        fs::rename(&skill_dir, &stash).unwrap();
+        fs::create_dir_all(&skill_dir).unwrap();
+        write_skill_md(&skill_dir, good_frontmatter());
+        fs::write(skill_dir.join("note.txt"), "ATTACKER").unwrap();
+
+        let result = install_resolved(&resolved, SkillScope::User, workspace.path(), home.path());
+
+        let installed_root = home.path().join(".skills").join("planner");
+        match result {
+            Err(_) => {
+                assert!(
+                    !installed_root.exists(),
+                    "refusal must leave nothing behind",
+                );
+            }
+            Ok(_) => {
+                let installed_note = fs::read_to_string(installed_root.join("note.txt"))
+                    .expect("install claimed success but note.txt missing");
+                assert_eq!(
+                    installed_note, "BENIGN",
+                    "installer must install the originally-validated tree",
+                );
+            }
+        }
+    }
+
+    /// F-656 DoD: race a symlink swap against `install_resolved`. The install
+    /// must either fail or land the originally-validated tree — never the
+    /// attacker tree.
+    #[cfg(unix)]
+    #[test]
+    fn install_race_against_symlink_swap_never_installs_attacker_tree() {
+        use std::os::unix::fs::symlink;
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        for iter in 0..16 {
+            let src = tempdir().unwrap();
+            let workspace = tempdir().unwrap();
+            let home = tempdir().unwrap();
+
+            let skill_dir = src.path().join("racer");
+            write_skill_md(&skill_dir, good_frontmatter());
+            fs::write(skill_dir.join("note.txt"), "BENIGN").unwrap();
+
+            let attacker_dir = src.path().join("attacker");
+            write_skill_md(&attacker_dir, good_frontmatter());
+            fs::write(attacker_dir.join("note.txt"), "ATTACKER").unwrap();
+            fs::write(attacker_dir.join("loot.txt"), "ATTACKER_OWNED").unwrap();
+
+            let resolved = LocalPathResolver::new(&skill_dir, src.path())
+                .resolve()
+                .unwrap();
+
+            let barrier = Arc::new(Barrier::new(2));
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+            let swapper_skill = skill_dir.clone();
+            let swapper_attacker = attacker_dir.clone();
+            let swapper_src = src.path().to_path_buf();
+            let swapper_barrier = Arc::clone(&barrier);
+            let swapper_stop = Arc::clone(&stop);
+            let swapper = thread::spawn(move || {
+                swapper_barrier.wait();
+                let stash = swapper_src.join("racer.stash");
+                let deadline = Instant::now() + Duration::from_millis(50);
+                while !swapper_stop.load(std::sync::atomic::Ordering::SeqCst)
+                    && Instant::now() < deadline
+                {
+                    // Best-effort swap: rename benign away, plant symlink.
+                    if fs::rename(&swapper_skill, &stash).is_ok() {
+                        let _ = symlink(&swapper_attacker, &swapper_skill);
+                        let _ = fs::remove_file(&swapper_skill);
+                        let _ = fs::rename(&stash, &swapper_skill);
+                    }
+                }
+            });
+
+            barrier.wait();
+            let result =
+                install_resolved(&resolved, SkillScope::User, workspace.path(), home.path());
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            swapper.join().unwrap();
+            // Drop the swap symlink/leftover regardless of state.
+            let _ = fs::remove_file(src.path().join("racer.stash"));
+
+            let installed_root = home.path().join(".skills").join("racer");
+            match result {
+                Ok(_) => {
+                    let installed_note =
+                        fs::read_to_string(installed_root.join("note.txt")).unwrap_or_default();
+                    assert_eq!(
+                        installed_note, "BENIGN",
+                        "iter {iter}: race installed wrong note.txt",
+                    );
+                    assert!(
+                        !installed_root.join("loot.txt").exists(),
+                        "iter {iter}: attacker file leaked",
+                    );
+                }
+                Err(_) => {
+                    assert!(
+                        !installed_root.exists(),
+                        "iter {iter}: error must leave no partial copy",
+                    );
+                }
+            }
+            // Avoid colliding "already installed" with the next iteration.
+            let _ = fs::remove_dir_all(&installed_root);
+        }
     }
 
     #[test]
