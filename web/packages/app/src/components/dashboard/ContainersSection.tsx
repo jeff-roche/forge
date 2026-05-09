@@ -30,7 +30,7 @@ import {
   onMount,
   Show,
 } from 'solid-js';
-import { Button } from '@forge/design';
+import { Button, Skeleton } from '@forge/design';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import {
   CONTAINERS_CHANGED_EVENT,
@@ -148,7 +148,13 @@ export const ContainersSection: Component = () => {
       </header>
 
       <Show when={containers.loading}>
-        <p class="containers-section__hint">containers · loading</p>
+        <Skeleton
+          variant="block"
+          count={3}
+          label="Loading containers"
+          class="containers-section__skeleton"
+          data-testid="containers-loading"
+        />
       </Show>
 
       <Show when={!containers.loading && (containers() ?? []).length === 0}>

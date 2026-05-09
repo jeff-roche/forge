@@ -77,13 +77,10 @@
   gap: var(--sp-4);
 }
 
-.catalog__loading {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--color-text-secondary);
-  letter-spacing: 0.2em;
-  margin: 0;
-  text-transform: uppercase;
+/* F-684: catalog tab loading state — list-shaped skeleton matching the
+ * `.catalog__rows` layout the resource resolves into. */
+.catalog__skeleton.forge-skeleton-group {
+  gap: var(--sp-2);
 }
 
 .catalog__error {

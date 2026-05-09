@@ -80,6 +80,22 @@ describe('ContainersSection (F-597)', () => {
     expect(await findByTestId('containers-empty')).toBeTruthy();
   });
 
+  it('renders a skeleton loading state during the IPC fetch (F-684)', async () => {
+    const fn = vi.fn(async (cmd: string) => {
+      if (cmd === 'list_active_containers') {
+        return new Promise(() => undefined);
+      }
+      return undefined;
+    });
+    setInvokeForTesting(fn as never);
+    const { findByTestId, queryByText } = render(() => <ContainersSection />);
+    const skeleton = await findByTestId('containers-loading');
+    expect(skeleton.getAttribute('role')).toBe('status');
+    expect(skeleton.getAttribute('aria-busy')).toBe('true');
+    // Plain-text "containers · loading" copy must be gone.
+    expect(queryByText(/containers · loading/i)).toBeFalsy();
+  });
+
   it('renders one row per registered container', async () => {
     const { fn } = makeBackend({
       containers: [
