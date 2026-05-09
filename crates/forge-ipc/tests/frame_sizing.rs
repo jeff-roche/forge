@@ -127,6 +127,65 @@ async fn exactly_at_cap_round_trips() {
     }
 }
 
+/// F-660 — Case 4: an oversized message must be rejected by `write_frame`
+/// before it walks the entire serializer. Prior behavior fully built a
+/// `Vec<u8>` via `serde_json::to_vec` and only checked `body.len()` after
+/// the fact, so a message whose serialized form is `N >> MAX_FRAME_SIZE`
+/// cost `O(N)` allocations + serializer time per rejected frame.
+///
+/// We exercise this behaviorally: write a message ~16x over the cap and
+/// confirm `write_frame`:
+///   1. surfaces the cap error,
+///   2. does not write any bytes to the underlying writer (no length
+///      prefix, no body), and
+///   3. completes well under a generous wall-clock ceiling — a bounded
+///      early-exit returns essentially instantly even for very large
+///      payloads.
+#[tokio::test]
+async fn oversized_message_rejected_without_full_serialization() {
+    use std::time::Instant;
+    use tokio::io::AsyncReadExt;
+
+    let huge_text = "a".repeat(16 * MAX_FRAME_SIZE);
+    let sent = IpcMessage::SendUserMessage(forge_ipc::SendUserMessage { text: huge_text });
+
+    // Server side stays open so we can verify nothing was written.
+    let (mut client, mut server) = duplex(64);
+
+    let started = Instant::now();
+    let result = write_frame(&mut client, &sent).await;
+    let elapsed = started.elapsed();
+    drop(client);
+
+    let err = result.expect_err("write_frame must reject oversized message");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("frame too large"),
+        "expected cap error, got: {msg}"
+    );
+
+    // The writer must not have been touched on the rejection path —
+    // a partial length prefix or partial body would corrupt the wire
+    // for the next frame.
+    let mut sink = Vec::new();
+    let n = server.read_to_end(&mut sink).await.unwrap();
+    assert_eq!(
+        n, 0,
+        "write_frame leaked {n} bytes onto the wire on the rejection path"
+    );
+
+    // Generous sanity ceiling. Bounded early-exit on a 16x-cap payload
+    // is essentially instantaneous; this would have caught the old
+    // `serde_json::to_vec` path under any meaningful regression.
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "write_frame took {:?} for a {}-byte payload; \
+         expected early-exit before full serialization",
+        elapsed,
+        16 * MAX_FRAME_SIZE
+    );
+}
+
 /// Guard against importing an unused symbol — keeps `Hello`/`ClientInfo`
 /// honest if the fixture helpers above are ever inlined away.
 #[allow(dead_code)]
