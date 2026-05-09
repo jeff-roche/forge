@@ -4,11 +4,20 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <!--
-      Content-Security-Policy (F-050 / H9).
+      Content-Security-Policy (F-050 / H9 / F-664).
       Source of truth for the Tauri webview is crates/forge-shell/tauri.conf.json
       (app.security.csp). This meta tag mirrors that policy for the Vite dev
       server and the Playwright harness, which do not read tauri.conf.json.
-      Keep both in sync.
+
+      Intentional divergence (F-664): production tightens `style-src` into
+      `style-src-elem 'self'` (no `'unsafe-inline'`) so injected `<style>`
+      tags cannot drive CSS-attribute-selector exfiltration. The dev meta
+      below keeps `'unsafe-inline'` for `style-src` so Vite HMR — which
+      appends `<style>` tags to `document.head` at runtime — keeps working.
+      Production never exercises that codepath. Inline `style="..."`
+      attributes on JSX elements remain permitted in both contexts via
+      `style-src-attr 'unsafe-inline'`; tightening those is tracked as a
+      follow-up to F-664 (see PR notes / risk catalog).
     -->
     <meta
       http-equiv="Content-Security-Policy"
