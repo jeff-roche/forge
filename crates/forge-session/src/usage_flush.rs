@@ -31,10 +31,8 @@
 use std::path::Path;
 
 use chrono::{DateTime, Datelike, Utc};
-use forge_core::usage::{
-    monthly_path_in, user_usage_dir, MonthlyAggregate, SessionUsage, UsageBucket,
-};
-use forge_core::{read_since, Event, Result, SessionId, WorkspaceId};
+use forge_core::usage::{monthly_path_in, user_usage_dir, MonthlyAggregate, UsageBucket};
+use forge_core::{read_since, Event, Result, SessionId, SessionUsage, WorkspaceId};
 use forge_providers::pricing::PriceTable;
 
 /// Read every [`Event::UsageTick`] in `log_path` and merge it into the
