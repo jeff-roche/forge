@@ -71,8 +71,9 @@ forge-shell ◀──UDS──┤             forged              │
 
 | Direction | Variant | Payload |
 |---|---|---|
-| daemon → sidecar | `Hello` | `{ proto: u32, instance_id, agent_def, allowed_paths, workspace_path, provider_spec, sandbox_level, telemetry_endpoint }` |
-| sidecar → daemon | `HelloAck` | `{ pid, started_at, schema_version }` |
+| sidecar → daemon | `Hello` | `{ proto: u32, instance_id, agent_def, allowed_paths, workspace_path, provider_spec, sandbox_level, telemetry_endpoint }` (handshake; supervisor validates `proto` and `instance_id` before completing the handshake) |
+| daemon → sidecar | `HelloAck` | `{ pid, started_at, schema_version }` |
+| daemon → sidecar | `DaemonHello` | `{ proto: u32, instance_id, agent_def, allowed_paths, workspace_path, provider_spec, sandbox_level, telemetry_endpoint }` (F-676: dedicated metadata follow-up sent immediately after `HelloAck`; sidecar re-validates `proto` and `instance_id` against handshake state) |
 | daemon → sidecar | `RunTurn` | `{ turn_id, msg_id, text, agents_md, branch_parent, branch_variant_index, byte_budget }` |
 | daemon → sidecar | `Credentials` | `{ provider_id, secret_handle }` (push model — see §5) |
 | daemon → sidecar | `ToolCallApproved` / `ToolCallRejected` | mirrors `crates/forge-ipc/src/lib.rs:191` |

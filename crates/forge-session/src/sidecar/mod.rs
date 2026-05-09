@@ -572,23 +572,22 @@ impl SidecarSupervisor {
             "sidecar handshake complete",
         );
 
-        // Optionally pass the original daemon → child Hello payload
-        // forward as a follow-up frame. Step 1's protocol shape is
-        // child-initiated; the supervisor still needs to deliver
-        // `agent_def`, `provider_spec`, etc. to the child for the
-        // run-turn body to consume in step 5. We send the payload as a
-        // second `Hello` frame so the child can pick it up via the
-        // same dispatch loop. The current step-3 stub binary ignores
-        // it as a "non-RunTurn daemon message" — wiring step 5 will
-        // teach the child to consume it.
-        let daemon_hello = SidecarMessage::Hello(hello.clone());
+        // Pass the daemon-side metadata payload forward as a follow-up
+        // frame. Step 1's handshake shape is child-initiated; the
+        // supervisor still needs to deliver `agent_def`,
+        // `provider_spec`, etc. to the child for the run-turn body to
+        // consume in step 5. F-676: this travels as a dedicated
+        // `DaemonHello` variant rather than a second `Hello`, so the
+        // discriminator no longer encodes two semantically distinct
+        // frames and the receiver can pattern-match the daemon-side
+        // payload distinctly from the handshake.
+        let daemon_hello = SidecarMessage::DaemonHello(hello.clone());
         if let Err(e) = forge_ipc::write_frame(&mut writer, &daemon_hello).await {
-            // Non-fatal in step 4: the child stub ignores the frame. A
-            // failure here implies the connection broke between ack and
-            // first command — fold it into the restart loop by treating
-            // it as a fresh crash.
+            // A failure here implies the connection broke between ack
+            // and first command — fold it into the restart loop by
+            // treating it as a fresh crash.
             let _ = child.kill().await;
-            return Err(e.context("forward daemon Hello to forged-agent"));
+            return Err(e.context("forward DaemonHello to forged-agent"));
         }
 
         Ok(LiveSidecar {
@@ -1007,7 +1006,9 @@ impl SupervisorTask {
                 c.panic_message,
                 c.backtrace.unwrap_or_default()
             )),
-            SidecarMessage::HelloAck(_) | SidecarMessage::Hello(_) => {
+            SidecarMessage::HelloAck(_)
+            | SidecarMessage::Hello(_)
+            | SidecarMessage::DaemonHello(_) => {
                 warn!(
                     target: "forge_session::sidecar",
                     instance_id = %self.instance_id,
