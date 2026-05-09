@@ -341,6 +341,51 @@ pub struct HelloAck {
     pub schema_version: u32,
 }
 
+/// F-660: cap-checked serialization sink. A `std::io::Write` that
+/// accumulates serialized JSON into an internal buffer and short-circuits
+/// the serializer the moment the running byte count exceeds `cap`.
+///
+/// Replaces a prior `serde_json::to_vec(msg)?`-then-check pattern in
+/// [`write_frame`], which fully serialized the message before rejecting
+/// it. A misbehaving caller could drive `O(N)` allocations + serializer
+/// work per rejected frame for any `N >> MAX_FRAME_SIZE`. Aborting from
+/// the writer short-circuits `serde_json::to_writer` at the first
+/// overflowing chunk so the cost of rejection is bounded by `cap + ε`,
+/// where `ε` is the size of the last buffered chunk serde_json hands us.
+struct CapWriter {
+    buf: Vec<u8>,
+    cap: usize,
+    overflowed: bool,
+}
+
+impl CapWriter {
+    fn new(cap: usize) -> Self {
+        // Pre-size the buffer so the common (under-cap) path doesn't
+        // pay grow-and-copy overhead. We never grow beyond `cap` — the
+        // overflow branch fires the moment we'd need to.
+        Self {
+            buf: Vec::with_capacity(cap.min(64 * 1024)),
+            cap,
+            overflowed: false,
+        }
+    }
+}
+
+impl std::io::Write for CapWriter {
+    fn write(&mut self, chunk: &[u8]) -> std::io::Result<usize> {
+        if self.buf.len().saturating_add(chunk.len()) > self.cap {
+            self.overflowed = true;
+            return Err(std::io::Error::other("forge-ipc:cap-overflow"));
+        }
+        self.buf.extend_from_slice(chunk);
+        Ok(chunk.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Write one length-prefixed JSON frame.
 ///
 /// F-608: generic over `T: Serialize` so this helper services both the
@@ -349,15 +394,33 @@ pub struct HelloAck {
 /// and the 4 MiB frame cap are unchanged from the pre-F-608
 /// `&IpcMessage`-typed signature; existing callers compile without
 /// modification because `T` is inferred from the call site.
+///
+/// F-660: the cap is enforced *during* serialization via a private
+/// `CapWriter` sink. On overflow we bail before any bytes hit `writer`,
+/// so the rejection path neither allocates the full body nor corrupts
+/// the wire with a partial length prefix.
 pub async fn write_frame<W, T>(writer: &mut W, msg: &T) -> anyhow::Result<()>
 where
     W: AsyncWrite + Unpin,
     T: Serialize + ?Sized,
 {
-    let body = serde_json::to_vec(msg)?;
-    if body.len() > MAX_FRAME_SIZE {
-        bail!("frame too large: {} bytes", body.len());
+    let mut sink = CapWriter::new(MAX_FRAME_SIZE);
+    if let Err(err) = serde_json::to_writer(&mut sink, msg) {
+        if sink.overflowed {
+            // F-660: surface the same `"frame too large"` shape as the
+            // read-path cap so log greps and tests match a single
+            // string. `sink.buf.len()` reports how far the serializer
+            // got before the cap fired — useful for ops triage when a
+            // real frame is genuinely just past the cap.
+            bail!(
+                "frame too large: {} bytes (cap {})",
+                sink.buf.len(),
+                MAX_FRAME_SIZE
+            );
+        }
+        return Err(err.into());
     }
+    let body = sink.buf;
     writer.write_u32(body.len() as u32).await?;
     writer.write_all(&body).await?;
     Ok(())
@@ -635,6 +698,63 @@ mod tests {
             elapsed < Duration::from_millis(500),
             "deadline did not fire promptly: {:?}",
             elapsed
+        );
+    }
+
+    /// F-660: `CapWriter` must short-circuit `serde_json::to_writer` the
+    /// instant the running byte count first exceeds the cap, leaving the
+    /// internal buffer at no more than `cap + ε` (where `ε` is the size
+    /// of the chunk that triggered overflow). This is the precise
+    /// regression guard for the post-serialization bug — a return to
+    /// `to_vec`-then-check would produce a buffer of ~`message_size`,
+    /// not `cap + ε`.
+    #[test]
+    fn cap_writer_bounds_visited_bytes_on_overflow() {
+        // Far smaller than `MAX_FRAME_SIZE` to keep the test fast — the
+        // bound we assert is structural, independent of the absolute
+        // cap value.
+        let cap = 1024;
+        let mut sink = CapWriter::new(cap);
+
+        // Build a payload meaningfully larger than the cap, then walk it
+        // through `serde_json::to_writer` against `sink`. The serializer
+        // emits a sequence of small chunks; the first chunk that would
+        // push us past `cap` triggers the overflow branch. After that,
+        // serde_json gives up and `to_writer` returns the I/O error.
+        let payload: Vec<u8> = vec![b'x'; 16 * cap];
+        let err = serde_json::to_writer(&mut sink, &payload)
+            .expect_err("oversized payload must trip CapWriter");
+        assert!(sink.overflowed, "overflow flag should be set: {err}");
+        assert!(
+            sink.buf.len() <= cap,
+            "CapWriter accepted {} bytes past the {}-byte cap",
+            sink.buf.len(),
+            cap
+        );
+    }
+
+    /// F-660: `write_frame` must surface the canonical `"frame too
+    /// large"` error string on the cap path so log greps and downstream
+    /// tests can match against a single shape, regardless of whether
+    /// the cap is enforced at the read side or the write side.
+    #[tokio::test]
+    async fn write_frame_oversized_message_returns_cap_error() {
+        let (mut a, _b) = UnixStream::pair().unwrap();
+
+        // Slightly over the cap is sufficient — we're testing the error
+        // shape, not the bounded-allocation property (the
+        // `cap_writer_bounds_visited_bytes_on_overflow` unit test above
+        // covers that).
+        let sent = IpcMessage::SendUserMessage(SendUserMessage {
+            text: "a".repeat(MAX_FRAME_SIZE + 1024),
+        });
+        let err = write_frame(&mut a, &sent)
+            .await
+            .expect_err("write_frame must reject an oversized body");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("frame too large"),
+            "expected canonical cap error, got: {msg}"
         );
     }
 
