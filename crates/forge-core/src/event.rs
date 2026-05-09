@@ -1,3 +1,34 @@
+//! Session event log types.
+//!
+//! # Timestamp field-name convention
+//!
+//! Every [`Event`] variant that carries a wall-clock timestamp uses
+//! `at: DateTime<Utc>` — that is the project-wide default and what new
+//! variants MUST adopt. Two pinned exceptions remain because the
+//! AgentMonitor webview reads them by name and the churn to rename them
+//! exceeds the benefit (F-380):
+//!
+//! | Variant                   | Field         | Why it stays specialized                                          |
+//! |---------------------------|---------------|-------------------------------------------------------------------|
+//! | [`Event::StepStarted`]    | `started_at`  | Paired with `StepFinished.duration_ms`; the frontend distinguishes step-open from other event timestamps via the field name. |
+//! | [`Event::ResourceSample`] | `sampled_at`  | Emphasizes sample-vs-emit distinction; AgentMonitor reads this field by name. |
+//!
+//! [`crate::mcp_state::McpStateEvent::at`] follows the convention — it was
+//! renamed from `ts: SystemTime` in F-380.
+//!
+//! Some variants intentionally carry no timestamp because they are strictly
+//! correlative (`BranchSelected`, `BranchDeleted`, `MessageSuperseded`,
+//! `ToolInvoked`, `ToolReturned`, `UsageTick`, …) — see the conventions doc
+//! for the full list and rationale. Adding `at` to one of these later is
+//! non-breaking; removing `at` from a stamped variant is breaking.
+//!
+//! Adding a third specialized name without prior architectural sign-off is
+//! structural drift and will be rejected in review. Pinned exceptions and
+//! their wire-shape pins are locked by
+//! `crates/forge-core/tests/event_wire_shape.rs` and
+//! `crates/forge-core/tests/event_conventions.rs`; the full convention spec
+//! is `docs/architecture/event-conventions.md`.
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
