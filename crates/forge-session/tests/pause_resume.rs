@@ -550,3 +550,143 @@ async fn pause_during_tool_approval_does_not_kill_in_flight_tool() {
         "continuation never completed after resume"
     );
 }
+
+/// F-653: regression for the pause/resume race in the orchestrator
+/// state machine.
+///
+/// Threat model: a `try_pause` → `try_resume` cycle that completes
+/// between two checkpoint calls used to leave the flag clear and the
+/// previous `notify_waiters`-based resume signal lost (no waiter was
+/// parked yet). A subsequent `wait_if_paused` call would then either
+/// (a) not park at all and let a tool effect fire after `SessionPaused`
+/// was already on the wire, or (b) park indefinitely on a notify whose
+/// signal had been dropped.
+///
+/// Reproduction strategy: pause the session, then emit a tight
+/// pause/resume burst that completes BEFORE sending any user message,
+/// then send the user message. Pre-fix, the dropped resume notify
+/// would deadlock the orchestrator at its first checkpoint OR (on a
+/// scheduling that drained the resume permit elsewhere) let a step
+/// open while `paused_on_wire` flicks back to true on the trailing
+/// burst pause.
+///
+/// Invariant under test: the turn must complete (no deadlock) AND, for
+/// the burst window where the orchestrator was guaranteed to be parked
+/// at its first-iteration checkpoint, no `StepStarted` event is
+/// interleaved with the burst. This is a deterministic shape: pause
+/// frames are sent and acked BEFORE the first SendUserMessage, so the
+/// orchestrator's first checkpoint has fully captured the burst before
+/// it ever exits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pause_resume_burst_before_turn_does_not_deadlock_or_leak_step() {
+    let dir = TempDir::new().unwrap();
+    let (sock_path, session) =
+        spawn_daemon(&dir, vec![SCRIPT_FIRST.into(), SCRIPT_SECOND.into()]).await;
+
+    let mut stream = connect_with_retry(&sock_path).await;
+    do_handshake(&mut stream).await;
+    forge_ipc::write_frame(&mut stream, &IpcMessage::Subscribe(Subscribe { since: 0 }))
+        .await
+        .unwrap();
+
+    let (mut reader, mut writer) = stream.into_split();
+
+    // 25 pause/resume cycles BEFORE any user message. The orchestrator
+    // has no turn in flight; these cycles bump the pause epoch
+    // monotonically. After the burst, the daemon is in the Running
+    // state but `pause_epoch` has advanced. The `notify_one`-based
+    // resume signal retains a permit so the orchestrator's first
+    // checkpoint never deadlocks.
+    for _ in 0..25 {
+        forge_ipc::write_frame(
+            &mut writer,
+            &IpcMessage::PauseSession(PauseSession::default()),
+        )
+        .await
+        .unwrap();
+        forge_ipc::write_frame(
+            &mut writer,
+            &IpcMessage::ResumeSession(ResumeSession::default()),
+        )
+        .await
+        .unwrap();
+    }
+
+    // Drain the burst's events first so the user message starts from a
+    // quiet wire. The daemon emits SessionPaused / SessionResumed for
+    // every transition.
+    let mut burst_events: Vec<Event> = Vec::new();
+    let _ = timeout(Duration::from_millis(500), async {
+        loop {
+            let frame = forge_ipc::read_frame(&mut reader).await.unwrap();
+            if let Some(event) = extract_event(&frame) {
+                burst_events.push(event);
+            }
+        }
+    })
+    .await;
+    let burst_pause_count = burst_events
+        .iter()
+        .filter(|e| matches!(e, Event::SessionPaused { .. }))
+        .count();
+    let burst_resume_count = burst_events
+        .iter()
+        .filter(|e| matches!(e, Event::SessionResumed { .. }))
+        .count();
+    assert!(
+        burst_pause_count > 0 && burst_resume_count > 0,
+        "burst must produce at least some SessionPaused/SessionResumed pairs; \
+         got {burst_pause_count} paused / {burst_resume_count} resumed",
+    );
+    assert!(
+        !session.is_paused(),
+        "after the burst the daemon must be in Running state",
+    );
+    assert!(
+        burst_events.iter().all(|e| matches!(
+            e,
+            Event::SessionPaused { .. } | Event::SessionResumed { .. }
+        )),
+        "no orchestrator-emitted event may interleave with a turn-less burst; \
+         got {burst_events:?}",
+    );
+
+    // Now send the user message. The orchestrator's first-iteration
+    // checkpoint must NOT deadlock (pre-fix bug: dropped notify
+    // permits) and must let the turn run to completion.
+    forge_ipc::write_frame(
+        &mut writer,
+        &IpcMessage::SendUserMessage(SendUserMessage {
+            text: "hello".into(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let drained = timeout(Duration::from_secs(10), async {
+        loop {
+            let frame = forge_ipc::read_frame(&mut reader).await.unwrap();
+            let Some(event) = extract_event(&frame) else {
+                continue;
+            };
+            if matches!(
+                event,
+                Event::AssistantMessage {
+                    stream_finalised: true,
+                    ..
+                }
+            ) {
+                // The trailing script (SCRIPT_SECOND, end_turn) emits
+                // the final finalised AssistantMessage that closes the
+                // turn.
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(
+        drained.is_ok(),
+        "orchestrator deadlocked at the first checkpoint after a pause/resume burst — \
+         dropped resume notify permit (F-653 race)",
+    );
+}
