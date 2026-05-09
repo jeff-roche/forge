@@ -1,3 +1,4 @@
+#![allow(deprecated)] // F-652: tests/benches still drive the deprecated bare read_frame helpers.
 //! F-144: Re-run Fresh variant — truncate to the originating user message,
 //! regenerate from there (new root), and supersede the original turn.
 //!
