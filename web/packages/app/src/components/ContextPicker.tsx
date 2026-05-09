@@ -175,7 +175,6 @@ export interface ContextPickerProps {
 }
 
 const POPUP_MAX_HEIGHT = 360;
-const POPUP_MIN_WIDTH = 360;
 
 // Stable id prefix for option rows. The combobox root's
 // `aria-activedescendant` points at `<prefix>-<index>` so assistive tech can
@@ -348,9 +347,6 @@ export const ContextPicker: Component<ContextPickerProps> = (props) => {
       aria-haspopup="listbox"
       aria-activedescendant={activeDescendantId()}
       ref={rootRef}
-      style={{
-        'min-width': `${POPUP_MIN_WIDTH}px`,
-      }}
     >
       {/* Search field — echoes the live `@`-query from the composer. */}
       <div class="context-picker__search">

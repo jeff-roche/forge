@@ -95,13 +95,12 @@ const MAX_RETRIES_IN_WINDOW: usize = 3;
 /// architecture-doc §4 default.
 const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_millis(2000);
 
-/// F-652: per-frame read deadline on the steady-state sidecar event
-/// pump. A healthy `forged-agent` heartbeats every few seconds; a 60 s
-/// silence is unambiguously a stalled or wedged child (and a
-/// slowloris-style same-uid attacker holding the socket open without
-/// sending data). On timeout the pump treats the read as an EOF /
-/// crash and the supervisor's restart loop kicks in.
-const PUMP_FRAME_DEADLINE: Duration = Duration::from_secs(60);
+// F-652 / Issue #784: the steady-state sidecar event pump uses the
+// crate-level `forge_ipc::DEFAULT_PUMP_DEADLINE`. A healthy `forged-agent`
+// heartbeats every few seconds; the 60 s silence window is unambiguously a
+// stalled or wedged child (and a slowloris-style same-uid attacker holding
+// the socket open without sending data). On timeout the pump treats the
+// read as an EOF / crash and the supervisor's restart loop kicks in.
 
 /// Buffer depth on the daemon → child command channel. Sized for the
 /// realistic burst of approval frames a single turn can produce; an
@@ -790,7 +789,7 @@ impl SupervisorTask {
                         }
                     }
                 }
-                read = forge_ipc::read_frame_into_with_deadline::<_, SidecarMessage>(&mut live.reader, &mut buf, PUMP_FRAME_DEADLINE) => {
+                read = forge_ipc::read_frame_into_with_deadline::<_, SidecarMessage>(&mut live.reader, &mut buf, forge_ipc::DEFAULT_PUMP_DEADLINE) => {
                     match read {
                         Ok(frame) => {
                             if let Some(reason) = self.handle_inbound(frame).await {
@@ -1401,7 +1400,7 @@ mod tests {
 
     /// F-652: an idle (silent) sidecar peer must not pin the steady-
     /// state pump indefinitely. `read_frame_into_with_deadline` returns
-    /// an error after `PUMP_FRAME_DEADLINE`; the supervisor's
+    /// an error after `forge_ipc::DEFAULT_PUMP_DEADLINE`; the supervisor's
     /// `pump_until_exit` then routes that into its EOF-classification
     /// branch and the restart loop.
     #[tokio::test]

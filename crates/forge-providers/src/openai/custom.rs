@@ -40,7 +40,7 @@ use forge_core::Result;
 use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 
-use crate::http_util::{DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT, DEFAULT_TCP_KEEPALIVE};
+use crate::http_util::{self, HttpClientConfig};
 use crate::sse;
 use crate::{ChatChunk, ChatRequest, Provider};
 
@@ -167,7 +167,10 @@ impl CustomOpenAiProvider {
             model,
             model_list,
             max_tokens: None,
-            stream_client: build_secure_custom_client(),
+            stream_client: http_util::build_stream_client(
+                &HttpClientConfig::DEFAULT,
+                custom_redirect_policy(),
+            ),
             stream_cfg: sse::StreamConfig::DEFAULT,
         })
     }
@@ -273,33 +276,20 @@ impl std::fmt::Debug for CustomOpenAiProvider {
     }
 }
 
-/// Build the `reqwest::Client` used by `CustomOpenAiProvider` for outbound
-/// chat completions. Layered defenses against SSRF on a user-supplied
-/// `base_url`:
+/// Per-hop redirect policy installed on the `CustomOpenAiProvider` streaming
+/// client. 3xx responses do not auto-follow blindly: each hop's URL is
+/// re-validated through [`forge_core::url_safety::check_url`] before reqwest
+/// dispatches the follow-up request, so a malicious vendor that responds
+/// with `302 Location: http://169.254.169.254/...` cannot smuggle a private
+/// IP target into the chain. The hop count is capped at
+/// [`MAX_REDIRECT_HOPS`] regardless.
 ///
-/// 1. **Policy-enforcing DNS resolver**
-///    ([`forge_core::http::secure_client_builder`]): every resolved
-///    `SocketAddr` is filtered through the `url_safety` IPv4/IPv6 range
-///    policy. A short-TTL DNS rebind that answers safely on
-///    [`crate::openai::custom::CustomOpenAiProvider::new`]'s `check_url`
-///    pass and hostilely on the connect that follows is refused at the
-///    DNS layer — reqwest never opens the socket.
-///
-/// 2. **Custom redirect policy**: 3xx responses do not auto-follow blindly.
-///    Each hop's URL is re-validated through
-///    [`forge_core::url_safety::check_url`] before reqwest dispatches the
-///    follow-up request, so a malicious vendor that responds with
-///    `302 Location: http://169.254.169.254/...` cannot smuggle a private
-///    IP target into the chain. The hop count is capped at
-///    [`MAX_REDIRECT_HOPS`] regardless.
-///
-/// The streaming-HTTP timeouts (connect, read, TCP keepalive) match the
-/// shared [`crate::http_util::HttpClientConfig::DEFAULT`] posture used by
-/// [`super::OpenAiProvider`]; they are inlined here because
-/// [`forge_core::http::secure_client_builder`] returns a fresh
-/// `reqwest::ClientBuilder` we must populate ourselves.
-fn build_secure_custom_client() -> reqwest::Client {
-    let redirect_policy = reqwest::redirect::Policy::custom(|attempt| {
+/// The DNS-resolver SSRF defence and the streaming-HTTP timeouts come from
+/// the shared [`crate::http_util::build_stream_client`] — this helper only
+/// supplies the redirect policy that distinguishes the custom provider from
+/// the official-vendor `Policy::none()` posture.
+fn custom_redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
         if attempt.previous().len() >= MAX_REDIRECT_HOPS {
             return attempt.error(format!(
                 "custom_openai redirect chain exceeded {MAX_REDIRECT_HOPS} hops"
@@ -312,15 +302,7 @@ fn build_secure_custom_client() -> reqwest::Client {
                 "custom_openai redirect to {url} refused by SSRF guard: {e}"
             )),
         }
-    });
-
-    forge_core::http::secure_client_builder()
-        .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
-        .read_timeout(DEFAULT_READ_TIMEOUT)
-        .tcp_keepalive(Some(DEFAULT_TCP_KEEPALIVE))
-        .redirect(redirect_policy)
-        .build()
-        .expect("reqwest custom-openai client builder — only fails if no TLS backend is available")
+    })
 }
 
 impl Provider for CustomOpenAiProvider {

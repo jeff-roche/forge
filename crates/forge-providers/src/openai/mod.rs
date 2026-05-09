@@ -49,7 +49,10 @@ impl OpenAiProvider {
             api_key: api_key.into(),
             model: model.into(),
             max_tokens: None,
-            stream_client: http_util::build_stream_client(&HttpClientConfig::DEFAULT),
+            stream_client: http_util::build_stream_client(
+                &HttpClientConfig::DEFAULT,
+                reqwest::redirect::Policy::none(),
+            ),
             stream_cfg: sse::StreamConfig::DEFAULT,
         }
     }

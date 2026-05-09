@@ -96,45 +96,56 @@ impl PolicyEnforcingResolver {
 impl Resolve for PolicyEnforcingResolver {
     fn resolve(&self, name: Name) -> Resolving {
         let inner = Arc::clone(&self.inner);
-        let name_for_err = name.as_str().to_string();
+        let host = name.as_str().to_string();
         Box::pin(async move {
             let addrs = inner.resolve(name).await?;
-            let filtered: Vec<SocketAddr> = addrs.filter(|sa| !is_blocked(sa.ip())).collect();
-            if filtered.is_empty() {
+            let mut accepted: Vec<SocketAddr> = Vec::new();
+            let mut rejections: Vec<String> = Vec::new();
+            for sa in addrs {
+                match check_addr(sa.ip(), &host) {
+                    Ok(()) => accepted.push(sa),
+                    Err(reason) => rejections.push(reason),
+                }
+            }
+            if accepted.is_empty() {
                 return Err(Box::new(std::io::Error::other(format!(
-                    "SSRF guard: DNS for {name_for_err:?} resolved exclusively to \
-                     url_safety-blocked IP ranges (loopback / private / link-local)"
+                    "SSRF guard: DNS for {host:?} resolved exclusively to \
+                     url_safety-blocked IP ranges: {}",
+                    rejections.join("; ")
                 )))
                     as Box<dyn std::error::Error + Send + Sync>);
             }
-            Ok(Box::new(filtered.into_iter()) as Addrs)
+            Ok(Box::new(accepted.into_iter()) as Addrs)
         })
     }
 }
 
-/// Run a single resolved IP through the `url_safety` IPv4/IPv6 policy.
+/// Run a single resolved IP through the `url_safety` IPv4/IPv6 policy. Threads
+/// the offending hostname through to `check_ipv4`/`check_ipv6` so block errors
+/// name the host that triggered the rejection (operator-grade triage context).
+///
 /// IPv4-mapped IPv6 (`::ffff:a.b.c.d`) is unwrapped to its embedded IPv4 so
 /// `https://[::ffff:169.254.169.254]/...` is rejected as link-local rather
 /// than slipping past as "unknown IPv6".
-fn is_blocked(ip: IpAddr) -> bool {
+fn check_addr(ip: IpAddr, host: &str) -> Result<(), String> {
     match ip {
         IpAddr::V4(v4) => {
             if v4.is_loopback() {
-                return false; // url_safety treats loopback as allowed
+                return Ok(()); // url_safety treats loopback as allowed
             }
-            url_safety::check_ipv4(v4, "<dns>").is_err()
+            url_safety::check_ipv4(v4, host).map_err(|e| e.to_string())
         }
         IpAddr::V6(v6) => {
             if let Some(mapped) = v6.to_ipv4_mapped() {
                 if mapped.is_loopback() {
-                    return false;
+                    return Ok(());
                 }
-                return url_safety::check_ipv4(mapped, "<dns>").is_err();
+                return url_safety::check_ipv4(mapped, host).map_err(|e| e.to_string());
             }
             if v6.is_loopback() {
-                return false;
+                return Ok(());
             }
-            url_safety::check_ipv6(v6, "<dns>").is_err()
+            url_safety::check_ipv6(v6, host).map_err(|e| e.to_string())
         }
     }
 }
@@ -146,17 +157,42 @@ fn is_blocked(ip: IpAddr) -> bool {
 /// a stable inner without depending on a private reqwest type.
 struct SystemResolver;
 
+/// Placeholder port handed to `tokio::net::lookup_host`. `lookup_host` requires
+/// a `host:port` shape but the port we hand it is irrelevant — reqwest
+/// overwrites it with the URL's explicit port (or the scheme default) before
+/// dialing, so the placeholder never reaches TCP.
+///
+/// **Invariant pin:** see `SocketAddrs::extend` in reqwest 0.12.28
+/// (<https://github.com/seanmonstar/reqwest/blob/v0.12.28/src/dns/resolve.rs#L98-L106>):
+/// every resolved `SocketAddr` whose port is `0` (or whose URL specifies a
+/// port explicitly) is rewritten via `addr.set_port(port)` prior to connect.
+/// If a future reqwest release drops that rewrite, this resolver will start
+/// returning addresses with port `0` and connects will fail loudly — that is
+/// the intended failure mode (loud over silent).
+const LOOKUP_HOST_PORT_PLACEHOLDER: u16 = 0;
+
 impl Resolve for SystemResolver {
     fn resolve(&self, name: Name) -> Resolving {
         let host = name.as_str().to_string();
         Box::pin(async move {
-            // `lookup_host` wants `host:port`; port 0 is a placeholder.
-            // reqwest rewrites the port from the request URL / scheme
-            // before dialing, so the placeholder never reaches TCP.
-            let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 0))
-                .await
-                .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
-                .collect();
+            let addrs: Vec<SocketAddr> =
+                tokio::net::lookup_host((host.as_str(), LOOKUP_HOST_PORT_PLACEHOLDER))
+                    .await
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
+                    .collect();
+            // Every returned addr carries the placeholder port; reqwest's
+            // contract (linked above) is to overwrite it pre-connect. We
+            // verify the precondition we control: that `lookup_host` is
+            // honoring the placeholder we passed it. If this trips, the
+            // platform resolver mutated our port and the invariant
+            // documented above no longer applies.
+            debug_assert!(
+                addrs
+                    .iter()
+                    .all(|a| a.port() == LOOKUP_HOST_PORT_PLACEHOLDER),
+                "tokio::net::lookup_host returned a non-placeholder port; \
+                 reqwest's port-rewrite contract assumes port 0 in"
+            );
             Ok(Box::new(addrs.into_iter()) as Addrs)
         })
     }
@@ -240,6 +276,35 @@ mod tests {
         assert!(
             err.contains("SSRF guard"),
             "error must name the guard: {err}"
+        );
+        assert!(
+            err.contains("metadata.attacker.test"),
+            "error must name the offending hostname: {err}"
+        );
+        assert!(
+            err.contains("169.254.169.254"),
+            "error must name the offending IP: {err}"
+        );
+        assert!(
+            err.contains("link-local") || err.contains("169.254.0.0/16"),
+            "error must name the offending range: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolver_block_error_names_hostname_for_ipv6() {
+        let inner = Arc::new(ScriptedResolver::new(vec![vec![sa_v6("fd00::1")]]));
+        let resolver = PolicyEnforcingResolver::new(inner);
+        let err = collect(&resolver, "v6ula.attacker.test")
+            .await
+            .expect_err("fc00::/7 must be filtered");
+        assert!(
+            err.contains("v6ula.attacker.test"),
+            "error must name the offending hostname: {err}"
+        );
+        assert!(
+            err.contains("fd00::1"),
+            "error must name the offending IP: {err}"
         );
     }
 

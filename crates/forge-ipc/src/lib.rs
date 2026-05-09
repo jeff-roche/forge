@@ -578,9 +578,17 @@ where
 {
     match tokio::time::timeout(deadline, read_frame_into_undeadlined::<R, T>(reader, buf)).await {
         Ok(inner) => inner,
-        Err(_) => Err(IpcReadTimeout(deadline).into()),
+        Err(_) => Err(IpcReadTimeout::new(deadline).into()),
     }
 }
+
+/// Issue #784: shared per-frame deadline for every long-lived IPC pump
+/// (sidecar pump, shell bridge pump, CLI `tail`/`run`, daemon dispatch).
+/// The value bounds the worst-case silence window before a stalled or
+/// slowloris-style peer is treated as gone (CWE-770). Handshake / probe
+/// deadlines stay site-local: they have a different rationale (a peer
+/// that hasn't framed a `HelloAck` in 5 s is wedged).
+pub const DEFAULT_PUMP_DEADLINE: Duration = Duration::from_secs(60);
 
 /// F-652: typed marker error returned by [`read_frame_with_deadline`] /
 /// [`read_frame_into_with_deadline`] when the deadline elapses.
@@ -591,8 +599,22 @@ where
 /// error that should tear the connection down. Callers that treat
 /// every error path as fatal (handshakes, one-shot reads) can ignore
 /// the type and rely on the boxed `anyhow::Error`'s `Display`.
+///
+/// Issue #784: the inner `Duration` is private so the representation
+/// can grow (e.g. carry the originating call site for diagnostics)
+/// without a breaking churn at every downcast site.
 #[derive(Debug)]
-pub struct IpcReadTimeout(pub Duration);
+pub struct IpcReadTimeout(Duration);
+
+impl IpcReadTimeout {
+    pub fn new(deadline: Duration) -> Self {
+        Self(deadline)
+    }
+
+    pub fn duration(&self) -> Duration {
+        self.0
+    }
+}
 
 impl std::fmt::Display for IpcReadTimeout {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -704,6 +726,28 @@ mod tests {
             IpcMessage::SwitchProvider(s) => assert_eq!(s.provider_id, "custom_openai:vllm"),
             other => panic!("expected SwitchProvider, got {other:?}"),
         }
+    }
+
+    /// Issue #784: `DEFAULT_PUMP_DEADLINE` is the single source of truth for
+    /// the steady-state pump deadline shared by every long-lived `read_frame_*`
+    /// call site (sidecar pump, shell bridge pump, CLI tail/run, daemon
+    /// dispatch). Pinning the value here means a regression that drifts one
+    /// call site away from 60 s would have to drift this constant first.
+    #[test]
+    fn default_pump_deadline_is_sixty_seconds() {
+        assert_eq!(DEFAULT_PUMP_DEADLINE, Duration::from_secs(60));
+    }
+
+    /// Issue #784: `IpcReadTimeout` exposes its inner `Duration` via the
+    /// `duration()` accessor rather than a public tuple field. The accessor
+    /// guards the option to evolve the representation later (e.g. carry the
+    /// originating call site for diagnostics) without a breaking churn at
+    /// every downcast site.
+    #[test]
+    fn ipc_read_timeout_duration_accessor_returns_constructed_duration() {
+        let d = Duration::from_millis(250);
+        let err = IpcReadTimeout::new(d);
+        assert_eq!(err.duration(), d);
     }
 
     /// F-652: the buffer-reusing `read_frame_into_with_deadline` must

@@ -157,7 +157,7 @@ describe('SubAgentBanner — nested rendering for sub-of-sub', () => {
     expect(nestedHeader).toHaveTextContent('deep-helper');
   });
 
-  it('replaces nested inline children with an "OPEN MONITOR" button past max depth (3)', () => {
+  it('replaces nested inline children with an "OPEN IN NEW WINDOW" button past max depth (3)', () => {
     const grandchild: Extract<ChatTurn, { type: 'sub_agent_banner' }> = {
       type: 'sub_agent_banner',
       child_instance_id: 'too-deep-1',
@@ -234,7 +234,7 @@ describe('SubAgentBanner — double-click to Agent Monitor (F-140)', () => {
     expect(open).toHaveBeenCalledWith('child-1');
   });
 
-  it('invokes the "OPEN MONITOR" button when depth exceeds the inline cap', () => {
+  it('invokes the "OPEN IN NEW WINDOW" button when depth exceeds the inline cap', () => {
     const open = vi.fn();
     const grandchild: Extract<ChatTurn, { type: 'sub_agent_banner' }> = {
       type: 'sub_agent_banner',
@@ -253,10 +253,11 @@ describe('SubAgentBanner — double-click to Agent Monitor (F-140)', () => {
     ));
     fireEvent.click(getByTestId('sub-agent-banner-header-child-1'));
     const openBtn = getByTestId('sub-agent-banner-open-monitor-child-1');
-    // F-411: button label must be the sanctioned verb+noun display-caps form
-    // (voice-terminology.md §8).
-    expect(openBtn).toHaveTextContent('OPEN MONITOR');
-    expect(openBtn.textContent).not.toMatch(/Open in new window/);
+    // F-695: spec (`sub-agent-banner.md` §6) is authoritative — the button
+    // copy must be the verbatim phrase the spec sanctions, rendered in
+    // voice-terminology.md §8 display caps.
+    expect(openBtn).toHaveTextContent('OPEN IN NEW WINDOW');
+    expect(openBtn.textContent).not.toMatch(/OPEN MONITOR/);
     fireEvent.click(openBtn);
     expect(open).toHaveBeenCalledWith('child-1');
   });
