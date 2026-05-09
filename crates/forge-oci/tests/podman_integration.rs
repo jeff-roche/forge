@@ -43,15 +43,7 @@ async fn create_does_not_apply_caller_flags_as_runtime_flags() {
     // as its own `--privileged` flag, the resulting container would have
     // `HostConfig.Privileged = true`, which we explicitly check against.
     let handle = runtime
-        .create(
-            &image,
-            &[
-                "--privileged".into(),
-                "sh".into(),
-                "-c".into(),
-                "true".into(),
-            ],
-        )
+        .create(&image, &["--privileged", "sh", "-c", "true"])
         .await
         .expect("create container");
 
@@ -102,13 +94,13 @@ async fn exec_does_not_apply_caller_flags_as_runtime_flags() {
     runtime.pull(&image).await.expect("pull alpine");
 
     let handle = runtime
-        .create(&image, &["sleep".into(), "30".into()])
+        .create(&image, &["sleep", "30"])
         .await
         .expect("create container");
     runtime.start(&handle).await.expect("start container");
 
     let result = runtime
-        .exec(&handle, &["--user".into(), "root".into(), "id".into()])
+        .exec(&handle, &["--user", "root", "id"])
         .await
         .expect("exec returns even when in-container command fails");
 
@@ -145,14 +137,14 @@ async fn podman_full_lifecycle_against_alpine() {
     // Long-lived foreground process so `exec` has something to attach to.
     // `sleep 60` is plenty for the test to do its work and tear down.
     let handle = runtime
-        .create(&image, &["sleep".into(), "60".into()])
+        .create(&image, &["sleep", "60"])
         .await
         .expect("create container");
 
     runtime.start(&handle).await.expect("start container");
 
     let result = runtime
-        .exec(&handle, &["echo".into(), "hello".into()])
+        .exec(&handle, &["echo", "hello"])
         .await
         .expect("exec echo");
     assert_eq!(result.stdout, "hello\n");
