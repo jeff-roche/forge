@@ -201,7 +201,7 @@ impl Level2Session {
         limits: ContainerLimits,
     ) -> Result<Self, OciError> {
         runtime.pull(&image).await?;
-        let handle = runtime.create(&image, &Self::default_init_argv()).await?;
+        let handle = runtime.create(&image, Self::default_init_argv()).await?;
         runtime.start(&handle).await?;
         // Operator-facing notice when limits are configured but not
         // yet enforced. Until follow-up #631 lands, the container
@@ -232,14 +232,14 @@ impl Level2Session {
     /// The init argv used by [`Self::create`]. `sleep infinity` is the
     /// idiom — minimal binary surface inside the image, no daemon
     /// behaviour, exits cleanly on `podman stop`.
-    pub fn default_init_argv() -> Vec<String> {
-        vec!["sleep".to_string(), "infinity".to_string()]
+    pub fn default_init_argv() -> &'static [&'static str] {
+        &["sleep", "infinity"]
     }
 
     /// Run a single step inside the pre-warmed container and capture
     /// its result. Mirrors [`ContainerRuntime::exec`] — non-zero exits
     /// are surfaced via [`StepOutcome::exit_code`], not `Err`.
-    pub async fn exec_step(&self, argv: &[String]) -> Result<StepOutcome, OciError> {
+    pub async fn exec_step(&self, argv: &[&str]) -> Result<StepOutcome, OciError> {
         let res = self.runtime.exec(&self.handle, argv).await?;
         Ok(StepOutcome {
             exit_code: res.exit_code,
@@ -466,6 +466,10 @@ mod tests {
 
     #[async_trait]
     impl ContainerRuntime for MockRuntime {
+        async fn detect(&self) -> Result<(), OciError> {
+            self.record("detect");
+            Ok(())
+        }
         async fn pull(&self, _image: &ImageRef) -> Result<(), OciError> {
             self.record("pull");
             Ok(())
@@ -473,7 +477,7 @@ mod tests {
         async fn create(
             &self,
             _image: &ImageRef,
-            _argv: &[String],
+            _argv: &[&str],
         ) -> Result<ContainerHandle, OciError> {
             self.record("create");
             Ok(ContainerHandle::new("mock-container"))
@@ -485,7 +489,7 @@ mod tests {
         async fn exec(
             &self,
             _handle: &ContainerHandle,
-            _argv: &[String],
+            _argv: &[&str],
         ) -> Result<ExecResult, OciError> {
             self.record("exec");
             Ok(self
@@ -509,6 +513,13 @@ mod tests {
         }
         async fn stats(&self, _handle: &ContainerHandle) -> Result<Stats, OciError> {
             self.record("stats");
+            Ok(Stats {
+                cpu_percent: None,
+                memory_bytes: None,
+                pids: None,
+            })
+        }
+        fn parse_stats(&self, _raw: &[u8]) -> Result<Stats, OciError> {
             Ok(Stats {
                 cpu_percent: None,
                 memory_bytes: None,
@@ -555,10 +566,7 @@ mod tests {
             .await
             .unwrap();
         session.disable_drop_cleanup();
-        let outcome = session
-            .exec_step(&["echo".into(), "hi".into()])
-            .await
-            .unwrap();
+        let outcome = session.exec_step(&["echo", "hi"]).await.unwrap();
         assert_eq!(outcome.exit_code, Some(2));
         assert_eq!(outcome.stdout, "out\n");
         assert_eq!(outcome.stderr, "err\n");
@@ -577,7 +585,7 @@ mod tests {
             .await
             .unwrap();
         for _ in 0..3 {
-            session.exec_step(&["true".into()]).await.unwrap();
+            session.exec_step(&["true"]).await.unwrap();
         }
         session.teardown().await.unwrap();
         assert_eq!(
@@ -848,10 +856,7 @@ mod tests {
         let session = Level2Session::create(runtime, alpine(), ContainerLimits::default())
             .await
             .unwrap();
-        let outcome = session
-            .exec_step(&["echo".into(), "hello".into()])
-            .await
-            .unwrap();
+        let outcome = session.exec_step(&["echo", "hello"]).await.unwrap();
         assert_eq!(outcome.stdout, "hello\n");
         assert_eq!(outcome.exit_code, Some(0));
         session.teardown().await.unwrap();

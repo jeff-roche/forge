@@ -10,12 +10,11 @@
 //! per-line byte cap, inter-event idle timeout, and overall wall-clock budget.
 //! Any of these terminates the stream with a typed [`ChatChunk::Error`] —
 //! the SSE adapter ([`crate::sse`]) yields a typed [`crate::sse::SseError`]
-//! that this module maps onto [`StreamErrorKind`] one-for-one.
+//! that this module maps onto [`crate::StreamErrorKind`] one-for-one.
 
-use std::time::Duration;
-
+use crate::http_util::{self, HttpClientConfig};
 use crate::sse::{self, SseError, SseEvent};
-use crate::{ChatChunk, ChatRequest, Provider, StreamErrorKind};
+use crate::{ChatChunk, ChatRequest, Provider};
 use bytes::Bytes;
 use forge_core::Result;
 use futures::stream::{BoxStream, StreamExt};
@@ -27,41 +26,6 @@ pub const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 pub const DEFAULT_MAX_TOKENS: u32 = 4096;
-
-pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
-pub const DEFAULT_TCP_KEEPALIVE: Duration = Duration::from_secs(30);
-
-/// HTTP-layer timeouts applied at `reqwest::ClientBuilder` construction.
-#[derive(Debug, Clone, Copy)]
-pub struct ClientConfig {
-    pub connect_timeout: Duration,
-    pub read_timeout: Duration,
-    pub tcp_keepalive: Duration,
-}
-
-impl ClientConfig {
-    pub const DEFAULT: ClientConfig = ClientConfig {
-        connect_timeout: DEFAULT_CONNECT_TIMEOUT,
-        read_timeout: DEFAULT_READ_TIMEOUT,
-        tcp_keepalive: DEFAULT_TCP_KEEPALIVE,
-    };
-}
-
-impl Default for ClientConfig {
-    fn default() -> Self {
-        Self::DEFAULT
-    }
-}
-
-fn build_stream_client(cfg: &ClientConfig) -> reqwest::Client {
-    reqwest::Client::builder()
-        .connect_timeout(cfg.connect_timeout)
-        .read_timeout(cfg.read_timeout)
-        .tcp_keepalive(Some(cfg.tcp_keepalive))
-        .build()
-        .expect("reqwest stream client builder — only fails if no TLS backend is available")
-}
 
 pub struct AnthropicProvider {
     base_url: String,
@@ -84,7 +48,7 @@ impl AnthropicProvider {
             api_key: api_key.into(),
             model: model.into(),
             max_tokens,
-            stream_client: build_stream_client(&ClientConfig::DEFAULT),
+            stream_client: http_util::build_stream_client(&HttpClientConfig::DEFAULT),
             stream_cfg: sse::StreamConfig::DEFAULT,
         }
     }
@@ -132,7 +96,7 @@ impl Provider for AnthropicProvider {
                 let body = resp.text().await.unwrap_or_default();
                 return Err(anyhow::anyhow!(
                     "anthropic chat HTTP {status}: {}",
-                    truncate(&body, 500)
+                    http_util::truncate(&body, 500)
                 )
                 .into());
             }
@@ -170,37 +134,13 @@ where
         let chunks = match item {
             Ok(ev) => acc.consume(&ev),
             Err(e) => vec![ChatChunk::Error {
-                kind: map_sse_error(&e),
+                kind: http_util::map_sse_error(&e),
                 message: e.to_string(),
             }],
         };
         futures::stream::iter(chunks)
     });
     Box::pin(stream.fuse())
-}
-
-fn map_sse_error(e: &SseError) -> StreamErrorKind {
-    match e {
-        SseError::LineTooLong => StreamErrorKind::LineTooLong,
-        SseError::IdleTimeout => StreamErrorKind::IdleTimeout,
-        SseError::WallClockTimeout => StreamErrorKind::WallClockTimeout,
-        SseError::Transport(_) => StreamErrorKind::Transport,
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        // Walk char boundaries so we never split a multi-byte codepoint.
-        let cut = s
-            .char_indices()
-            .take_while(|(i, _)| *i < max)
-            .last()
-            .map(|(i, c)| i + c.len_utf8())
-            .unwrap_or(0);
-        format!("{}…", &s[..cut])
-    }
 }
 
 #[cfg(test)]
@@ -219,38 +159,5 @@ mod tests {
     #[test]
     fn anthropic_version_pinned() {
         assert_eq!(ANTHROPIC_VERSION, "2023-06-01");
-    }
-
-    #[test]
-    fn truncate_does_not_panic_on_utf8_boundary() {
-        // 'é' is two UTF-8 bytes; byte index 2 falls inside the codepoint, so a
-        // naive `&s[..2]` slice panics. Should produce a valid prefix.
-        let s = "héllo";
-        let _ = truncate(s, 2);
-    }
-
-    #[test]
-    fn truncate_short_input_returns_as_is() {
-        assert_eq!(truncate("hi", 100), "hi");
-    }
-
-    #[test]
-    fn map_sse_error_covers_all_variants() {
-        assert_eq!(
-            map_sse_error(&SseError::LineTooLong),
-            StreamErrorKind::LineTooLong
-        );
-        assert_eq!(
-            map_sse_error(&SseError::IdleTimeout),
-            StreamErrorKind::IdleTimeout
-        );
-        assert_eq!(
-            map_sse_error(&SseError::WallClockTimeout),
-            StreamErrorKind::WallClockTimeout
-        );
-        assert_eq!(
-            map_sse_error(&SseError::Transport("x".into())),
-            StreamErrorKind::Transport
-        );
     }
 }
