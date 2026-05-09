@@ -1480,6 +1480,7 @@ mod tests {
             &self,
             _image: &OciImageRef,
             _argv: &[&str],
+            _opts: &forge_oci::SecurityOpts,
         ) -> Result<OciContainerHandle, OciError> {
             self.record("create");
             Ok(OciContainerHandle::new("c-id"))
