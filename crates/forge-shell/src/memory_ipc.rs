@@ -233,15 +233,27 @@ pub async fn list_agent_memory<R: Runtime>(
         crate::ipc::resolve_workspace_root_for_command(webview.label(), &workspace_root, &state)
             .await?;
     let user_home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
-    let defs = forge_agents::load_agents(&workspace_path, &user_home)
-        .map_err(|e| format!("load agents: {e}"))?;
+    let defs = forge_agents::load_agents(&workspace_path, &user_home).map_err(|e| {
+        tracing::warn!(
+            target: "forge_shell::memory",
+            error = %e,
+            "list_agent_memory failed loading agents",
+        );
+        format!("load agents: {e}")
+    })?;
 
     // Use the test-overridable user config dir so integration tests can
     // redirect the memory root the way ipc_settings.rs redirects settings.
     let user_dir = crate::ipc::resolve_user_config_dir(&state);
     let store = match user_dir.as_deref() {
         Some(dir) => MemoryStore::new(dir),
-        None => return Err("could not resolve user config directory".to_string()),
+        None => {
+            tracing::warn!(
+                target: "forge_shell::memory",
+                "list_agent_memory failed: could not resolve user config directory",
+            );
+            return Err("could not resolve user config directory".to_string());
+        }
     };
 
     // Settings overlay (F-602): the user's `[memory.enabled.<agent>]` map
@@ -249,10 +261,23 @@ pub async fn list_agent_memory<R: Runtime>(
     // when the settings file is absent or carries no `[memory]` section.
     let settings = forge_core::settings::load_merged_in(user_dir.as_deref(), &workspace_path)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            tracing::warn!(
+                target: "forge_shell::memory",
+                error = %e,
+                "list_agent_memory failed loading settings",
+            );
+            e.to_string()
+        })?;
     let overrides = settings.memory.enabled.clone();
 
-    Ok(build_agent_memory_entries(&store, &defs, &overrides))
+    let entries = build_agent_memory_entries(&store, &defs, &overrides);
+    tracing::trace!(
+        target: "forge_shell::memory",
+        count = entries.len(),
+        "list_agent_memory ok",
+    );
+    Ok(entries)
 }
 
 #[cfg(feature = "webview")]
@@ -268,13 +293,43 @@ pub async fn read_agent_memory<R: Runtime>(
     let user_dir = crate::ipc::resolve_user_config_dir(&state);
     let store = match user_dir.as_deref() {
         Some(dir) => MemoryStore::new(dir),
-        None => return Err("could not resolve user config directory".to_string()),
+        None => {
+            tracing::warn!(
+                target: "forge_shell::memory",
+                agent_id = %agent_id,
+                "read_agent_memory failed: could not resolve user config directory",
+            );
+            return Err("could not resolve user config directory".to_string());
+        }
     };
 
     match store.load(&agent_id) {
-        Ok(Some(memory)) => Ok(memory.body),
-        Ok(None) => Ok(String::new()),
-        Err(e) => Err(format!("read_agent_memory: {e}")),
+        Ok(Some(memory)) => {
+            tracing::trace!(
+                target: "forge_shell::memory",
+                agent_id = %agent_id,
+                bytes = memory.body.len(),
+                "read_agent_memory ok",
+            );
+            Ok(memory.body)
+        }
+        Ok(None) => {
+            tracing::trace!(
+                target: "forge_shell::memory",
+                agent_id = %agent_id,
+                "read_agent_memory ok (absent)",
+            );
+            Ok(String::new())
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "forge_shell::memory",
+                agent_id = %agent_id,
+                error = %e,
+                "read_agent_memory failed",
+            );
+            Err(format!("read_agent_memory: {e}"))
+        }
     }
 }
 
@@ -293,13 +348,35 @@ pub async fn save_agent_memory<R: Runtime>(
     let user_dir = crate::ipc::resolve_user_config_dir(&state);
     let store = match user_dir.as_deref() {
         Some(dir) => MemoryStore::new(dir),
-        None => return Err("could not resolve user config directory".to_string()),
+        None => {
+            tracing::warn!(
+                target: "forge_shell::memory",
+                agent_id = %agent_id,
+                "save_agent_memory failed: could not resolve user config directory",
+            );
+            return Err("could not resolve user config directory".to_string());
+        }
     };
 
     let memory = store
         .write(&agent_id, &body, WriteMode::Replace)
-        .map_err(|e| format!("save_agent_memory: {e}"))?;
+        .map_err(|e| {
+            tracing::warn!(
+                target: "forge_shell::memory",
+                agent_id = %agent_id,
+                error = %e,
+                "save_agent_memory failed",
+            );
+            format!("save_agent_memory: {e}")
+        })?;
 
+    tracing::trace!(
+        target: "forge_shell::memory",
+        agent_id = %agent_id,
+        version = memory.frontmatter.version,
+        bytes = body.len(),
+        "save_agent_memory ok",
+    );
     Ok(AgentMemorySavedDto {
         version: memory.frontmatter.version,
         updated_at: memory.frontmatter.updated_at,
@@ -319,7 +396,14 @@ pub async fn clear_agent_memory<R: Runtime>(
     let user_dir = crate::ipc::resolve_user_config_dir(&state);
     let store = match user_dir.as_deref() {
         Some(dir) => MemoryStore::new(dir),
-        None => return Err("could not resolve user config directory".to_string()),
+        None => {
+            tracing::warn!(
+                target: "forge_shell::memory",
+                agent_id = %agent_id,
+                "clear_agent_memory failed: could not resolve user config directory",
+            );
+            return Err("could not resolve user config directory".to_string());
+        }
     };
 
     // Idempotent: the file may not exist yet (the agent never wrote, the
@@ -328,7 +412,20 @@ pub async fn clear_agent_memory<R: Runtime>(
     // creates a fresh file.
     store
         .write(&agent_id, "", WriteMode::Replace)
-        .map_err(|e| format!("clear_agent_memory: {e}"))?;
+        .map_err(|e| {
+            tracing::warn!(
+                target: "forge_shell::memory",
+                agent_id = %agent_id,
+                error = %e,
+                "clear_agent_memory failed",
+            );
+            format!("clear_agent_memory: {e}")
+        })?;
+    tracing::trace!(
+        target: "forge_shell::memory",
+        agent_id = %agent_id,
+        "clear_agent_memory ok",
+    );
     Ok(())
 }
 

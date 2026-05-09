@@ -64,8 +64,6 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "webview")]
 use tauri::{AppHandle, Emitter, Manager, Runtime, State, Webview};
 use tokio::sync::RwLock;
-#[allow(unused_imports)]
-use tracing;
 
 /// Per-field byte cap on the inbound `container_id` argument. Podman
 /// container IDs are 64 hex chars; 256 bytes is a generous cap that
@@ -304,7 +302,20 @@ pub async fn detect_container_runtime<R: Runtime>(
 ) -> Result<RuntimeStatus, String> {
     crate::ipc::require_window_label(&webview, CONTAINERS_OWNER_LABEL, "detect_container_runtime")?;
     let runtime = PodmanRuntime::new();
-    Ok(classify_runtime_status(runtime.detect().await))
+    let status = classify_runtime_status(runtime.detect().await);
+    if status.is_unavailable() {
+        tracing::warn!(
+            target: "forge_shell::containers",
+            status = ?status,
+            "detect_container_runtime reported runtime unavailable",
+        );
+    } else {
+        tracing::trace!(
+            target: "forge_shell::containers",
+            "detect_container_runtime probed runtime available",
+        );
+    }
+    Ok(status)
 }
 
 #[cfg(feature = "webview")]
@@ -330,9 +341,22 @@ pub async fn stop_container<R: Runtime>(
 
     let runtime = PodmanRuntime::new();
     let handle = ContainerHandle::new(&container_id);
-    runtime.stop(&handle).await.map_err(|e| e.to_string())?;
+    runtime.stop(&handle).await.map_err(|e| {
+        tracing::warn!(
+            target: "forge_shell::containers",
+            container_id = %container_id,
+            error = %e,
+            "stop_container failed",
+        );
+        e.to_string()
+    })?;
     registry.mark_stopped(&container_id).await;
     let _ = app.emit(CONTAINERS_CHANGED_EVENT, &container_id);
+    tracing::trace!(
+        target: "forge_shell::containers",
+        container_id = %container_id,
+        "stop_container ok",
+    );
     Ok(())
 }
 
@@ -349,9 +373,22 @@ pub async fn remove_container<R: Runtime>(
 
     let runtime = PodmanRuntime::new();
     let handle = ContainerHandle::new(&container_id);
-    runtime.remove(&handle).await.map_err(|e| e.to_string())?;
+    runtime.remove(&handle).await.map_err(|e| {
+        tracing::warn!(
+            target: "forge_shell::containers",
+            container_id = %container_id,
+            error = %e,
+            "remove_container failed",
+        );
+        e.to_string()
+    })?;
     registry.unregister(&container_id).await;
     let _ = app.emit(CONTAINERS_CHANGED_EVENT, &container_id);
+    tracing::trace!(
+        target: "forge_shell::containers",
+        container_id = %container_id,
+        "remove_container ok",
+    );
     Ok(())
 }
 
@@ -369,10 +406,26 @@ pub async fn container_logs<R: Runtime>(
     let tail = tail.map(|n| n.min(MAX_LOG_TAIL));
     let runtime = PodmanRuntime::new();
     let handle = ContainerHandle::new(&container_id);
-    runtime
-        .logs(&handle, since.as_deref(), tail)
-        .await
-        .map_err(|e| e.to_string())
+    match runtime.logs(&handle, since.as_deref(), tail).await {
+        Ok(lines) => {
+            tracing::trace!(
+                target: "forge_shell::containers",
+                container_id = %container_id,
+                lines = lines.len(),
+                "container_logs ok",
+            );
+            Ok(lines)
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "forge_shell::containers",
+                container_id = %container_id,
+                error = %e,
+                "container_logs failed",
+            );
+            Err(e.to_string())
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -83,7 +83,13 @@ pub async fn usage_summary<R: Runtime>(
     let usage_dir = match resolve_usage_dir() {
         Some(d) => d,
         // No platform config dir: return an empty summary rather than crash.
-        None => return Ok(summarize(&[], range, group_by, None, chrono::Utc::now())),
+        None => {
+            tracing::warn!(
+                target: "forge_shell::usage",
+                "usage_summary could not resolve usage dir; returning empty summary",
+            );
+            return Ok(summarize(&[], range, group_by, None, chrono::Utc::now()));
+        }
     };
 
     let monthly_files = read_all_monthly_files(&usage_dir).await;
@@ -94,13 +100,21 @@ pub async fn usage_summary<R: Runtime>(
         workspace_root.map(WorkspaceId::from_string)
     };
 
-    Ok(summarize(
+    let summary = summarize(
         &monthly_files,
         range,
         group_by,
         workspace_filter.as_ref(),
         chrono::Utc::now(),
-    ))
+    );
+    tracing::trace!(
+        target: "forge_shell::usage",
+        cross_workspace = cross_workspace,
+        files = monthly_files.len(),
+        breakdown_rows = summary.breakdown.len(),
+        "usage_summary ok",
+    );
+    Ok(summary)
 }
 
 #[cfg(test)]
