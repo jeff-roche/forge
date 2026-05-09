@@ -85,6 +85,22 @@ afterEach(() => {
 });
 
 describe('ProvidersSection (F-586)', () => {
+  it('renders a skeleton loading state during the IPC fetch (F-684)', async () => {
+    // Pending forever — the resource never settles, so the snapshot stays in
+    // its `loading` branch.
+    invokeMock.mockImplementation(() => new Promise(() => undefined));
+    const { findByTestId, queryByText } = render(() => <ProvidersSection />);
+
+    const skeleton = await findByTestId('providers-loading');
+    expect(skeleton.getAttribute('role')).toBe('status');
+    expect(skeleton.getAttribute('aria-busy')).toBe('true');
+    // Plain-text "providers · probing" copy must be gone — replaced by
+    // a card-shaped skeleton matching the live grid layout.
+    expect(queryByText(/providers · probing/i)).toBeFalsy();
+    // The skeleton renders one placeholder per expected card slot.
+    expect(skeleton.querySelectorAll('.forge-skeleton--card').length).toBe(4);
+  });
+
   it('renders a card per provider returned by list_providers', async () => {
     setupInvokeMock();
     const { findAllByRole } = render(() => <ProvidersSection />);
@@ -272,6 +288,43 @@ describe('ProvidersSection (F-586)', () => {
     fireEvent.click(openaiAfter);
     await waitForFetch();
     expect(setActiveCallCount).toBe(2);
+  });
+
+  describe('voice & terminology (F-690)', () => {
+    it('renders "unconfigured" not "no model" when a provider has no model_available', async () => {
+      setupInvokeMock();
+      const { findAllByRole } = render(() => <ProvidersSection />);
+      await waitForFetch();
+
+      const radios = await findAllByRole('radio');
+      const anthropic = radios.find((r) => r.textContent?.includes('Anthropic'))!;
+      expect(anthropic.textContent).toContain('unconfigured');
+      expect(anthropic.textContent).not.toMatch(/no model/i);
+    });
+
+    it('renders "ready" not "model ready" when model_available is true with no model name', async () => {
+      setupInvokeMock({
+        entries: [sample({ id: 'ollama', display_name: 'Ollama', model_available: true })],
+      });
+      const { findAllByRole } = render(() => <ProvidersSection />);
+      await waitForFetch();
+
+      const radios = await findAllByRole('radio');
+      expect(radios[0]?.textContent).toContain('ready');
+      expect(radios[0]?.textContent).not.toMatch(/model ready/i);
+    });
+
+    it('aria-label uses provider terminology, never "model"', async () => {
+      setupInvokeMock();
+      const { findAllByRole } = render(() => <ProvidersSection />);
+      await waitForFetch();
+
+      const radios = await findAllByRole('radio');
+      const anthropic = radios.find((r) => r.textContent?.includes('Anthropic'))!;
+      const label = anthropic.getAttribute('aria-label') ?? '';
+      expect(label).not.toMatch(/model/i);
+      expect(label.toLowerCase()).toContain('unconfigured');
+    });
   });
 
   it('marks the pending card with aria-busy while the IPC is in flight', async () => {

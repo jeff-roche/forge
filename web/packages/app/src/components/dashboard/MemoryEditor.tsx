@@ -69,7 +69,11 @@ type IframeMessage =
   | { kind: 'opened'; uri: string }
   | { kind: 'closed'; uri: string }
   | { kind: 'save'; uri: string; value: string }
-  | { kind: 'change'; uri: string; value: string };
+  | { kind: 'change'; uri: string; value: string }
+  // F-687: keystrokes that fire inside the iframe never bubble to the
+  // parent's window-level `keydown` handler, so the host forwards them
+  // here. Only `Escape` is acted on today; other keys are ignored.
+  | { kind: 'keydown'; key: string };
 
 const MEMORY_URI = 'memory://buffer';
 
@@ -148,6 +152,13 @@ export const MemoryEditor: Component<MemoryEditorProps> = (props) => {
           if (data.uri !== MEMORY_URI) return;
           setBody(data.value);
           void persist(data.value);
+          break;
+        case 'keydown':
+          // F-687: WCAG 2.1.1 — keyboard-only users must be able to dismiss
+          // the modal even when focus is trapped inside the Monaco iframe.
+          // The iframe forwards the keystroke; we mirror the same Escape
+          // behavior the parent's window-level handler implements.
+          if (data.key === 'Escape') props.onClose();
           break;
         default:
           break;

@@ -1,5 +1,5 @@
 import { createResource, createSignal, For, Show, type Component } from 'solid-js';
-import { Tab, Tabs } from '@forge/design';
+import { Skeleton, Tab, Tabs } from '@forge/design';
 import {
   getActiveProvider,
   listProviders,
@@ -78,7 +78,13 @@ export const ProvidersSection: Component = () => {
       </header>
 
       <Show when={snapshot.loading}>
-        <p class="providers__loading">providers · probing</p>
+        <Skeleton
+          variant="card"
+          count={4}
+          label="Loading providers"
+          class="providers__skeleton"
+          data-testid="providers-loading"
+        />
       </Show>
 
       <Show when={errorDetail()}>
@@ -138,7 +144,7 @@ const ProviderCard: Component<ProviderCardProps> = (props) => {
   const ariaLabel = () => {
     const parts = [`Select ${props.entry.display_name}`];
     if (credentialNeeded()) parts.push('credential missing');
-    if (!props.entry.model_available) parts.push('no model configured');
+    if (!props.entry.model_available) parts.push('unconfigured');
     if (props.pending) parts.push('switching');
     return parts.join(', ');
   };
@@ -173,10 +179,10 @@ const ProviderCard: Component<ProviderCardProps> = (props) => {
 const ModelHint: Component<{ entry: ProviderEntry }> = (props) => (
   <Show
     when={props.entry.model_available}
-    fallback={<span class="provider-card__hint provider-card__hint--missing">no model</span>}
+    fallback={<span class="provider-card__hint provider-card__hint--missing">unconfigured</span>}
   >
     <span class="provider-card__hint">
-      {props.entry.model ?? 'model ready'}
+      {props.entry.model ?? 'ready'}
     </span>
   </Show>
 );

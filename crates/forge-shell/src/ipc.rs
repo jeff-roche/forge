@@ -19,6 +19,37 @@
 //! Solid store. The per-sink `session_id` is bound at construction in
 //! `session_subscribe` (already label-authenticated), not re-read from the
 //! event payload.
+//!
+//! ## Authorization pattern (canonical)
+//!
+//! Every Tauri command in the forge-shell crate gates its body on the
+//! calling webview's label. There are exactly two helpers — pick the one
+//! that matches the command's scope and use no other shape:
+//!
+//! 1. `require_window_label` — strict, single-label match. Use when the
+//!    command is bound to one specific window:
+//!    - dashboard-only: `require_window_label(&webview, "dashboard", "<cmd>")`
+//!    - session-bound: `require_window_label(&webview, &format!("session-{id}"), "<cmd>")`
+//!
+//! 2. `require_window_label_in` — permissive, allow-list + optional
+//!    session-window admission. Use when the command's artifact is not
+//!    bound to a single window (workspace-level, user-level, or shared
+//!    between dashboard and any session):
+//!    - dashboard-or-any-session: `require_window_label_in(&webview, &["dashboard"], true, "<cmd>")`
+//!    - any session window only:  `require_window_label_in(&webview, &[], true, "<cmd>")`
+//!
+//! The third boolean argument `allow_any_session` is load-bearing: `false`
+//! restricts the gate to labels listed in `exact`; `true` additionally
+//! admits any `session-*` label without binding to a specific session id.
+//! For dashboard-only commands prefer `require_window_label` over
+//! `require_window_label_in(&webview, &["dashboard"], false, ...)` — both
+//! are functionally equivalent, but the strict helper makes the single-label
+//! intent obvious at the call site.
+//!
+//! Both helpers emit a structured `tracing::warn!` on rejection with target
+//! `forge_shell::ipc::authz` and fields `actual`, `expected` / `allowed`,
+//! `command`. The success path is silent. See `tests/ipc_authz_tracing.rs`
+//! for the schema contract.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -66,13 +97,13 @@ fn authz_check(label: &str, expected: &str, command: &'static str) -> Result<(),
 fn authz_check_in(
     label: &str,
     exact: &[&str],
-    allow_session_prefix: bool,
+    allow_any_session: bool,
     command: &'static str,
 ) -> Result<(), String> {
     if exact.contains(&label) {
         return Ok(());
     }
-    if allow_session_prefix && label.starts_with("session-") {
+    if allow_any_session && label.starts_with("session-") {
         return Ok(());
     }
     tracing::warn!(
@@ -96,10 +127,10 @@ pub fn require_window_label_for_test(
 pub fn require_window_label_in_for_test(
     actual: &str,
     exact: &[&str],
-    allow_session_prefix: bool,
+    allow_any_session: bool,
     command: &'static str,
 ) -> Result<(), String> {
-    authz_check_in(actual, exact, allow_session_prefix, command)
+    authz_check_in(actual, exact, allow_any_session, command)
 }
 
 /// F-068 / L4 (T7): per-field byte caps on untyped-string inputs to session
@@ -123,6 +154,15 @@ pub(crate) const MAX_REJECT_REASON_BYTES: usize = 1024;
 /// hex is 16 chars; 64 bytes leaves room for the wrapper/URL-safe variants
 /// without permitting unbounded growth if a compromised webview lies.
 pub(crate) const MAX_MESSAGE_ID_BYTES: usize = 64;
+
+/// F-675: canonical cap on every `provider_id` accepted by an IPC command.
+/// Slugs are short ASCII (`anthropic`, `openai`, `ollama`); 128 bytes is the
+/// generous upper bound that still admits the longest realistic
+/// `custom_openai:<name>` form while rejecting hostile renderers driving
+/// megabyte calls. Defined here — and only here — so the credentials and
+/// providers IPC surfaces share one cap and a slug accepted by one command
+/// is never silently rejected by another.
+pub(crate) const MAX_PROVIDER_ID_BYTES: usize = 128;
 
 /// F-036 / F-068 (L4 / T7): caps on untyped-string inputs to the persistent
 /// approval commands. `workspace_root` is an absolute filesystem path — 4096
@@ -173,6 +213,36 @@ pub(crate) fn require_window_label<R: Runtime>(
 /// about cap values) and before any bridge call (so the allocation/wire cost
 /// never materializes). Returns `Err` with a stable marker that tests and
 /// any UI-side handling can pattern-match on.
+///
+/// # Canonical validation entry point (F-674)
+///
+/// `require_size` is the **single** validation helper for every untyped
+/// string flowing across the Tauri IPC boundary — required *and* optional.
+/// New `#[tauri::command]` bodies in any `*_ipc.rs` module MUST funnel
+/// inbound `String` / `Option<String>` arguments through this helper
+/// (directly or via a thin pure helper that wraps it) instead of inlining
+/// `if value.len() > MAX { ... }` length checks.
+///
+/// The rule exists for three reasons:
+///
+/// 1. **One error shape.** Every oversize rejection emits the
+///    [`payload_too_large`] marker, so the UI layer pattern-matches a single
+///    prefix and tests assert against one stable fragment.
+/// 2. **No drift between modules.** Cross-PR additions to the IPC surface
+///    have produced two competing patterns (idiomatic `require_size` vs
+///    inline `if .. > MAX { return Err(format!(..)) }`); the latter
+///    duplicates the cap constant in the message and silently diverges as
+///    the constant evolves. Standardizing closes that drift.
+/// 3. **Optional inputs are the easy case to forget.** `Option<String>`
+///    fields skip validation entirely if the author doesn't remember to
+///    `.as_deref()` first; centralizing the helper makes the pattern
+///    `if let Some(s) = field.as_deref() { require_size(..) }` a copy-paste
+///    template that's hard to get wrong.
+///
+/// Pure validators (`validate_optional_since`, `validate_optional_workspace_root`,
+/// etc.) that wrap `require_size` are encouraged — they keep the
+/// `#[tauri::command]` body terse and give unit tests a Tauri-runtime-free
+/// entry point.
 pub(crate) fn require_size(field: &str, value: &str, limit_bytes: usize) -> Result<(), String> {
     if value.len() <= limit_bytes {
         Ok(())
@@ -578,8 +648,8 @@ pub fn build_invoke_handler<R: Runtime>() -> Box<dyn Fn(tauri::ipc::Invoke<R>) -
         context_fetch_url,
         set_context_allowed_hosts,
         // F-587: per-provider credential management. Dashboard-scoped — the
-        // `authz_check` inside each command rejects any window label other
-        // than `dashboard`.
+        // `require_window_label` gate inside each command rejects any window
+        // label other than `dashboard`.
         crate::credentials_ipc::login_provider,
         crate::credentials_ipc::logout_provider,
         crate::credentials_ipc::has_credential,
@@ -602,7 +672,7 @@ pub fn build_invoke_handler<R: Runtime>() -> Box<dyn Fn(tauri::ipc::Invoke<R>) -
         crate::containers_ipc::remove_container,
         crate::containers_ipc::container_logs,
         // F-602: Dashboard Memory section commands. Dashboard-scoped — the
-        // `require_window_label_in` inside each rejects every window label
+        // `require_window_label` gate inside each rejects every window label
         // other than `dashboard`.
         crate::memory_ipc::list_agent_memory,
         crate::memory_ipc::read_agent_memory,
@@ -1008,19 +1078,28 @@ fn upsert_entry(cfg: &mut ApprovalConfig, entry: ApprovalEntry) {
     }
 }
 
-/// Lightweight window-label gate that allows either the dashboard or any
-/// session window (`session-*` prefix) to invoke a command. Used by the F-036
-/// approval commands which are user-scoped, not per-session, but should still
-/// be unreachable from other surfaces. Keeping this as a separate helper from
-/// [`require_window_label`] preserves that helper's strict single-label
-/// semantics for F-051.
+/// Lightweight window-label gate that admits any caller in `exact` and,
+/// when `allow_any_session` is set, any `session-*` window. Used by surfaces
+/// that are not bound to a single session (e.g. the F-036 approval commands,
+/// the F-082 layouts read/write, the F-155 catalog roster commands), but
+/// must still be unreachable from arbitrary webviews.
+///
+/// `allow_any_session` is **load-bearing**: `false` restricts the gate to
+/// the labels listed in `exact` (typical: `&["dashboard"]` for dashboard-only
+/// commands). `true` additionally admits every `session-*` label without
+/// binding to a specific session id — used when the artifact is workspace-
+/// or user-level rather than per-session, and a session window has a
+/// legitimate need to read/write it.
+///
+/// Keeping this as a separate helper from [`require_window_label`] preserves
+/// that helper's strict single-label semantics for F-051.
 pub(crate) fn require_window_label_in<R: Runtime>(
     webview: &Webview<R>,
     exact: &[&str],
-    allow_session_prefix: bool,
+    allow_any_session: bool,
     command: &'static str,
 ) -> Result<(), String> {
-    authz_check_in(webview.label(), exact, allow_session_prefix, command)
+    authz_check_in(webview.label(), exact, allow_any_session, command)
 }
 
 // ---------------------------------------------------------------------------
@@ -3387,9 +3466,6 @@ fn validate_roster_scope(scope: &forge_core::RosterScope) -> Result<(), String> 
         }
     }
 }
-
-// Reuse the F-587 cap for embedded id payloads.
-use crate::credentials_ipc::MAX_PROVIDER_ID_BYTES;
 
 /// F-591: load every workspace + user-home skill and tag each as a session-
 /// wide roster entry.

@@ -112,6 +112,7 @@ fn fixture_hello(instance_id: &AgentInstanceId) -> SidecarHello {
         },
         sandbox_level: SidecarSandboxLevel::Level1,
         telemetry_endpoint: None,
+        schema_version: forge_ipc::sidecar::SIDECAR_SCHEMA_VERSION,
     }
 }
 

@@ -15,7 +15,9 @@ import {
   Show,
   type Component,
 } from 'solid-js';
+import { Button } from '@forge/design';
 import type { GroupBy, UsageRange } from '@forge/ipc';
+import { Skeleton } from '@forge/design';
 import {
   fetchUsageSummary,
   type UsageBreakdownView,
@@ -151,14 +153,14 @@ export const UsagePane: Component<UsagePaneProps> = (props) => {
         >
           <For each={RANGE_OPTIONS}>
             {(opt) => (
-              <button
-                type="button"
-                class="usage-pane__range"
+              <Button
+                variant="ghost"
+                size="sm"
                 aria-pressed={rangeKey() === opt.key}
                 onClick={() => setRangeKey(opt.key)}
               >
                 {opt.label}
-              </button>
+              </Button>
             )}
           </For>
         </div>
@@ -173,7 +175,20 @@ export const UsagePane: Component<UsagePaneProps> = (props) => {
       </header>
 
       <Show when={data.loading}>
-        <p class="usage-pane__loading">usage · probing</p>
+        <div class="usage-pane__skeletons" data-testid="usage-loading">
+          <Skeleton
+            variant="block"
+            count={1}
+            label="Loading usage chart"
+            class="usage-pane__skeleton-chart"
+          />
+          <Skeleton
+            variant="block"
+            count={3}
+            label="Loading usage tables"
+            class="usage-pane__skeleton-rows"
+          />
+        </div>
       </Show>
 
       <Show when={errorDetail()}>
@@ -181,13 +196,13 @@ export const UsagePane: Component<UsagePaneProps> = (props) => {
           <div class="usage-pane__error" role="alert">
             <p class="usage-pane__error-title">USAGE UNAVAILABLE</p>
             <p class="usage-pane__error-detail">{detail()}</p>
-            <button
-              type="button"
-              class="usage-pane__range"
+            <Button
+              variant="primary"
+              size="sm"
               onClick={() => void refetch()}
             >
               Retry
-            </button>
+            </Button>
           </div>
         )}
       </Show>

@@ -141,6 +141,12 @@ async fn build_agent_runtime(workspace_path: Option<&Path>) -> Option<AgentRunti
         orchestrator,
         agent_defs: Arc::new(defs),
         parent_instance_id: root_instance.id,
+        // F-663: the synthesized session-root agent declares no scope, so
+        // tool dispatch falls back to the session's workspace-derived
+        // `allowed_paths`. A future change that wires per-spawned-agent
+        // dispatch would override this per-call from the active child's
+        // `AgentDef.allowed_paths`.
+        def_allowed_paths: Vec::new(),
     })
 }
 
@@ -1246,6 +1252,13 @@ async fn handle_connection<P: Provider + 'static>(
     if hello.proto != PROTO_VERSION {
         anyhow::bail!("unsupported protocol version: {}", hello.proto);
     }
+    // F-678: bidirectional schema-version validation. The shell reports
+    // its `schema_version` in the `Hello` frame; if it diverges from the
+    // daemon's `SCHEMA_VERSION`, log a warn so a version-skewed peer
+    // surfaces in operator logs rather than failing later through
+    // opaque serde drift. Non-fatal today; a future
+    // `strict_schema_version` toggle can elevate to error.
+    forge_ipc::warn_if_schema_mismatch("shell", hello.schema_version, SCHEMA_VERSION);
 
     let ack = IpcMessage::HelloAck(HelloAck {
         session_id: (*session_id).clone(),

@@ -17,7 +17,7 @@ import {
   Show,
   type Component,
 } from 'solid-js';
-import { Tab, Tabs } from '@forge/design';
+import { Skeleton, Tab, Tabs } from '@forge/design';
 import type { RosterEntry, ScopedRosterEntry } from '@forge/ipc';
 import {
   listAgents,
@@ -324,7 +324,13 @@ export const CatalogPane: Component<CatalogPaneProps> = (props) => {
                 aria-labelledby={`catalog-tab-${kind.id}`}
               >
                 <Show when={resource.loading}>
-                  <p class="catalog__loading">{kind.label} · loading</p>
+                  <Skeleton
+                    variant="block"
+                    count={4}
+                    label={`Loading ${kind.label.toLowerCase()}`}
+                    class="catalog__skeleton"
+                    data-testid={`catalog-loading-${kind.id}`}
+                  />
                 </Show>
 
                 <Show when={errorDetail()}>

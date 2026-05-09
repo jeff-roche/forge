@@ -1,3 +1,4 @@
+#![allow(deprecated)] // F-652: tests/benches still drive the deprecated bare read_frame helpers.
 /// Integration test: Mock provider scripts an fs.read tool call against a real
 /// temp file. Verifies ToolCallCompleted.result contains content, bytes, sha256.
 use forge_core::Event;
@@ -32,6 +33,7 @@ async fn do_handshake(stream: &mut UnixStream) {
             pid: std::process::id(),
             user: "tester".into(),
         },
+        schema_version: forge_ipc::SCHEMA_VERSION,
     });
     forge_ipc::write_frame(stream, &hello).await.unwrap();
     let response = forge_ipc::read_frame(stream).await.unwrap();

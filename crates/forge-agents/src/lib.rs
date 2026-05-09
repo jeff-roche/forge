@@ -25,10 +25,11 @@ use std::{fs, path::Path};
 /// hostile or accidentally oversized file.
 pub const AGENTS_MD_SIZE_CAP: u64 = 256 * 1024; // 256 KiB
 
-pub use def::{AgentDef, Isolation};
+pub use def::{validate_agent_name, AgentDef, Isolation, MAX_AGENT_NAME_BYTES};
 pub use error::{Error, Result};
 pub use memory::{
-    assemble_system_prompt, Memory, MemoryFrontmatter, MemoryStore, WriteMode, MEMORY_HEADING,
+    assemble_system_prompt, Memory, MemoryFrontmatter, MemoryStore, WriteMode,
+    MEMORY_ENVELOPE_CLOSE, MEMORY_ENVELOPE_OPEN, MEMORY_HEADING, MEMORY_WRITE_CONTENT_CAP,
 };
 pub use orchestrator::{
     AgentEvent, AgentInstance, AgentScope, InitialPrompt, InstanceState, Orchestrator, SpawnContext,

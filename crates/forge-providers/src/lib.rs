@@ -12,6 +12,9 @@ use parking_lot::Mutex;
 use serde::Deserialize;
 
 pub mod anthropic;
+// F-679: shared HTTP / SSE helpers used by Anthropic and the OpenAI family.
+// Crate-private — the only consumers are sibling provider modules.
+pub(crate) mod http_util;
 pub mod ollama;
 pub mod openai;
 // F-593: static price-table parser + cost calculator. The committed
