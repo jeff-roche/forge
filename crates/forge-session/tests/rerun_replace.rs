@@ -1,3 +1,4 @@
+#![allow(deprecated)] // F-652: tests/benches still drive the deprecated bare read_frame helpers.
 //! F-143: Re-run Replace variant — truncate and regenerate.
 //!
 //! Scenario:
@@ -51,6 +52,7 @@ async fn do_handshake(stream: &mut UnixStream) {
             pid: std::process::id(),
             user: "tester".into(),
         },
+        schema_version: forge_ipc::SCHEMA_VERSION,
     });
     forge_ipc::write_frame(stream, &hello).await.unwrap();
     let response = forge_ipc::read_frame(stream).await.unwrap();

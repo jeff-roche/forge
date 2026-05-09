@@ -10,4 +10,4 @@ Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE-2.0) or [M
 
 Supply-chain scanners and suppression policy: [`docs/dev/security.md`](docs/dev/security.md).
 
-Legacy VS Code fork preserved at tag [`legacy-vscode-fork`](../../tree/legacy-vscode-fork).
+Legacy VS Code fork preserved at tag [`legacy-vscode-fork`](https://github.com/forge-ide/forge/tree/legacy-vscode-fork).

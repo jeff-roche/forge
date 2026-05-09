@@ -1,3 +1,4 @@
+#![allow(deprecated)] // F-652: tests/benches still drive the deprecated bare read_frame helpers.
 //! F-608 step 8: in-process vs sidecar per-token + cold-start bench.
 //!
 //! ## What this bench measures
@@ -293,6 +294,7 @@ fn fixture_hello(instance_id: &AgentInstanceId) -> SidecarHello {
         },
         sandbox_level: SidecarSandboxLevel::Level1,
         telemetry_endpoint: None,
+        schema_version: forge_ipc::sidecar::SIDECAR_SCHEMA_VERSION,
     }
 }
 

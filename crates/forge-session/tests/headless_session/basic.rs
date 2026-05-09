@@ -1,3 +1,4 @@
+#![allow(deprecated)] // F-652: tests/benches still drive the deprecated bare read_frame helpers.
 //! Integration test: full headless turn via UDS.
 //!
 //! Spawns `forged`, connects via Unix domain socket, sends a `SendUserMessage`,
@@ -100,6 +101,7 @@ async fn full_headless_turn_emits_correct_event_sequence() {
                 pid: std::process::id(),
                 user: "tester".into(),
             },
+            schema_version: forge_ipc::SCHEMA_VERSION,
         }),
     )
     .await

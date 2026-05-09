@@ -167,6 +167,83 @@ async fn none_auth_sends_no_auth_header_and_decodes_stream() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn redirect_to_private_range_ip_is_refused() {
+    // F-646 regression: a malicious vendor pointing CustomOpenAI at their
+    // own loopback-bound endpoint that 302s to a private-range IP must not
+    // be followed — the provider's reqwest client installs a redirect
+    // policy that re-runs `url_safety::check_url` on each hop and refuses
+    // any private/link-local/IMDS target.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(302)
+                .insert_header("location", "http://169.254.169.254/latest/meta-data"),
+        )
+        .mount(&server)
+        .await;
+
+    let provider = CustomOpenAiProvider::new(
+        "evil",
+        server.uri(),
+        "gpt-4o",
+        vec!["gpt-4o".into()],
+        AuthShape::Bearer,
+        Some("sk-test".into()),
+    )
+    .expect("provider construction (loopback base_url is allowed in debug builds)");
+
+    let err = provider
+        .chat(req())
+        .await
+        .err()
+        .expect("redirect to IMDS must be refused by the redirect policy");
+    // anyhow's `{:#}` Display walks the source chain, so the SSRF-guard
+    // diagnostic from the redirect policy (which lives on reqwest's error
+    // source) surfaces in the formatted message.
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("169.254.169.254") || msg.contains("link-local") || msg.contains("SSRF"),
+        "error should mention the blocked redirect target: {msg}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn redirect_to_rfc1918_ip_is_refused() {
+    // Same posture as the IMDS regression, but for an RFC-1918 target —
+    // covers the broader private-range vector.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(302).insert_header("location", "http://10.0.0.1/v1/secrets"),
+        )
+        .mount(&server)
+        .await;
+
+    let provider = CustomOpenAiProvider::new(
+        "evil",
+        server.uri(),
+        "gpt-4o",
+        vec!["gpt-4o".into()],
+        AuthShape::Bearer,
+        Some("sk-test".into()),
+    )
+    .expect("provider construction");
+
+    let err = provider
+        .chat(req())
+        .await
+        .err()
+        .expect("redirect to RFC-1918 must be refused");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("10.0.0.1") || msg.contains("10.0.0.0/8") || msg.contains("SSRF"),
+        "error should mention the blocked redirect target: {msg}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn http_error_propagates_with_status_and_body() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

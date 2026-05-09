@@ -66,6 +66,27 @@ The Dashboard itself has no global loading or error state — it always renders 
 - **Sessions panel — empty (archived tab):** `// archive is empty`.
 - **Sessions panel — fetch failure:** visible error block with heading `SESSIONS UNAVAILABLE`, the verbatim error detail (preserved exactly per `voice-terminology.md` §8 "show technical identifiers verbatim"), and a `RETRY` button that re-invokes `session_list`. The error state is distinct from empty — the `session_list` rejection must not collapse to `// no active sessions`.
 
+### D.5.1 Loading-state primitives (F-684)
+
+Per `docs/design/ai-patterns.md` §"Interaction states", every fetching
+surface paints a **skeleton or the streaming cursor — never plain "loading…"
+text, never a spinner**. The dashboard sections all surface multi-row /
+grid layouts, so they use skeletons (the streaming cursor is reserved for
+inline assistant output in `ChatPane`).
+
+| Section            | Choice    | Shape                                                  |
+|--------------------|-----------|--------------------------------------------------------|
+| Providers          | skeleton  | 4 card-shaped placeholders on the live `auto-fill, minmax(220px, 1fr)` grid |
+| Containers         | skeleton  | 3 row-shaped block placeholders matching the row gap   |
+| Catalog (per tab)  | skeleton  | 4 row-shaped block placeholders inside the active tab  |
+| Usage              | skeleton  | 1 chart placeholder + 3 table-row placeholders         |
+
+The shared `<Skeleton>` primitive lives in `@forge/design` (`variant`:
+`block` / `text` / `card`; `count` for stacked rows). It carries
+`role="status"` + `aria-busy="true"` + `aria-live="polite"` so screen
+readers register the load without spamming on every paint, and respects
+`prefers-reduced-motion` by suppressing the shimmer.
+
 ### D.6 Cross-spec references
 
 - `session-roster.md` *(deferred post-Phase-2)* — forward-looking spec for an in-session roster of loaded assets. No component or hosting sidebar exists in Phase 2; the Dashboard's session cards still open sessions, but those sessions do not render a roster today.

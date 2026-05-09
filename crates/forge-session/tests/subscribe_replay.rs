@@ -1,3 +1,4 @@
+#![allow(deprecated)] // F-652: tests/benches still drive the deprecated bare read_frame helpers.
 use forge_core::{types::SessionPersistence, Event};
 use forge_ipc::{ClientInfo, Hello, IpcEvent, IpcMessage, Subscribe, PROTO_VERSION};
 use forge_providers::MockProvider;
@@ -35,6 +36,7 @@ async fn do_handshake(stream: &mut UnixStream) -> u64 {
             pid: std::process::id(),
             user: "tester".into(),
         },
+        schema_version: forge_ipc::SCHEMA_VERSION,
     });
     forge_ipc::write_frame(stream, &hello).await.unwrap();
     let response = forge_ipc::read_frame(stream).await.unwrap();

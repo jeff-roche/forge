@@ -1,3 +1,34 @@
+//! Session event log types.
+//!
+//! # Timestamp field-name convention
+//!
+//! Every [`Event`] variant that carries a wall-clock timestamp uses
+//! `at: DateTime<Utc>` — that is the project-wide default and what new
+//! variants MUST adopt. Two pinned exceptions remain because the
+//! AgentMonitor webview reads them by name and the churn to rename them
+//! exceeds the benefit (F-380):
+//!
+//! | Variant                   | Field         | Why it stays specialized                                          |
+//! |---------------------------|---------------|-------------------------------------------------------------------|
+//! | [`Event::StepStarted`]    | `started_at`  | Paired with `StepFinished.duration_ms`; the frontend distinguishes step-open from other event timestamps via the field name. |
+//! | [`Event::ResourceSample`] | `sampled_at`  | Emphasizes sample-vs-emit distinction; AgentMonitor reads this field by name. |
+//!
+//! [`crate::mcp_state::McpStateEvent::at`] follows the convention — it was
+//! renamed from `ts: SystemTime` in F-380.
+//!
+//! Some variants intentionally carry no timestamp because they are strictly
+//! correlative (`BranchSelected`, `BranchDeleted`, `MessageSuperseded`,
+//! `ToolInvoked`, `ToolReturned`, `UsageTick`, …) — see the conventions doc
+//! for the full list and rationale. Adding `at` to one of these later is
+//! non-breaking; removing `at` from a stamped variant is breaking.
+//!
+//! Adding a third specialized name without prior architectural sign-off is
+//! structural drift and will be rejected in review. Pinned exceptions and
+//! their wire-shape pins are locked by
+//! `crates/forge-core/tests/event_wire_shape.rs` and
+//! `crates/forge-core/tests/event_conventions.rs`; the full convention spec
+//! is `docs/architecture/event-conventions.md`.
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -173,6 +204,19 @@ pub enum Event {
         model: String,
         tokens_in: u64,
         tokens_out: u64,
+        /// F-669: Provider-reported cost for this tick — **not authoritative**.
+        ///
+        /// Carries whatever value the provider returned at emission time
+        /// (often `0.0` when the provider doesn't surface a per-call cost).
+        /// `forge-session::usage_flush` deliberately ignores this field and
+        /// reprices every tick from the embedded `PriceTable` at flush time,
+        /// so the canonical reported cost lives on
+        /// [`crate::usage::MonthlyAggregate`] (`cost` per bucket) and on
+        /// [`crate::usage::SessionUsage`] for live readouts.
+        ///
+        /// UI surfaces may display this value for live, in-flight token
+        /// readouts, but must reconcile against `MonthlyAggregate::cost`
+        /// after flush — never cache or relay this field as billing-truth.
         cost_usd: f64,
         scope: RosterScope,
     },
@@ -181,6 +225,24 @@ pub enum Event {
         summarized_turns: u32,
         summary_msg_id: MessageId,
         trigger: CompactTrigger,
+    },
+    /// F-657: privileged compaction summary stream exceeded the configured
+    /// byte cap and was truncated. Emitted alongside the normal
+    /// [`Event::AssistantMessage`] + [`Event::ContextCompacted`] pair so a
+    /// pathological summary provider cannot silently amplify itself into a
+    /// feedback loop on subsequent auto-compactions.
+    ///
+    /// `summary_msg_id` correlates with the `summary_msg_id` in the paired
+    /// `ContextCompacted` event. `cap_bytes` is the active ceiling at the
+    /// moment of truncation; `original_bytes` is the byte count the stream
+    /// would have produced had no cap been enforced (i.e. accumulated text
+    /// length up to the point we stopped reading deltas, which is always
+    /// `>= cap_bytes`).
+    CompactionTruncated {
+        at: DateTime<Utc>,
+        summary_msg_id: MessageId,
+        cap_bytes: u64,
+        original_bytes: u64,
     },
     SessionEnded {
         at: DateTime<Utc>,

@@ -1,3 +1,4 @@
+#![allow(deprecated)] // F-652: tests/benches still drive the deprecated bare read_frame helpers.
 //! F-608 step 2 integration test: spawn the `forged-agent` binary as a
 //! child process, act as the daemon side, and drive the full lifecycle.
 //!

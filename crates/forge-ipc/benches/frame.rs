@@ -1,3 +1,4 @@
+#![allow(deprecated)] // F-652: tests/benches still drive the deprecated bare read_frame helpers.
 //! F-112: per-frame serialization bench.
 //!
 //! The DoD for F-112 requires ≥30% reduction in per-frame wall-time between
@@ -220,6 +221,7 @@ fn padded_hello(body_len: usize) -> IpcMessage {
             pid: 1,
             user: "b".to_string(),
         },
+        schema_version: forge_ipc::SCHEMA_VERSION,
     })
 }
 
