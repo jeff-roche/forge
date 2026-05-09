@@ -75,6 +75,23 @@ interface CatalogRow {
   /** Free-form metadata line: provider model, agent background flag, etc. */
   meta: string;
   scope: ScopedRosterEntry['scope'];
+  /** F-694: design-token color id when the row itself is a Provider entry. */
+  providerColor: ProviderColorId | null;
+}
+
+/**
+ * F-694: maps a runtime provider id onto one of the four `--color-provider-*`
+ * design tokens. Runtime ids (`anthropic`, `openai`, `ollama`,
+ * `custom_openai:<name>`) are richer than the four-color discipline; this
+ * collapses them onto the canonical token names per `docs/design/ai-patterns.md`.
+ */
+type ProviderColorId = 'anthropic' | 'openai' | 'local' | 'custom';
+
+function providerColorId(id: string): ProviderColorId {
+  if (id === 'anthropic') return 'anthropic';
+  if (id === 'openai') return 'openai';
+  if (id === 'ollama' || id === 'lm-studio' || id === 'local') return 'local';
+  return 'custom';
 }
 
 function rosterId(entry: RosterEntry): string {
@@ -109,6 +126,8 @@ function toRow(kind: CatalogKind, scoped: ScopedRosterEntry): CatalogRow {
     name: rosterId(scoped.entry),
     meta: rosterMeta(scoped.entry),
     scope: scoped.scope,
+    providerColor:
+      scoped.entry.type === 'Provider' ? providerColorId(scoped.entry.id) : null,
   };
 }
 
@@ -138,6 +157,8 @@ interface ScopeGroup {
   key: string;
   label: string;
   rows: CatalogRow[];
+  /** F-694: design-token color id for provider-scoped groups; null otherwise. */
+  providerColor: ProviderColorId | null;
 }
 
 function groupByScope(rows: CatalogRow[]): ScopeGroup[] {
@@ -146,7 +167,13 @@ function groupByScope(rows: CatalogRow[]): ScopeGroup[] {
     const key = scopeKey(row.scope);
     let group = groups.get(key);
     if (group === undefined) {
-      group = { key, label: scopeLabel(row.scope), rows: [] };
+      group = {
+        key,
+        label: scopeLabel(row.scope),
+        rows: [],
+        providerColor:
+          row.scope.type === 'Provider' ? providerColorId(row.scope.id) : null,
+      };
       groups.set(key, group);
     }
     group.rows.push(row);
@@ -347,7 +374,10 @@ export const CatalogPane: Component<CatalogPaneProps> = (props) => {
                       <ul class="catalog__groups">
                         <For each={groups()}>
                           {(group) => (
-                            <li class="catalog__group">
+                            <li
+                              class="catalog__group"
+                              data-provider={group.providerColor ?? undefined}
+                            >
                               <h3 class="catalog__group-label">{group.label}</h3>
                               <ul class="catalog__rows">
                                 <For each={group.rows}>
@@ -405,7 +435,12 @@ interface CatalogRowViewProps {
 const CatalogRowView: Component<CatalogRowViewProps> = (props) => {
   const id = `catalog-toggle-${props.row.kind}-${props.row.id}`;
   return (
-    <li class="catalog-row" data-kind={props.row.kind} data-id={props.row.id}>
+    <li
+      class="catalog-row"
+      data-kind={props.row.kind}
+      data-id={props.row.id}
+      data-provider={props.row.providerColor ?? undefined}
+    >
       <div class="catalog-row__body">
         <span class="catalog-row__name">{props.row.name}</span>
         <Show when={props.row.meta}>

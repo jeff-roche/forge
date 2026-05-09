@@ -319,3 +319,96 @@ describe('<CatalogPane> (F-592)', () => {
     expect(await findByText(/set_setting failed: invalid value/)).toBeTruthy();
   });
 });
+
+// F-694: Provider color discipline — every catalog surface that names a
+// provider must carry a `data-provider="<color-id>"` attribute that maps to a
+// `--color-provider-*` token. Two surfaces qualify: (1) provider-scoped group
+// headers (rows grouped under a `Provider · <id>` label), and (2) Provider-
+// typed roster rows themselves. The mapping collapses runtime ids onto the
+// four design tokens — `anthropic`, `openai`, `ollama`→`local`, anything else
+// (including `custom_openai:*`) → `custom`.
+describe('<CatalogPane> provider color discipline (F-694)', () => {
+  const skillIn = (
+    skillId: string,
+    providerScopeId: string,
+  ): ScopedRosterEntry => ({
+    entry: { type: 'Skill', id: skillId },
+    scope: { type: 'Provider', id: providerScopeId },
+  });
+
+  it('tags provider-scoped group headers with data-provider mapped to a color token id', async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      switch (cmd) {
+        case 'list_skills':
+          return Promise.resolve([
+            skillIn('claude-skill', 'anthropic'),
+            skillIn('gpt-skill', 'openai'),
+            skillIn('llama-skill', 'ollama'),
+            skillIn('byo-skill', 'custom_openai:acme'),
+          ]);
+        case 'list_mcp_servers':
+        case 'list_agents':
+          return Promise.resolve([]);
+        default:
+          return Promise.resolve(undefined);
+      }
+    });
+
+    const { container } = render(() => <CatalogPane workspaceRoot="/ws" />);
+    await flush();
+
+    const groups = container.querySelectorAll('.catalog__group[data-provider]');
+    const seen = new Set<string>();
+    for (const g of Array.from(groups)) {
+      seen.add(g.getAttribute('data-provider')!);
+    }
+    expect(seen.has('anthropic')).toBe(true);
+    expect(seen.has('openai')).toBe(true);
+    expect(seen.has('local')).toBe(true); // ollama → local
+    expect(seen.has('custom')).toBe(true); // custom_openai:* → custom
+  });
+
+  it('tags Provider-typed rows with data-provider matching the entry id', async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      switch (cmd) {
+        case 'list_skills':
+          return Promise.resolve([
+            {
+              entry: { type: 'Provider', id: 'anthropic', model: 'claude-sonnet-4' },
+              scope: { type: 'SessionWide' },
+            } satisfies ScopedRosterEntry,
+            {
+              entry: { type: 'Provider', id: 'ollama', model: 'llama3.1' },
+              scope: { type: 'SessionWide' },
+            } satisfies ScopedRosterEntry,
+          ]);
+        case 'list_mcp_servers':
+        case 'list_agents':
+          return Promise.resolve([]);
+        default:
+          return Promise.resolve(undefined);
+      }
+    });
+
+    const { container } = render(() => <CatalogPane workspaceRoot="/ws" />);
+    await flush();
+
+    const rows = container.querySelectorAll('.catalog-row[data-kind="skills"][data-provider]');
+    const colorIds = Array.from(rows).map((r) => r.getAttribute('data-provider'));
+    expect(colorIds).toContain('anthropic');
+    expect(colorIds).toContain('local');
+  });
+
+  it('non-provider rows and session-wide groups do not carry a data-provider tag', async () => {
+    setupInvoke({
+      skills: [skill('typescript-review')],
+    });
+    const { container } = render(() => <CatalogPane workspaceRoot="/ws" />);
+    await flush();
+
+    const taggedGroups = container.querySelectorAll('.catalog__group[data-provider]');
+    expect(taggedGroups.length).toBe(0);
+    const taggedRows = container.querySelectorAll('.catalog-row[data-provider]');
+    expect(taggedRows.length).toBe(0);
+  });
+});
