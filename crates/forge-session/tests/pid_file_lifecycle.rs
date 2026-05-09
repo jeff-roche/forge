@@ -64,6 +64,7 @@ async fn handshake(sock: &std::path::Path) {
                 pid: std::process::id(),
                 user: "tester".into(),
             },
+            schema_version: forge_ipc::SCHEMA_VERSION,
         }),
     )
     .await

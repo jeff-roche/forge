@@ -73,6 +73,7 @@ async fn ephemeral_session_emits_session_ended_with_completed_reason() {
                 pid: std::process::id(),
                 user: "tester".into(),
             },
+            schema_version: forge_ipc::SCHEMA_VERSION,
         }),
     )
     .await

@@ -239,6 +239,7 @@ async fn session_list() -> Result<()> {
                         pid: std::process::id(),
                         user: whoami(),
                     },
+                    schema_version: forge_ipc::SCHEMA_VERSION,
                 });
                 if write_frame(&mut stream, &hello).await.is_ok() {
                     if let Ok(IpcMessage::HelloAck(ack)) =
@@ -295,6 +296,7 @@ async fn session_tail(id: &str) -> Result<()> {
                 pid: std::process::id(),
                 user: whoami(),
             },
+            schema_version: forge_ipc::SCHEMA_VERSION,
         }),
     )
     .await?;
@@ -402,6 +404,7 @@ async fn run_agent(name: &str, input_source: &str) -> Result<()> {
                 pid: std::process::id(),
                 user: whoami(),
             },
+            schema_version: forge_ipc::SCHEMA_VERSION,
         }),
     )
     .await?;

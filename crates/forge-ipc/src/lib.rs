@@ -19,6 +19,30 @@ pub mod sidecar;
 pub const PROTO_VERSION: u32 = 1;
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// F-678: log a `warn!` when a handshake peer reports a schema version
+/// that does not match the local [`SCHEMA_VERSION`] (or the per-leg
+/// equivalent — same shape, same comparison). Used on every handshake
+/// site that exchanges a schema_version field so the four legs
+/// (daemon↔shell, sidecar↔supervisor) share a single message format and
+/// log target. `peer_label` identifies the remote side ("shell",
+/// "daemon", "sidecar", "supervisor") — surfaced verbatim in the log
+/// line so triage can pinpoint which leg drifted.
+///
+/// Today the mismatch is non-fatal: the connection still completes. A
+/// later `strict_schema_version` toggle (per F-678 finding) can elevate
+/// to error and reject the connection without touching the call sites.
+pub fn warn_if_schema_mismatch(peer_label: &str, peer_version: u32, local_version: u32) {
+    if peer_version != local_version {
+        tracing::warn!(
+            target: "forge_ipc::handshake",
+            peer = peer_label,
+            peer_schema_version = peer_version,
+            local_schema_version = local_version,
+            "schema_version mismatch on handshake; serde drift possible",
+        );
+    }
+}
+
 /// Hard cap on a single IPC frame body, enforced on both the write side
 /// (pre-send in [`write_frame`]) and the read side (pre-allocation in
 /// [`read_frame`], before the body buffer is sized). 4 MiB is generous
@@ -323,6 +347,14 @@ pub struct IpcEvent {
 pub struct Hello {
     pub proto: u32,
     pub client: ClientInfo,
+    /// F-678: peer-reported schema version. The daemon compares this against
+    /// the local [`SCHEMA_VERSION`] and `tracing::warn!`s on mismatch so a
+    /// version-skewed shell cannot silently corrupt downstream serde.
+    /// `#[serde(default)]` defaults to `0` for legacy peers that pre-date
+    /// the bidirectional check — those connections are surfaced via the
+    /// same warn path rather than rejected outright.
+    #[serde(default)]
+    pub schema_version: u32,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -584,6 +616,7 @@ mod tests {
                 pid: 1234,
                 user: "alice".to_string(),
             },
+            schema_version: SCHEMA_VERSION,
         })
     }
 
@@ -772,5 +805,95 @@ mod tests {
             .await
             .expect("frame should arrive before deadline");
         matches!(got, IpcMessage::Hello(_));
+    }
+
+    /// F-678: the `schema_version` field on `Hello` is `#[serde(default)]`
+    /// so a legacy peer that omits it deserializes to `0`, surfacing
+    /// through the warn path rather than failing at the deserialize
+    /// layer. Pin the wire-shape here so a future rename / type change
+    /// can't drift past CI silently.
+    #[test]
+    fn hello_defaults_schema_version_when_field_absent() {
+        let body = serde_json::json!({
+            "t": "Hello",
+            "proto": PROTO_VERSION,
+            "client": { "kind": "shell", "pid": 1, "user": "u" }
+            // no schema_version
+        });
+        let msg: IpcMessage = serde_json::from_value(body).expect("legacy Hello deserializes");
+        match msg {
+            IpcMessage::Hello(h) => {
+                assert_eq!(
+                    h.schema_version, 0,
+                    "missing schema_version must default to 0",
+                );
+            }
+            other => panic!("expected Hello, got {other:?}"),
+        }
+    }
+
+    /// F-678: the helper emits exactly one `warn!` event when the peer
+    /// version differs and stays silent on a match. Capture the tracing
+    /// subscriber output and assert the event surface so the four
+    /// handshake legs share an audited contract.
+    #[test]
+    fn warn_if_schema_mismatch_emits_warn_on_drift() {
+        use std::io;
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::fmt::MakeWriter;
+
+        #[derive(Clone, Default)]
+        struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
+        impl io::Write for CaptureWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> MakeWriter<'a> for CaptureWriter {
+            type Writer = CaptureWriter;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let writer = CaptureWriter::default();
+        let buf = writer.0.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .with_target(true)
+            .with_writer(writer)
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            // Match → silent.
+            warn_if_schema_mismatch("shell", SCHEMA_VERSION, SCHEMA_VERSION);
+            // Mismatch → warn.
+            warn_if_schema_mismatch("shell", 999, SCHEMA_VERSION);
+        });
+
+        let captured = String::from_utf8(buf.lock().unwrap().clone()).expect("utf-8");
+        assert!(
+            captured.contains("schema_version mismatch"),
+            "expected mismatch warn in capture: {captured}",
+        );
+        assert!(
+            captured.contains("peer=\"shell\""),
+            "expected peer label in capture: {captured}",
+        );
+        assert!(
+            captured.contains("peer_schema_version=999"),
+            "expected peer version in capture: {captured}",
+        );
+        // Exactly one event — the matching call must not log.
+        assert_eq!(
+            captured.matches("schema_version mismatch").count(),
+            1,
+            "matching version should not log: {captured}",
+        );
     }
 }

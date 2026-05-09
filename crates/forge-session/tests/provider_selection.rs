@@ -56,6 +56,7 @@ async fn handshake(stream: &mut UnixStream) {
                 pid: std::process::id(),
                 user: "tester".into(),
             },
+            schema_version: forge_ipc::SCHEMA_VERSION,
         }),
     )
     .await

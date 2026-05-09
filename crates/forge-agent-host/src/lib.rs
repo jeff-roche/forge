@@ -324,6 +324,7 @@ fn make_hello(instance_id: &str) -> SidecarMessage {
         },
         sandbox_level: SidecarSandboxLevel::Level1,
         telemetry_endpoint: None,
+        schema_version: SIDECAR_SCHEMA_VERSION,
     })
 }
 
@@ -854,6 +855,7 @@ pub async fn run(args: AgentArgs) -> Result<()> {
                     schema = ack.schema_version,
                     "handshake complete"
                 );
+                validate_daemon_hello_ack(&ack);
             }
             other => {
                 anyhow::bail!("expected HelloAck, got {other:?}");
@@ -911,6 +913,16 @@ pub async fn run(args: AgentArgs) -> Result<()> {
 
     info!("forged-agent exiting cleanly");
     Ok(())
+}
+
+/// F-678: agent-host's leg of the bidirectional schema-version check.
+/// The daemon-side supervisor stamps its `SIDECAR_SCHEMA_VERSION` into
+/// the ack; this helper warn-logs through the shared
+/// [`forge_ipc::warn_if_schema_mismatch`] so a forged-agent connected
+/// to a version-skewed daemon surfaces in operator logs. Non-fatal —
+/// callers continue into the dispatch loop unchanged.
+pub(crate) fn validate_daemon_hello_ack(ack: &SidecarHelloAck) {
+    forge_ipc::warn_if_schema_mismatch("daemon", ack.schema_version, SIDECAR_SCHEMA_VERSION);
 }
 
 /// Build the `HelloAck` frame the daemon side should send. Lives here
@@ -1000,5 +1012,122 @@ mod tests {
         assert_eq!(seq.next(), 1);
         assert_eq!(seq.next(), 2);
         assert_eq!(seq.next(), 3);
+    }
+
+    /// F-678: a daemon `HelloAck` whose `schema_version` differs from
+    /// the agent-host's `SIDECAR_SCHEMA_VERSION` must emit a `warn!`
+    /// so an operator can spot the version skew. Non-fatal — the agent
+    /// continues into the dispatch loop. Pin the wire of that warn
+    /// under a capture subscriber.
+    #[test]
+    fn validate_daemon_hello_ack_warns_on_schema_mismatch() {
+        use chrono::Utc;
+        use std::io;
+        use std::sync::{Arc, Mutex as StdMutex};
+        use tracing_subscriber::fmt::MakeWriter;
+
+        #[derive(Clone, Default)]
+        struct CaptureWriter(Arc<StdMutex<Vec<u8>>>);
+        impl io::Write for CaptureWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> MakeWriter<'a> for CaptureWriter {
+            type Writer = CaptureWriter;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let writer = CaptureWriter::default();
+        let buf = writer.0.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .with_target(true)
+            .with_writer(writer)
+            .finish();
+
+        let bogus_schema = SIDECAR_SCHEMA_VERSION.wrapping_add(7);
+        let ack = SidecarHelloAck {
+            pid: 1234,
+            started_at: Utc::now(),
+            schema_version: bogus_schema,
+        };
+
+        tracing::subscriber::with_default(subscriber, || {
+            validate_daemon_hello_ack(&ack);
+        });
+
+        let captured = String::from_utf8(buf.lock().unwrap().clone()).expect("utf-8");
+        assert!(
+            captured.contains("schema_version mismatch"),
+            "expected mismatch warn, got: {captured}",
+        );
+        assert!(
+            captured.contains("peer=\"daemon\""),
+            "expected peer=daemon label, got: {captured}",
+        );
+        assert!(
+            captured.contains(&format!("peer_schema_version={bogus_schema}")),
+            "expected reported peer schema_version, got: {captured}",
+        );
+    }
+
+    /// F-678: a daemon `HelloAck` whose `schema_version` matches the
+    /// local constant is silent — no warn must fire on the happy path.
+    #[test]
+    fn validate_daemon_hello_ack_silent_on_match() {
+        use chrono::Utc;
+        use std::io;
+        use std::sync::{Arc, Mutex as StdMutex};
+        use tracing_subscriber::fmt::MakeWriter;
+
+        #[derive(Clone, Default)]
+        struct CaptureWriter(Arc<StdMutex<Vec<u8>>>);
+        impl io::Write for CaptureWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> MakeWriter<'a> for CaptureWriter {
+            type Writer = CaptureWriter;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let writer = CaptureWriter::default();
+        let buf = writer.0.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .with_writer(writer)
+            .finish();
+
+        let ack = SidecarHelloAck {
+            pid: 1234,
+            started_at: Utc::now(),
+            schema_version: SIDECAR_SCHEMA_VERSION,
+        };
+
+        tracing::subscriber::with_default(subscriber, || {
+            validate_daemon_hello_ack(&ack);
+        });
+
+        let captured = String::from_utf8(buf.lock().unwrap().clone()).expect("utf-8");
+        assert!(
+            !captured.contains("schema_version mismatch"),
+            "matching schema_version must not warn, got: {captured}",
+        );
     }
 }

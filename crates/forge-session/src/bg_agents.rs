@@ -33,6 +33,7 @@ use forge_agents::{
 use forge_core::{ids::AgentId, AgentInstanceId, Event, EventSink};
 use forge_ipc::sidecar::{
     SidecarAgentDef, SidecarHello, SidecarProviderSpec, SidecarSandboxLevel, SIDECAR_PROTO_VERSION,
+    SIDECAR_SCHEMA_VERSION,
 };
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -206,6 +207,7 @@ fn build_sidecar_hello(instance_id: &AgentInstanceId, def: &AgentDef) -> Sidecar
         },
         sandbox_level: SidecarSandboxLevel::Level1,
         telemetry_endpoint: None,
+        schema_version: SIDECAR_SCHEMA_VERSION,
     }
 }
 

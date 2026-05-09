@@ -22,6 +22,11 @@ forge-mcp = { path = "../forge-mcp" }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 tokio = { version = "1", features = ["io-util", "net", "time"] }
+# F-678: `warn_if_schema_mismatch` emits a structured `warn!` shared by
+# every handshake site. Lives in this crate so the four legs
+# (daemon↔shell, sidecar↔supervisor) share one message format and log
+# target.
+tracing = "0.1"
 # F-604: `RefineHandoff` crosses the Tauri boundary as the return type of
 # `session_interrupt_and_refine`; ts-rs emits its TypeScript declaration
 # under web/packages/ipc/src/generated/.
@@ -35,6 +40,9 @@ zeroize = { version = "1", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
+# F-678: the schema-mismatch helper test installs a capture subscriber
+# to assert the `warn!` actually fires.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
 
 [[bench]]
 name = "frame"
