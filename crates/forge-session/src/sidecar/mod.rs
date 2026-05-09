@@ -471,13 +471,9 @@ impl SidecarSupervisor {
         };
         match &hello_frame {
             SidecarMessage::Hello(h) => {
-                if h.instance_id.to_string() != instance_id.to_string() {
+                if let Err(e) = validate_sidecar_hello(h, instance_id) {
                     let _ = child.kill().await;
-                    anyhow::bail!(
-                        "forged-agent reported instance_id={}, expected {}",
-                        h.instance_id,
-                        instance_id
-                    );
+                    return Err(e);
                 }
             }
             other => {
@@ -994,6 +990,27 @@ fn current_euid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
+/// F-678: validate a sidecar's `Hello` frame. The `instance_id` check
+/// is hard (returns `Err` so the supervisor can kill the misrouted
+/// child); the `schema_version` check is soft and emits `tracing::warn!`
+/// through the shared [`forge_ipc::warn_if_schema_mismatch`] helper.
+/// Lives outside `LiveSidecar::spawn` so unit tests can drive the
+/// validation path without spawning a real `forged-agent` binary.
+pub(crate) fn validate_sidecar_hello(
+    hello: &SidecarHello,
+    expected_instance_id: &AgentInstanceId,
+) -> Result<()> {
+    if hello.instance_id.to_string() != expected_instance_id.to_string() {
+        anyhow::bail!(
+            "forged-agent reported instance_id={}, expected {}",
+            hello.instance_id,
+            expected_instance_id
+        );
+    }
+    forge_ipc::warn_if_schema_mismatch("sidecar", hello.schema_version, SIDECAR_SCHEMA_VERSION);
+    Ok(())
+}
+
 /// F-651: assert that the connected peer's uid matches `expected_uid`.
 /// Tokio's `peer_cred()` wraps SO_PEERCRED on Linux and LOCAL_PEERCRED
 /// on macOS; both report the credentials of the process that
@@ -1088,6 +1105,174 @@ mod tests {
         assert!(
             msg.contains("does not match"),
             "expected mismatch error, got: {msg}"
+        );
+    }
+
+    /// F-678: a sidecar `Hello` whose `schema_version` matches the
+    /// supervisor's `SIDECAR_SCHEMA_VERSION` validates without
+    /// emitting a warn — the silent path.
+    #[test]
+    fn validate_sidecar_hello_silent_on_match() {
+        use forge_core::AgentInstanceId;
+        use forge_ipc::sidecar::{
+            SidecarAgentDef, SidecarHello, SidecarProviderSpec, SidecarSandboxLevel,
+            SIDECAR_PROTO_VERSION,
+        };
+        let id = AgentInstanceId::from_string("inst-match".into());
+        let hello = SidecarHello {
+            proto: SIDECAR_PROTO_VERSION,
+            instance_id: id.clone(),
+            agent_def: SidecarAgentDef {
+                name: "t".into(),
+                description: None,
+                body: String::new(),
+                allowed_paths: vec![],
+                isolation: "process".into(),
+                memory_enabled: false,
+            },
+            allowed_paths: vec![],
+            workspace_path: "/tmp".into(),
+            provider_spec: SidecarProviderSpec {
+                kind: "stub".into(),
+                model: "stub".into(),
+                base_url: None,
+            },
+            sandbox_level: SidecarSandboxLevel::Level1,
+            telemetry_endpoint: None,
+            schema_version: SIDECAR_SCHEMA_VERSION,
+        };
+        validate_sidecar_hello(&hello, &id).expect("matching schema_version must validate");
+    }
+
+    /// F-678: a sidecar `Hello` whose `schema_version` differs from
+    /// `SIDECAR_SCHEMA_VERSION` still passes validation (warn-only,
+    /// non-fatal) and emits a `warn!` through the shared helper. Pin
+    /// the wire of that warn under a capture subscriber so the contract
+    /// stays observable from operator logs.
+    #[test]
+    fn validate_sidecar_hello_warns_on_schema_mismatch() {
+        use forge_core::AgentInstanceId;
+        use forge_ipc::sidecar::{
+            SidecarAgentDef, SidecarHello, SidecarProviderSpec, SidecarSandboxLevel,
+            SIDECAR_PROTO_VERSION,
+        };
+        use std::io;
+        use std::sync::{Arc, Mutex as StdMutex};
+        use tracing_subscriber::fmt::MakeWriter;
+
+        #[derive(Clone, Default)]
+        struct CaptureWriter(Arc<StdMutex<Vec<u8>>>);
+        impl io::Write for CaptureWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> MakeWriter<'a> for CaptureWriter {
+            type Writer = CaptureWriter;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let writer = CaptureWriter::default();
+        let buf = writer.0.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .with_target(true)
+            .with_writer(writer)
+            .finish();
+
+        let id = AgentInstanceId::from_string("inst-skew".into());
+        let bogus_schema = SIDECAR_SCHEMA_VERSION.wrapping_add(99);
+        let hello = SidecarHello {
+            proto: SIDECAR_PROTO_VERSION,
+            instance_id: id.clone(),
+            agent_def: SidecarAgentDef {
+                name: "t".into(),
+                description: None,
+                body: String::new(),
+                allowed_paths: vec![],
+                isolation: "process".into(),
+                memory_enabled: false,
+            },
+            allowed_paths: vec![],
+            workspace_path: "/tmp".into(),
+            provider_spec: SidecarProviderSpec {
+                kind: "stub".into(),
+                model: "stub".into(),
+                base_url: None,
+            },
+            sandbox_level: SidecarSandboxLevel::Level1,
+            telemetry_endpoint: None,
+            schema_version: bogus_schema,
+        };
+
+        tracing::subscriber::with_default(subscriber, || {
+            validate_sidecar_hello(&hello, &id)
+                .expect("schema mismatch must be warn-only, not an error");
+        });
+
+        let captured = String::from_utf8(buf.lock().unwrap().clone()).expect("utf-8");
+        assert!(
+            captured.contains("schema_version mismatch"),
+            "expected mismatch warn, got: {captured}",
+        );
+        assert!(
+            captured.contains("peer=\"sidecar\""),
+            "expected peer=sidecar label, got: {captured}",
+        );
+        assert!(
+            captured.contains(&format!("peer_schema_version={bogus_schema}")),
+            "expected reported peer schema_version, got: {captured}",
+        );
+    }
+
+    /// F-678: a sidecar `Hello` carrying a wrong `instance_id` still
+    /// hard-rejects (the supervisor would kill the misrouted child).
+    /// Pin this so the validator refactor cannot accidentally swallow
+    /// the instance_id check while preserving the new schema warn.
+    #[test]
+    fn validate_sidecar_hello_rejects_bad_instance_id() {
+        use forge_core::AgentInstanceId;
+        use forge_ipc::sidecar::{
+            SidecarAgentDef, SidecarHello, SidecarProviderSpec, SidecarSandboxLevel,
+            SIDECAR_PROTO_VERSION,
+        };
+        let expected = AgentInstanceId::from_string("inst-expected".into());
+        let reported = AgentInstanceId::from_string("inst-other".into());
+        let hello = SidecarHello {
+            proto: SIDECAR_PROTO_VERSION,
+            instance_id: reported,
+            agent_def: SidecarAgentDef {
+                name: "t".into(),
+                description: None,
+                body: String::new(),
+                allowed_paths: vec![],
+                isolation: "process".into(),
+                memory_enabled: false,
+            },
+            allowed_paths: vec![],
+            workspace_path: "/tmp".into(),
+            provider_spec: SidecarProviderSpec {
+                kind: "stub".into(),
+                model: "stub".into(),
+                base_url: None,
+            },
+            sandbox_level: SidecarSandboxLevel::Level1,
+            telemetry_endpoint: None,
+            schema_version: SIDECAR_SCHEMA_VERSION,
+        };
+        let err = validate_sidecar_hello(&hello, &expected)
+            .expect_err("instance_id mismatch must hard-reject");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("instance_id"),
+            "expected instance_id error, got: {msg}",
         );
     }
 

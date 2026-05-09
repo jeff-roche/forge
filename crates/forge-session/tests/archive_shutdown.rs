@@ -81,6 +81,7 @@ async fn ephemeral_shutdown_removes_session_dir_and_socket() {
                 pid: std::process::id(),
                 user: "tester".into(),
             },
+            schema_version: forge_ipc::SCHEMA_VERSION,
         }),
     )
     .await
@@ -189,6 +190,7 @@ async fn persistent_sigterm_archives_session_dir_and_meta() {
                 pid: std::process::id(),
                 user: "tester".into(),
             },
+            schema_version: forge_ipc::SCHEMA_VERSION,
         }),
     )
     .await

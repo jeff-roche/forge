@@ -185,7 +185,8 @@ pub enum SidecarMessage {
 
 // ── daemon → sidecar payloads ────────────────────────────────────────────
 
-/// Initial daemon → sidecar handshake payload.
+/// Initial sidecar → daemon handshake payload (and, in step-4 of F-608,
+/// the daemon → sidecar follow-up that forwards the spawn parameters).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SidecarHello {
     pub proto: u32,
@@ -197,6 +198,15 @@ pub struct SidecarHello {
     pub sandbox_level: SidecarSandboxLevel,
     /// Optional OTLP / tracing collector endpoint. `None` skips export.
     pub telemetry_endpoint: Option<String>,
+    /// F-678: peer-reported schema version. The supervisor compares this
+    /// against [`SIDECAR_SCHEMA_VERSION`] and `tracing::warn!`s on
+    /// mismatch; the agent-host applies the same check on the
+    /// `HelloAck` it receives back. `#[serde(default)]` defaults to `0`
+    /// for legacy peers (e.g. older `forged-agent` builds) so a skewed
+    /// peer is surfaced via the warn rather than silently rejected at
+    /// the deserialize layer.
+    #[serde(default)]
+    pub schema_version: u32,
 }
 
 /// Wire-friendly subset of `forge_agents::AgentDef` carried over the
@@ -406,6 +416,7 @@ mod tests {
                 },
                 sandbox_level: SidecarSandboxLevel::Level1,
                 telemetry_endpoint: None,
+                schema_version: SIDECAR_SCHEMA_VERSION,
             }),
             SidecarMessage::Hello(SidecarHello {
                 proto: SIDECAR_PROTO_VERSION,
@@ -429,6 +440,7 @@ mod tests {
                     image: "registry.example.com/forge/sandbox:1".into(),
                 },
                 telemetry_endpoint: Some("http://otel:4317".into()),
+                schema_version: SIDECAR_SCHEMA_VERSION,
             }),
             SidecarMessage::RunTurn(SidecarRunTurn {
                 turn_id: "turn-1".into(),

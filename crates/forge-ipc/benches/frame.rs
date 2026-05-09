@@ -221,6 +221,7 @@ fn padded_hello(body_len: usize) -> IpcMessage {
             pid: 1,
             user: "b".to_string(),
         },
+        schema_version: forge_ipc::SCHEMA_VERSION,
     })
 }
 

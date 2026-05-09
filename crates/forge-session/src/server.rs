@@ -1252,6 +1252,13 @@ async fn handle_connection<P: Provider + 'static>(
     if hello.proto != PROTO_VERSION {
         anyhow::bail!("unsupported protocol version: {}", hello.proto);
     }
+    // F-678: bidirectional schema-version validation. The shell reports
+    // its `schema_version` in the `Hello` frame; if it diverges from the
+    // daemon's `SCHEMA_VERSION`, log a warn so a version-skewed peer
+    // surfaces in operator logs rather than failing later through
+    // opaque serde drift. Non-fatal today; a future
+    // `strict_schema_version` toggle can elevate to error.
+    forge_ipc::warn_if_schema_mismatch("shell", hello.schema_version, SCHEMA_VERSION);
 
     let ack = IpcMessage::HelloAck(HelloAck {
         session_id: (*session_id).clone(),

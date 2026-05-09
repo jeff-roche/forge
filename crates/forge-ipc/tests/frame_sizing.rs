@@ -138,5 +138,6 @@ fn _ensure_symbols_compile() -> IpcMessage {
             pid: 0,
             user: String::new(),
         },
+        schema_version: forge_ipc::SCHEMA_VERSION,
     })
 }

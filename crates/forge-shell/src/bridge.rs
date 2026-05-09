@@ -27,11 +27,12 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use forge_core::{ApprovalScope, RerunVariant};
 use forge_ipc::{
-    read_frame_into_with_deadline, read_frame_with_deadline, write_frame, ClientInfo,
-    CompactTranscript, DeleteBranch, Hello, HelloAck, ImportMcpConfig, InterruptSession,
-    IpcMessage, IpcReadTimeout, ListMcpServers, McpImportResult, McpServersList, McpToggleResult,
-    PauseSession, RefineHandoff, RerunMessage, ResumeSession, SelectBranch, SendUserMessage,
-    Subscribe, SwitchProvider, ToggleMcpServer, ToolCallApproved, ToolCallRejected, PROTO_VERSION,
+    read_frame_into_with_deadline, read_frame_with_deadline, warn_if_schema_mismatch, write_frame,
+    ClientInfo, CompactTranscript, DeleteBranch, Hello, HelloAck, ImportMcpConfig,
+    InterruptSession, IpcMessage, IpcReadTimeout, ListMcpServers, McpImportResult, McpServersList,
+    McpToggleResult, PauseSession, RefineHandoff, RerunMessage, ResumeSession, SelectBranch,
+    SendUserMessage, Subscribe, SwitchProvider, ToggleMcpServer, ToolCallApproved,
+    ToolCallRejected, PROTO_VERSION, SCHEMA_VERSION,
 };
 use serde::Serialize;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -241,6 +242,7 @@ impl SessionBridge {
                 pid: std::process::id(),
                 user: std::env::var("USER").unwrap_or_else(|_| "forge".to_string()),
             },
+            schema_version: SCHEMA_VERSION,
         });
         write_frame(&mut writer, &hello).await?;
 
@@ -250,6 +252,10 @@ impl SessionBridge {
         let IpcMessage::HelloAck(ack) = ack else {
             return Err(anyhow!("expected HelloAck, got unexpected frame"));
         };
+        // F-678: shell side of the bidirectional schema-version check.
+        // The daemon stamps its `SCHEMA_VERSION` into `HelloAck.schema_version`;
+        // logging a warn here closes the second leg of the handshake validation.
+        warn_if_schema_mismatch("daemon", ack.schema_version, SCHEMA_VERSION);
 
         let conn = Connection {
             writer: Arc::new(Mutex::new(writer)),

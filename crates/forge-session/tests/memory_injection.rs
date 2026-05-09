@@ -184,6 +184,7 @@ async fn serve_with_session_accepts_typed_active_agent_parameter() {
             pid: std::process::id(),
             user: "test-user".into(),
         },
+        schema_version: forge_ipc::SCHEMA_VERSION,
     });
     forge_ipc::write_frame(&mut stream, &hello).await.unwrap();
 
