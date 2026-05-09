@@ -173,8 +173,8 @@ use crate::dispatcher_cache::DispatcherCache;
 use crate::sandbox::ChildRegistry;
 use crate::session::Session;
 use crate::tools::{
-    AgentRuntime, AgentSpawnCtx, AgentSpawnTool, FsEditTool, FsReadTool, FsWriteTool, McpTool,
-    ShellExecTool, ToolCtx, ToolDispatcher, ToolError,
+    effective_allowed_paths, AgentRuntime, AgentSpawnCtx, AgentSpawnTool, FsEditTool, FsReadTool,
+    FsWriteTool, McpTool, ShellExecTool, ToolCtx, ToolDispatcher, ToolError,
 };
 use forge_mcp::McpManager;
 
@@ -414,8 +414,15 @@ pub async fn run_turn<P: Provider>(
     let instance_id = agent_runtime
         .as_ref()
         .map(|rt| rt.parent_instance_id.clone());
+    // F-663: narrow the dispatch scope to the active agent's declared
+    // `allowed_paths` when it has any. Empty falls back to the session
+    // scope so existing agents that don't declare a scope keep working.
+    let agent_allowed: &[String] = agent_runtime
+        .as_ref()
+        .map(|rt| rt.def_allowed_paths.as_slice())
+        .unwrap_or(&[]);
     let ctx = ToolCtx {
-        allowed_paths,
+        allowed_paths: effective_allowed_paths(&allowed_paths, agent_allowed),
         workspace_root,
         child_registry,
         byte_budget,
@@ -1608,8 +1615,13 @@ impl Orchestrator {
         let instance_id = agent_runtime
             .as_ref()
             .map(|rt| rt.parent_instance_id.clone());
+        // F-663: same agent-scope narrowing as `run_turn`.
+        let agent_allowed: &[String] = agent_runtime
+            .as_ref()
+            .map(|rt| rt.def_allowed_paths.as_slice())
+            .unwrap_or(&[]);
         let ctx = crate::tools::ToolCtx {
-            allowed_paths,
+            allowed_paths: effective_allowed_paths(&allowed_paths, agent_allowed),
             workspace_root,
             child_registry,
             byte_budget,
@@ -1740,8 +1752,13 @@ impl Orchestrator {
         let instance_id = agent_runtime
             .as_ref()
             .map(|rt| rt.parent_instance_id.clone());
+        // F-663: see `run_turn` — narrow to the active agent's scope.
+        let agent_allowed: &[String] = agent_runtime
+            .as_ref()
+            .map(|rt| rt.def_allowed_paths.as_slice())
+            .unwrap_or(&[]);
         let ctx = crate::tools::ToolCtx {
-            allowed_paths,
+            allowed_paths: effective_allowed_paths(&allowed_paths, agent_allowed),
             workspace_root,
             child_registry,
             byte_budget,
@@ -1853,8 +1870,13 @@ impl Orchestrator {
         let instance_id = agent_runtime
             .as_ref()
             .map(|rt| rt.parent_instance_id.clone());
+        // F-663: see `run_turn` — narrow to the active agent's scope.
+        let agent_allowed: &[String] = agent_runtime
+            .as_ref()
+            .map(|rt| rt.def_allowed_paths.as_slice())
+            .unwrap_or(&[]);
         let ctx = crate::tools::ToolCtx {
-            allowed_paths,
+            allowed_paths: effective_allowed_paths(&allowed_paths, agent_allowed),
             workspace_root,
             child_registry,
             byte_budget,

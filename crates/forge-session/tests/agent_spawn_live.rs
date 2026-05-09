@@ -80,6 +80,10 @@ async fn agent_spawn_from_live_turn_registers_child_and_emits_sub_agent_spawned(
         orchestrator: Arc::clone(&orchestrator),
         agent_defs: Arc::clone(&agent_defs),
         parent_instance_id: root_id.clone(),
+        // F-663: this fixture's session-root declares no scope; agent.spawn
+        // does not consult `allowed_paths`, so empty preserves the test's
+        // pre-F-663 contract.
+        def_allowed_paths: Vec::new(),
     };
 
     // Subscribe before the turn so we don't miss SubAgentSpawned.

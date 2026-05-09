@@ -141,6 +141,12 @@ async fn build_agent_runtime(workspace_path: Option<&Path>) -> Option<AgentRunti
         orchestrator,
         agent_defs: Arc::new(defs),
         parent_instance_id: root_instance.id,
+        // F-663: the synthesized session-root agent declares no scope, so
+        // tool dispatch falls back to the session's workspace-derived
+        // `allowed_paths`. A future change that wires per-spawned-agent
+        // dispatch would override this per-call from the active child's
+        // `AgentDef.allowed_paths`.
+        def_allowed_paths: Vec::new(),
     })
 }
 
