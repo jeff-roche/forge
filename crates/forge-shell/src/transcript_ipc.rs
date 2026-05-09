@@ -53,6 +53,12 @@ use crate::ipc::{require_size, BridgeState, LABEL_MISMATCH_ERROR, MAX_WORKSPACE_
 /// window can trigger.
 pub const MAX_TRANSCRIPT_BYTES: u64 = 50 * 1024 * 1024;
 
+// F-673: command-named error prefix. Every outer error path returned from
+// [`export_transcript`] begins with this constant so the dashboard log
+// filter and end-user error display stay consistent across modules. See
+// the "Error-message prefix style" header comment in `ipc.rs`.
+pub const EXPORT_TRANSCRIPT_ERROR: &str = "export_transcript: ";
+
 /// Stable error tag returned when the on-disk transcript exceeds
 /// [`MAX_TRANSCRIPT_BYTES`]. Tests pin this prefix; preserve it when
 /// evolving the message.
@@ -82,19 +88,22 @@ pub fn read_transcript_bytes(path: &std::path::Path, cap_bytes: u64) -> Result<V
             return Ok(Vec::new());
         }
         Err(e) => {
-            return Err(format!("{TRANSCRIPT_READ_ERROR}: {e}"));
+            return Err(format!(
+                "{EXPORT_TRANSCRIPT_ERROR}{TRANSCRIPT_READ_ERROR}: {e}"
+            ));
         }
     };
 
     if metadata.len() > cap_bytes {
         return Err(format!(
-            "{TRANSCRIPT_TOO_LARGE_ERROR}: {} bytes exceeds {} byte cap",
+            "{EXPORT_TRANSCRIPT_ERROR}{TRANSCRIPT_TOO_LARGE_ERROR}: {} bytes exceeds {} byte cap",
             metadata.len(),
             cap_bytes
         ));
     }
 
-    std::fs::read(path).map_err(|e| format!("{TRANSCRIPT_READ_ERROR}: {e}"))
+    std::fs::read(path)
+        .map_err(|e| format!("{EXPORT_TRANSCRIPT_ERROR}{TRANSCRIPT_READ_ERROR}: {e}"))
 }
 
 /// Resolve the absolute path to the events.jsonl for `session_id` under
@@ -205,10 +214,8 @@ mod tests {
         drop(f);
 
         let err = read_transcript_bytes(&path, cap).expect_err("expected oversize error");
-        assert!(
-            err.starts_with(TRANSCRIPT_TOO_LARGE_ERROR),
-            "got error: {err}"
-        );
+        assert!(err.starts_with(EXPORT_TRANSCRIPT_ERROR), "got error: {err}");
+        assert!(err.contains(TRANSCRIPT_TOO_LARGE_ERROR), "got error: {err}");
     }
 
     #[test]

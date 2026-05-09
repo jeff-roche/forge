@@ -223,6 +223,14 @@ pub fn is_known_provider_id(settings: &forge_core::settings::AppSettings, id: &s
 // rather than redeclaring.
 use crate::ipc::MAX_PROVIDER_ID_BYTES;
 
+// F-673: command-named error prefixes. Every outer error path returned from a
+// `*_ipc.rs` command must begin with one of these constants so the dashboard
+// log filter and end-user error display stay consistent across modules. See
+// the "Error-message prefix style" header comment in `ipc.rs`.
+pub const DASHBOARD_LIST_PROVIDERS_ERROR: &str = "dashboard_list_providers: ";
+pub const GET_ACTIVE_PROVIDER_ERROR: &str = "get_active_provider: ";
+pub const SET_ACTIVE_PROVIDER_ERROR: &str = "set_active_provider: ";
+
 /// Pure validation helper exposed for unit tests.
 pub fn validate_provider_id(provider_id: &str) -> Result<(), String> {
     if provider_id.is_empty() {
@@ -269,7 +277,7 @@ pub async fn dashboard_list_providers<R: Runtime>(
     let settings = match user_dir.as_deref() {
         Some(dir) => forge_core::settings::load_user_settings_in(dir)
             .await
-            .map_err(|e| e.to_string())?,
+            .map_err(|e| format!("{DASHBOARD_LIST_PROVIDERS_ERROR}{e}"))?,
         None => forge_core::settings::AppSettings::default(),
     };
 
@@ -300,7 +308,7 @@ pub async fn get_active_provider<R: Runtime>(
     let settings = match user_dir.as_deref() {
         Some(dir) => forge_core::settings::load_user_settings_in(dir)
             .await
-            .map_err(|e| e.to_string())?,
+            .map_err(|e| format!("{GET_ACTIVE_PROVIDER_ERROR}{e}"))?,
         None => forge_core::settings::AppSettings::default(),
     };
 
@@ -334,18 +342,22 @@ pub async fn set_active_provider<R: Runtime>(
     let settings = match user_dir.as_deref() {
         Some(dir) => forge_core::settings::load_user_settings_in(dir)
             .await
-            .map_err(|e| e.to_string())?,
+            .map_err(|e| format!("{SET_ACTIVE_PROVIDER_ERROR}{e}"))?,
         None => forge_core::settings::AppSettings::default(),
     };
 
     if !is_known_provider_id(&settings, &provider_id) {
-        return Err(format!("unknown provider: {provider_id}"));
+        return Err(format!(
+            "{SET_ACTIVE_PROVIDER_ERROR}unknown provider: {provider_id}"
+        ));
     }
 
     // Persist to user-tier so the choice survives across workspaces. Same
     // semantics as the existing settings-write path: load → mutate raw TOML
     // → validate → save.
-    let user_dir = user_dir.ok_or_else(|| "could not resolve user config directory".to_string())?;
+    let user_dir = user_dir.ok_or_else(|| {
+        format!("{SET_ACTIVE_PROVIDER_ERROR}could not resolve user config directory")
+    })?;
     let user_path = forge_core::settings::user_settings_path_in(&user_dir);
     let existing = tokio::fs::read_to_string(&user_path)
         .await
@@ -355,10 +367,10 @@ pub async fn set_active_provider<R: Runtime>(
         "providers.active",
         toml::Value::String(provider_id.clone()),
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| format!("{SET_ACTIVE_PROVIDER_ERROR}{e}"))?;
     save_user_settings_raw_in(&user_dir, &updated)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("{SET_ACTIVE_PROVIDER_ERROR}{e}"))?;
 
     // Workspace tier is left untouched — provider preference is a global
     // user setting in F-586. If a future task wants to scope per-workspace,

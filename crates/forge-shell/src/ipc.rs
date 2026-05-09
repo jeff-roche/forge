@@ -50,6 +50,23 @@
 //! `forge_shell::ipc::authz` and fields `actual`, `expected` / `allowed`,
 //! `command`. The success path is silent. See `tests/ipc_authz_tracing.rs`
 //! for the schema contract.
+//!
+//! ## Error-message prefix style (F-673)
+//!
+//! Every outer error path returned from a `*_ipc.rs` Tauri command must
+//! begin with a command-named constant prefix of the form
+//! `<command_name>: ` (e.g. `STOP_CONTAINER_ERROR: &str = "stop_container: "`).
+//! Format the wrapped error as `format!("{COMMAND_ERROR}{e}")`. This keeps
+//! the dashboard's end-user error surface and the server-side log filter
+//! consistent across modules — a glance at the prefix tells you which
+//! command produced the error.
+//!
+//! **Exception.** Bare `e.to_string()` (or shared infrastructure constants
+//! like `LABEL_MISMATCH_ERROR`) is acceptable for IPC-infrastructure
+//! errors — bridge state lookups, Tauri-managed `State<'_, _>` access,
+//! window-label checks — where the surrounding code makes the source
+//! unambiguous. New error paths in a `*_ipc.rs` command body must follow
+//! the prefix rule.
 
 use std::collections::HashMap;
 use std::path::PathBuf;

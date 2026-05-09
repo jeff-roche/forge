@@ -54,6 +54,14 @@ pub const MAX_API_KEY_BYTES: usize = 8 * 1024;
 // rather than redeclaring.
 use crate::ipc::MAX_PROVIDER_ID_BYTES;
 
+// F-673: command-named error prefixes. Every outer error path returned from a
+// `*_ipc.rs` command must begin with one of these constants so the dashboard
+// log filter and end-user error display stay consistent across modules. See
+// the "Error-message prefix style" header comment in `ipc.rs`.
+pub const LOGIN_PROVIDER_ERROR: &str = "login_provider: ";
+pub const LOGOUT_PROVIDER_ERROR: &str = "logout_provider: ";
+pub const HAS_CREDENTIAL_ERROR: &str = "has_credential: ";
+
 /// Tauri-managed handle to the credential store. Held as an
 /// `Arc<dyn Credentials>` so the same state can wrap any `Credentials`
 /// implementation (production [`LayeredStore`], tests' `MemoryStore`).
@@ -167,7 +175,7 @@ pub async fn login_provider<R: Runtime>(
             error = %e,
             "login_provider failed",
         );
-        e.to_string()
+        format!("{LOGIN_PROVIDER_ERROR}{e}")
     })?;
 
     tracing::trace!(
@@ -195,7 +203,7 @@ pub async fn logout_provider<R: Runtime>(
             error = %e,
             "logout_provider failed",
         );
-        e.to_string()
+        format!("{LOGOUT_PROVIDER_ERROR}{e}")
     })?;
 
     tracing::trace!(
@@ -223,7 +231,7 @@ pub async fn has_credential<R: Runtime>(
             error = %e,
             "has_credential failed",
         );
-        e.to_string()
+        format!("{HAS_CREDENTIAL_ERROR}{e}")
     })?;
 
     Ok(present)

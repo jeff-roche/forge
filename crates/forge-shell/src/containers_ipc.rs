@@ -87,6 +87,14 @@ pub const CONTAINERS_CHANGED_EVENT: &str = "containers:list_changed";
 /// invoke the five container commands.
 pub const CONTAINERS_OWNER_LABEL: &str = "dashboard";
 
+// F-673: command-named error prefixes. Every outer error path returned from a
+// `*_ipc.rs` command must begin with one of these constants so the dashboard
+// log filter and end-user error display stay consistent across modules. See
+// the "Error-message prefix style" header comment in `ipc.rs`.
+pub const STOP_CONTAINER_ERROR: &str = "stop_container: ";
+pub const REMOVE_CONTAINER_ERROR: &str = "remove_container: ";
+pub const CONTAINER_LOGS_ERROR: &str = "container_logs: ";
+
 // ---------------------------------------------------------------------------
 // Wire types
 // ---------------------------------------------------------------------------
@@ -348,7 +356,7 @@ pub async fn stop_container<R: Runtime>(
             error = %e,
             "stop_container failed",
         );
-        e.to_string()
+        format!("{STOP_CONTAINER_ERROR}{e}")
     })?;
     registry.mark_stopped(&container_id).await;
     let _ = app.emit(CONTAINERS_CHANGED_EVENT, &container_id);
@@ -380,7 +388,7 @@ pub async fn remove_container<R: Runtime>(
             error = %e,
             "remove_container failed",
         );
-        e.to_string()
+        format!("{REMOVE_CONTAINER_ERROR}{e}")
     })?;
     registry.unregister(&container_id).await;
     let _ = app.emit(CONTAINERS_CHANGED_EVENT, &container_id);
@@ -423,7 +431,7 @@ pub async fn container_logs<R: Runtime>(
                 error = %e,
                 "container_logs failed",
             );
-            Err(e.to_string())
+            Err(format!("{CONTAINER_LOGS_ERROR}{e}"))
         }
     }
 }

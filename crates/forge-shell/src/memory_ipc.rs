@@ -47,6 +47,15 @@ use crate::ipc::{require_size, require_window_label, BridgeState, MAX_WORKSPACE_
 /// Maximum agent id length. Mirrors the cap on credential / catalog ids.
 pub const MAX_AGENT_ID_BYTES: usize = 64;
 
+// F-673: command-named error prefixes. Every outer error path returned from a
+// `*_ipc.rs` command must begin with one of these constants so the dashboard
+// log filter and end-user error display stay consistent across modules. See
+// the "Error-message prefix style" header comment in `ipc.rs`.
+pub const LIST_AGENT_MEMORY_ERROR: &str = "list_agent_memory: ";
+pub const READ_AGENT_MEMORY_ERROR: &str = "read_agent_memory: ";
+pub const SAVE_AGENT_MEMORY_ERROR: &str = "save_agent_memory: ";
+pub const CLEAR_AGENT_MEMORY_ERROR: &str = "clear_agent_memory: ";
+
 /// Maximum memory body size on the wire. 1 MiB is well above any sane
 /// summary use; a body that big almost certainly indicates a bug or an
 /// attempt to abuse the system prompt.
@@ -239,7 +248,7 @@ pub async fn list_agent_memory<R: Runtime>(
             error = %e,
             "list_agent_memory failed loading agents",
         );
-        format!("load agents: {e}")
+        format!("{LIST_AGENT_MEMORY_ERROR}load agents: {e}")
     })?;
 
     // Use the test-overridable user config dir so integration tests can
@@ -252,7 +261,9 @@ pub async fn list_agent_memory<R: Runtime>(
                 target: "forge_shell::memory",
                 "list_agent_memory failed: could not resolve user config directory",
             );
-            return Err("could not resolve user config directory".to_string());
+            return Err(format!(
+                "{LIST_AGENT_MEMORY_ERROR}could not resolve user config directory"
+            ));
         }
     };
 
@@ -267,7 +278,7 @@ pub async fn list_agent_memory<R: Runtime>(
                 error = %e,
                 "list_agent_memory failed loading settings",
             );
-            e.to_string()
+            format!("{LIST_AGENT_MEMORY_ERROR}{e}")
         })?;
     let overrides = settings.memory.enabled.clone();
 
@@ -299,7 +310,9 @@ pub async fn read_agent_memory<R: Runtime>(
                 agent_id = %agent_id,
                 "read_agent_memory failed: could not resolve user config directory",
             );
-            return Err("could not resolve user config directory".to_string());
+            return Err(format!(
+                "{READ_AGENT_MEMORY_ERROR}could not resolve user config directory"
+            ));
         }
     };
 
@@ -328,7 +341,7 @@ pub async fn read_agent_memory<R: Runtime>(
                 error = %e,
                 "read_agent_memory failed",
             );
-            Err(format!("read_agent_memory: {e}"))
+            Err(format!("{READ_AGENT_MEMORY_ERROR}{e}"))
         }
     }
 }
@@ -354,7 +367,9 @@ pub async fn save_agent_memory<R: Runtime>(
                 agent_id = %agent_id,
                 "save_agent_memory failed: could not resolve user config directory",
             );
-            return Err("could not resolve user config directory".to_string());
+            return Err(format!(
+                "{SAVE_AGENT_MEMORY_ERROR}could not resolve user config directory"
+            ));
         }
     };
 
@@ -367,7 +382,7 @@ pub async fn save_agent_memory<R: Runtime>(
                 error = %e,
                 "save_agent_memory failed",
             );
-            format!("save_agent_memory: {e}")
+            format!("{SAVE_AGENT_MEMORY_ERROR}{e}")
         })?;
 
     tracing::trace!(
@@ -402,7 +417,9 @@ pub async fn clear_agent_memory<R: Runtime>(
                 agent_id = %agent_id,
                 "clear_agent_memory failed: could not resolve user config directory",
             );
-            return Err("could not resolve user config directory".to_string());
+            return Err(format!(
+                "{CLEAR_AGENT_MEMORY_ERROR}could not resolve user config directory"
+            ));
         }
     };
 
@@ -419,7 +436,7 @@ pub async fn clear_agent_memory<R: Runtime>(
                 error = %e,
                 "clear_agent_memory failed",
             );
-            format!("clear_agent_memory: {e}")
+            format!("{CLEAR_AGENT_MEMORY_ERROR}{e}")
         })?;
     tracing::trace!(
         target: "forge_shell::memory",
