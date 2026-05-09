@@ -226,6 +226,24 @@ pub enum Event {
         summary_msg_id: MessageId,
         trigger: CompactTrigger,
     },
+    /// F-657: privileged compaction summary stream exceeded the configured
+    /// byte cap and was truncated. Emitted alongside the normal
+    /// [`Event::AssistantMessage`] + [`Event::ContextCompacted`] pair so a
+    /// pathological summary provider cannot silently amplify itself into a
+    /// feedback loop on subsequent auto-compactions.
+    ///
+    /// `summary_msg_id` correlates with the `summary_msg_id` in the paired
+    /// `ContextCompacted` event. `cap_bytes` is the active ceiling at the
+    /// moment of truncation; `original_bytes` is the byte count the stream
+    /// would have produced had no cap been enforced (i.e. accumulated text
+    /// length up to the point we stopped reading deltas, which is always
+    /// `>= cap_bytes`).
+    CompactionTruncated {
+        at: DateTime<Utc>,
+        summary_msg_id: MessageId,
+        cap_bytes: u64,
+        original_bytes: u64,
+    },
     SessionEnded {
         at: DateTime<Utc>,
         reason: EndReason,
