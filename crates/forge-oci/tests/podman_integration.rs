@@ -15,7 +15,7 @@
 
 #![cfg(target_os = "linux")]
 
-use forge_oci::{ContainerRuntime, ImageRef, PodmanRuntime, SecurityOpts};
+use forge_oci::{ContainerLimits, ContainerRuntime, ImageRef, PodmanRuntime, SecurityOpts};
 
 /// End-to-end flag-injection regression test for `create`.
 ///
@@ -244,6 +244,172 @@ async fn create_with_hardened_defaults_applies_every_flag() {
     assert!(
         userns.contains("keep-id"),
         "UsernsMode must be keep-id, got {userns:?}"
+    );
+
+    runtime.remove(&handle).await.expect("remove container");
+}
+
+/// F-654: end-to-end proof that the F-654 conservative cgroup caps
+/// land on the resulting container.
+///
+/// Argv-shaping is pinned by the unit tests in
+/// `crates/forge-oci/src/lib.rs` and `crates/forge-oci/src/podman.rs`.
+/// This test pins the *behaviour* — by asking `podman inspect` what
+/// the container's cgroup caps actually are, we catch any silent
+/// podman-side rejection (e.g. unsupported flag, kernel missing the
+/// pids controller, podman renaming a JSON field) that argv assertions
+/// would miss.
+///
+/// `cargo test -p forge-oci -- --ignored` to run.
+#[tokio::test]
+#[ignore = "requires rootless podman on PATH (run with --ignored)"]
+async fn create_with_conservative_limits_applies_every_cgroup_cap() {
+    let runtime = PodmanRuntime::new();
+    runtime.detect().await.expect("podman detect");
+    let image = ImageRef::parse("docker.io/library/alpine:3.19").expect("valid image ref");
+    runtime.pull(&image).await.expect("pull alpine");
+
+    // Use a distinct, easy-to-verify limit set so the inspect output
+    // is unambiguous (the conservative-default values are the same
+    // for cpus and memory bytes, which would let a swapped accessor
+    // pass silently).
+    let limits = ContainerLimits {
+        cpus: Some(1.0),
+        memory_bytes: Some(256 * 1024 * 1024),
+        memory_swap_bytes: Some(256 * 1024 * 1024),
+        pids_max: Some(128),
+    };
+    let opts = SecurityOpts {
+        limits,
+        ..SecurityOpts::permissive()
+    };
+
+    let handle = runtime
+        .create(&image, &["sleep", "30"], &opts)
+        .await
+        .expect("create container with limits");
+
+    // One inspect, four cgroup fields.
+    //   - NanoCpus is podman's bytes-per-second representation of
+    //     `--cpus`: 1.0 cpu = 1_000_000_000 nanoseconds-of-cpu.
+    //   - Memory / MemorySwap are bytes.
+    //   - PidsLimit is the cap.
+    let inspect = std::process::Command::new("podman")
+        .args([
+            "inspect",
+            "--format",
+            "{{.HostConfig.NanoCpus}}|{{.HostConfig.Memory}}|{{.HostConfig.MemorySwap}}|{{.HostConfig.PidsLimit}}",
+            &handle.id,
+        ])
+        .output()
+        .expect("podman inspect spawn");
+    assert!(
+        inspect.status.success(),
+        "podman inspect failed: {}",
+        String::from_utf8_lossy(&inspect.stderr)
+    );
+    let out = String::from_utf8_lossy(&inspect.stdout).trim().to_string();
+    let parts: Vec<&str> = out.splitn(4, '|').collect();
+    assert_eq!(
+        parts.len(),
+        4,
+        "expected 4 inspect fields, got {parts:?} from {out:?}"
+    );
+    let (nano_cpus, memory, memory_swap, pids_limit) = (parts[0], parts[1], parts[2], parts[3]);
+
+    assert_eq!(
+        nano_cpus, "1000000000",
+        "NanoCpus must reflect --cpus 1.0 (got {nano_cpus:?})"
+    );
+    assert_eq!(
+        memory,
+        (256 * 1024 * 1024_u64).to_string(),
+        "Memory must reflect --memory (got {memory:?})"
+    );
+    assert_eq!(
+        memory_swap,
+        (256 * 1024 * 1024_u64).to_string(),
+        "MemorySwap must reflect --memory-swap == memory (no swap; got {memory_swap:?})"
+    );
+    assert_eq!(
+        pids_limit, "128",
+        "PidsLimit must reflect --pids-limit (got {pids_limit:?})"
+    );
+
+    runtime.remove(&handle).await.expect("remove container");
+}
+
+/// F-654: behavioural proof that `--pids-limit` actually bounds a
+/// fork-bomb. Without the cap the container would inherit the user
+/// slice's default and a `:(){ :|:& };:` style workload would
+/// saturate the host until OOM.
+///
+/// Strategy: run a small fork-bomb inside a container with
+/// `pids_max = 16`, capture exec stderr, then assert the kernel
+/// surfaced a "Resource temporarily unavailable" / "fork: retry"
+/// signal — that's the cgroup `pids.max` rejection. The exec call
+/// also returns within the foreground sleep window, proving the
+/// container did not run unbounded.
+#[tokio::test]
+#[ignore = "requires rootless podman on PATH (run with --ignored)"]
+async fn pids_limit_bounds_a_fork_bomb_inside_the_container() {
+    let runtime = PodmanRuntime::new();
+    runtime.detect().await.expect("podman detect");
+    let image = ImageRef::parse("docker.io/library/alpine:3.19").expect("valid image ref");
+    runtime.pull(&image).await.expect("pull alpine");
+
+    let limits = ContainerLimits {
+        cpus: Some(1.0),
+        memory_bytes: Some(256 * 1024 * 1024),
+        memory_swap_bytes: Some(256 * 1024 * 1024),
+        pids_max: Some(16),
+    };
+    let opts = SecurityOpts {
+        limits,
+        ..SecurityOpts::permissive()
+    };
+
+    let handle = runtime
+        .create(&image, &["sleep", "30"], &opts)
+        .await
+        .expect("create container with pid cap");
+    runtime.start(&handle).await.expect("start container");
+
+    // The shell loop forks repeatedly; each `&` backgrounds a
+    // detached subshell. With `pids_max=16` the kernel rejects
+    // additional `clone()` calls and the loop's stderr captures the
+    // refusal. We bound iterations to keep the test fast and exit
+    // 0 on its own so exec returns promptly even when no caps fire
+    // (in which case the assertion below catches the regression).
+    let result = runtime
+        .exec(
+            &handle,
+            &[
+                "sh",
+                "-c",
+                "i=0; while [ $i -lt 200 ]; do (sleep 5) & i=$((i+1)); done; wait 2>/dev/null; true",
+            ],
+        )
+        .await
+        .expect("exec returns even when forks fail");
+
+    // The shell prints `sh: can't fork: Resource temporarily
+    // unavailable` (or similar) once the cgroup refuses additional
+    // tasks. Either pattern is enough: any text in stderr proves the
+    // cap fired, since a successful run produces no stderr at all.
+    assert!(
+        !result.stderr.is_empty(),
+        "expected fork-failure noise in stderr (cap should have fired); \
+         stdout={:?} stderr={:?}",
+        result.stdout,
+        result.stderr
+    );
+    assert!(
+        result.stderr.to_lowercase().contains("fork")
+            || result.stderr.to_lowercase().contains("resource")
+            || result.stderr.to_lowercase().contains("retry"),
+        "expected stderr to mention fork/Resource/retry, got: {:?}",
+        result.stderr
     );
 
     runtime.remove(&handle).await.expect("remove container");

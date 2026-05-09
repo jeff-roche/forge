@@ -290,6 +290,116 @@ pub enum UserNsPolicy {
     Default,
 }
 
+/// Per-container cgroup-v2 caps applied at create time.
+///
+/// Every field maps to a `podman create` flag; the units mirror what
+/// podman accepts:
+///
+/// | Field | Flag | Unit |
+/// |---|---|---|
+/// | `cpus` | `--cpus` | float CPU shares (e.g. `1.5` = 1.5 cores) |
+/// | `memory_bytes` | `--memory` | bytes |
+/// | `memory_swap_bytes` | `--memory-swap` | bytes; equal to `memory_bytes` disables swap |
+/// | `pids_max` | `--pids-limit` | process count |
+///
+/// `None` on a field means "leave the cap unset" — the container
+/// inherits whatever the parent cgroup slice applies. Production
+/// callers should reach for [`ContainerLimits::conservative_default`]
+/// (the F-654 strict preset: 4 GiB / 2 cpus / 1024 pids, no swap) so
+/// a fork-bomb or memory-exhaust workload inside a Level 2 sandbox
+/// cannot starve the host.
+///
+/// Field ordering in [`ContainerLimits::to_create_flags`] is
+/// deterministic so argv assertions can pin the rendering:
+/// `--cpus` → `--memory` → `--memory-swap` → `--pids-limit`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct ContainerLimits {
+    /// `--cpus N.NN`. Float CPU shares; `1.5` = 1.5 cores. `None`
+    /// inherits the slice cap.
+    pub cpus: Option<f32>,
+    /// `--memory <bytes>`. `None` inherits the slice cap.
+    pub memory_bytes: Option<u64>,
+    /// `--memory-swap <bytes>`. Setting this equal to `memory_bytes`
+    /// disables swap entirely (the conservative default); leaving it
+    /// `None` lets podman apply its own default, which is `2 *
+    /// memory_bytes`.
+    pub memory_swap_bytes: Option<u64>,
+    /// `--pids-limit <N>`. Process count cap. `None` inherits.
+    pub pids_max: Option<u64>,
+}
+
+impl ContainerLimits {
+    /// F-654 strict preset: 2 cpus, 4 GiB memory with swap disabled,
+    /// 1024 pids. Production callers should pass this to every Level
+    /// 2 container so an unbounded workload inside the sandbox cannot
+    /// take down the host.
+    ///
+    /// Tunables live on the [`ContainerLimits`] struct itself —
+    /// callers that need more (or less) headroom override the
+    /// specific field rather than reaching for an "unlimited" preset.
+    pub const fn conservative_default() -> Self {
+        const FOUR_GIB: u64 = 4 * 1024 * 1024 * 1024;
+        Self {
+            cpus: Some(2.0),
+            memory_bytes: Some(FOUR_GIB),
+            memory_swap_bytes: Some(FOUR_GIB),
+            pids_max: Some(1024),
+        }
+    }
+
+    /// Render into the canonical podman create flag list. Order is
+    /// fixed: `--cpus`, `--memory`, `--memory-swap`, `--pids-limit`.
+    /// Fields set to `None` emit nothing.
+    pub fn to_create_flags(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(cpus) = self.cpus {
+            out.push("--cpus".to_string());
+            out.push(format_cpus(cpus));
+        }
+        if let Some(bytes) = self.memory_bytes {
+            out.push("--memory".to_string());
+            out.push(bytes.to_string());
+        }
+        if let Some(bytes) = self.memory_swap_bytes {
+            out.push("--memory-swap".to_string());
+            out.push(bytes.to_string());
+        }
+        if let Some(pids) = self.pids_max {
+            out.push("--pids-limit".to_string());
+            out.push(pids.to_string());
+        }
+        out
+    }
+}
+
+impl Eq for ContainerLimits {}
+
+impl std::hash::Hash for ContainerLimits {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // f32 has no `Hash`; round-trip via bits so callers that put
+        // `SecurityOpts` in a set still work. Two limits compare equal
+        // (PartialEq) iff their cpu shares are bit-identical, so this
+        // hash is consistent with eq for all values that survive the
+        // PartialEq check (NaN doesn't, but it's nonsensical to put a
+        // NaN cpu share in here).
+        self.cpus.map(f32::to_bits).hash(state);
+        self.memory_bytes.hash(state);
+        self.memory_swap_bytes.hash(state);
+        self.pids_max.hash(state);
+    }
+}
+
+/// Format CPU shares without a trailing `.0` for integer values
+/// (`1.0` → `"1"`) so the resulting podman command line matches the
+/// convention `podman` itself emits in `inspect`.
+fn format_cpus(cpus: f32) -> String {
+    if cpus.fract() == 0.0 {
+        format!("{}", cpus.trunc() as i64)
+    } else {
+        format!("{cpus}")
+    }
+}
+
 /// Security hardening options applied at container create time.
 ///
 /// Every field maps to a concrete `podman create` flag; the defaults are
@@ -302,7 +412,9 @@ pub enum UserNsPolicy {
 /// rootless capability set, an open network namespace, and a writable
 /// rootfs — every escape-class CVE in the kernel, podman, or runc that
 /// these flags would otherwise defeat is exploitable from inside the
-/// container.
+/// container. F-654 also bounds resource usage via [`Self::limits`] so a
+/// fork-bomb or memory-exhaust workload inside the sandbox cannot starve
+/// the host.
 ///
 /// Field ordering in [`SecurityOpts::to_create_flags`] is deterministic so
 /// argv assertions can pin the rendering.
@@ -335,6 +447,15 @@ pub struct SecurityOpts {
 
     /// User-namespace policy. Default [`UserNsPolicy::KeepId`].
     pub userns: UserNsPolicy,
+
+    /// Per-container cgroup caps. Default
+    /// [`ContainerLimits::conservative_default`] — F-654's strict
+    /// preset (2 cpus, 4 GiB memory with no swap, 1024 pids). Callers
+    /// that need different headroom should override the specific
+    /// field; reaching for [`ContainerLimits::default`] (every field
+    /// `None`) silently disables resource enforcement and is what the
+    /// permissive preset uses for tests.
+    pub limits: ContainerLimits,
 }
 
 impl SecurityOpts {
@@ -352,6 +473,7 @@ impl SecurityOpts {
             read_only_rootfs: true,
             network: NetworkPolicy::None,
             userns: UserNsPolicy::KeepId,
+            limits: ContainerLimits::conservative_default(),
         }
     }
 
@@ -366,6 +488,7 @@ impl SecurityOpts {
             read_only_rootfs: false,
             network: NetworkPolicy::Named("default".to_string()), // inherit runtime default
             userns: UserNsPolicy::Default,
+            limits: ContainerLimits::default(),
         }
     }
 
@@ -379,6 +502,10 @@ impl SecurityOpts {
     /// 5. `--network <value>` (always emitted unless the variant maps to
     ///    `None`, which currently never happens)
     /// 6. `--userns keep-id` (if `KeepId`)
+    /// 7. resource limit flags from
+    ///    [`ContainerLimits::to_create_flags`] — `--cpus`, `--memory`,
+    ///    `--memory-swap`, `--pids-limit`, in that order, each emitted
+    ///    only when its field is `Some`.
     ///
     /// The flags are inserted between `podman create` and the IMAGE
     /// positional so podman parses them as runtime options. See
@@ -413,6 +540,7 @@ impl SecurityOpts {
             out.push("--userns".to_string());
             out.push("keep-id".to_string());
         }
+        out.extend(self.limits.to_create_flags());
         out
     }
 }
@@ -757,7 +885,14 @@ mod tests {
         // The order is pinned because the integration test asserts the
         // exact rendered argv. Any reorder is a breaking change to
         // operators reading the audit trail.
+        //
+        // F-654: the hardened default also bounds resource use via
+        // `ContainerLimits::conservative_default` — 2 cpus, 4 GiB
+        // memory with swap disabled, 1024 pids. The limit flags
+        // render after the security flags, in the order
+        // `--cpus`, `--memory`, `--memory-swap`, `--pids-limit`.
         let flags = SecurityOpts::hardened_default().to_create_flags();
+        const FOUR_GIB_STR: &str = "4294967296";
         assert_eq!(
             flags,
             vec![
@@ -770,6 +905,14 @@ mod tests {
                 "none".to_string(),
                 "--userns".to_string(),
                 "keep-id".to_string(),
+                "--cpus".to_string(),
+                "2".to_string(),
+                "--memory".to_string(),
+                FOUR_GIB_STR.to_string(),
+                "--memory-swap".to_string(),
+                FOUR_GIB_STR.to_string(),
+                "--pids-limit".to_string(),
+                "1024".to_string(),
             ]
         );
     }
@@ -792,6 +935,139 @@ mod tests {
             flags.is_empty(),
             "permissive preset must render zero flags, got {flags:?}"
         );
+    }
+
+    // ── F-654: ContainerLimits plumbed through SecurityOpts ──────────
+
+    #[test]
+    fn container_limits_default_renders_no_flags() {
+        // Default = every field None = container inherits the slice's
+        // limits. No flags emitted; this is what the permissive
+        // preset uses so existing tests aren't perturbed.
+        assert!(ContainerLimits::default().to_create_flags().is_empty());
+    }
+
+    #[test]
+    fn container_limits_renders_in_canonical_order() {
+        // `--cpus`, `--memory`, `--memory-swap`, `--pids-limit`. The
+        // integration test asserts this exact ordering against
+        // `podman inspect`.
+        let limits = ContainerLimits {
+            cpus: Some(1.5),
+            memory_bytes: Some(512 * 1024 * 1024),
+            memory_swap_bytes: Some(512 * 1024 * 1024),
+            pids_max: Some(256),
+        };
+        assert_eq!(
+            limits.to_create_flags(),
+            vec![
+                "--cpus".to_string(),
+                "1.5".to_string(),
+                "--memory".to_string(),
+                (512 * 1024 * 1024u64).to_string(),
+                "--memory-swap".to_string(),
+                (512 * 1024 * 1024u64).to_string(),
+                "--pids-limit".to_string(),
+                "256".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn container_limits_skips_none_fields() {
+        // Sparse limits emit only the flags that have a value — no
+        // default-inserted flags that would trigger a podman warning
+        // on hosts where the controller is missing.
+        let limits = ContainerLimits {
+            cpus: None,
+            memory_bytes: Some(1_000),
+            memory_swap_bytes: None,
+            pids_max: None,
+        };
+        assert_eq!(
+            limits.to_create_flags(),
+            vec!["--memory".to_string(), "1000".to_string()]
+        );
+    }
+
+    #[test]
+    fn container_limits_integer_cpus_have_no_decimal() {
+        // `1.0` renders as `"1"` so the rendered argv matches what
+        // `podman inspect` reports back to operators.
+        let limits = ContainerLimits {
+            cpus: Some(1.0),
+            ..Default::default()
+        };
+        assert_eq!(
+            limits.to_create_flags(),
+            vec!["--cpus".to_string(), "1".to_string()]
+        );
+    }
+
+    #[test]
+    fn conservative_default_caps_match_dod() {
+        // F-654 strict preset is documented as 2 cpus / 4 GiB /
+        // 1024 pids with swap disabled. Pinning the values here
+        // catches accidental relaxation of the DoS-resistance
+        // posture.
+        let limits = ContainerLimits::conservative_default();
+        assert_eq!(limits.cpus, Some(2.0), "default must cap at 2 cpus");
+        assert_eq!(
+            limits.memory_bytes,
+            Some(4 * 1024 * 1024 * 1024),
+            "default must cap memory at 4 GiB"
+        );
+        assert_eq!(
+            limits.memory_swap_bytes, limits.memory_bytes,
+            "default must disable swap by setting memory-swap == memory"
+        );
+        assert_eq!(limits.pids_max, Some(1024), "default must cap pids at 1024");
+    }
+
+    #[test]
+    fn hardened_default_includes_conservative_limits() {
+        // Production callers reach for SecurityOpts::hardened_default
+        // and must transitively pick up the F-654 caps. If a refactor
+        // ever drops `limits` from the hardened preset, the host is
+        // back on "rootless slice's default limits" and the DoS
+        // surface returns.
+        let opts = SecurityOpts::hardened_default();
+        assert_eq!(
+            opts.limits,
+            ContainerLimits::conservative_default(),
+            "hardened_default must ship the F-654 conservative limits"
+        );
+    }
+
+    #[test]
+    fn permissive_includes_no_limits() {
+        // The permissive preset is for tests that need a clean argv;
+        // it must not interleave limit flags into those assertions.
+        let opts = SecurityOpts::permissive();
+        assert_eq!(opts.limits, ContainerLimits::default());
+        let flags = opts.to_create_flags();
+        assert!(
+            flags.is_empty(),
+            "permissive preset must render zero flags, got {flags:?}"
+        );
+    }
+
+    #[test]
+    fn limits_render_after_security_flags() {
+        // Order is load-bearing for the audit trail: security flags
+        // first, then resource caps. The integration test reads the
+        // argv linearly and the operator-facing tracing log relies on
+        // the same shape.
+        let flags = SecurityOpts::hardened_default().to_create_flags();
+        let userns_idx = flags.iter().position(|s| s == "--userns").unwrap();
+        let cpus_idx = flags.iter().position(|s| s == "--cpus").unwrap();
+        let memory_idx = flags.iter().position(|s| s == "--memory").unwrap();
+        let memory_swap_idx = flags.iter().position(|s| s == "--memory-swap").unwrap();
+        let pids_idx = flags.iter().position(|s| s == "--pids-limit").unwrap();
+        assert!(userns_idx < cpus_idx, "security flags must precede limits");
+        assert!(cpus_idx < memory_idx);
+        assert!(memory_idx < memory_swap_idx);
+        assert!(memory_swap_idx < pids_idx);
     }
 
     #[test]

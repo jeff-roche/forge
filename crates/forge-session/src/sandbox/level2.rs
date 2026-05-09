@@ -19,15 +19,16 @@
 //!
 //! # Resource limits
 //!
-//! Per-step caps are captured in [`ContainerLimits`] and intended for the
-//! `--cpus` / `--memory` / `--pids-limit` flags `podman` applies at *create*
-//! time (cgroup v2 leaf). The current F-595 [`ContainerRuntime::create`]
-//! signature does not yet accept resource flags; this is tracked as
-//! follow-up issue #631 (see `docs/architecture/isolation-model.md` §8.3).
-//! Until that lands, [`Level2Session::create`] stores the limits on the
-//! session for observability and the `argv`-shaping helper
-//! [`limits_to_create_flags`] pins the canonical podman-flag rendering so
-//! the eventual wiring is a one-line change.
+//! Per-step caps are captured in [`ContainerLimits`] (re-exported from
+//! `forge_oci`) and applied to `podman create` via
+//! [`forge_oci::SecurityOpts::limits`]. F-654 closed the loop:
+//! [`Level2Session::create`] now plumbs the configured limits through
+//! to the runtime — when a caller passes `ContainerLimits::default()`
+//! (every field `None`), the session falls back to
+//! [`ContainerLimits::conservative_default`] (2 cpus, 4 GiB, 1024
+//! pids, no swap) so a fork-bomb or memory-exhaust workload inside
+//! the sandbox cannot starve the host. See
+//! `docs/architecture/isolation-model.md` §8.3 for the unit conventions.
 //!
 //! # Deviation from the F-596 DoD
 //!
@@ -44,6 +45,15 @@ use std::sync::Arc;
 
 use forge_oci::{ContainerHandle, ContainerRuntime, ImageRef, OciError, SecurityOpts};
 
+/// Per-step resource limits enforced via the container's cgroup v2
+/// leaf. Re-exported from [`forge_oci`] so call sites in the session
+/// crate keep the original `level2::ContainerLimits` import path.
+///
+/// See [`forge_oci::ContainerLimits`] for the field-level units and
+/// [`forge_oci::ContainerLimits::conservative_default`] for the F-654
+/// strict preset (2 cpus, 4 GiB, 1024 pids, no swap).
+pub use forge_oci::ContainerLimits;
+
 /// Binary used by [`Level2Session::drop`]'s panic-safety net to reap
 /// a leaked container. Hardcoded because the only `ContainerRuntime`
 /// impl in the workspace today is `PodmanRuntime`; if a second
@@ -51,64 +61,31 @@ use forge_oci::{ContainerHandle, ContainerRuntime, ImageRef, OciError, SecurityO
 /// abstraction (e.g. each impl supplies its own teardown argv).
 const DROP_CLEANUP_BINARY: &str = "podman";
 
-/// Per-step resource limits enforced via the container's cgroup v2 leaf.
-///
-/// All fields are `Option` because Level 2 inherits whatever limit was set
-/// on the daemon's slice (or "unlimited") when a field is absent. Callers
-/// that want the same shape as [`super::SandboxConfig`] can map
-/// `cpu_seconds` / `address_space_bytes` / `max_processes` onto the
-/// matching container fields.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct ContainerLimits {
-    /// Equivalent of `podman create --cpus N.NN`. Float CPU shares
-    /// (`1.5` = 1.5 cores). `None` leaves the cap unset.
-    pub cpus: Option<f32>,
-    /// Equivalent of `podman create --memory <bytes>`. `None` leaves the
-    /// cap unset.
-    pub memory_bytes: Option<u64>,
-    /// Equivalent of `podman create --pids-limit N`. `None` leaves the
-    /// cap unset.
-    pub pids_max: Option<u64>,
-}
-
-impl ContainerLimits {
-    /// Convert into the canonical podman create flag list. Returned in the
-    /// order podman expects, with the units it expects (memory in bytes,
-    /// cpus as a float). Pinned by unit tests so the eventual call-site
-    /// wiring matches what the trait will receive.
-    pub fn to_create_flags(self) -> Vec<String> {
-        limits_to_create_flags(self)
-    }
-}
-
 /// Render [`ContainerLimits`] into the argv fragment that would be
-/// inserted between `podman create` and the IMAGE positional. Order is
-/// deterministic so test assertions can pin it.
+/// inserted between `podman create` and the IMAGE positional.
+///
+/// Thin wrapper over [`forge_oci::ContainerLimits::to_create_flags`]
+/// kept on this module path because earlier call sites and tests
+/// reach for `level2::limits_to_create_flags`. The actual shaping
+/// lives in `forge-oci` so the limit flags travel through the same
+/// `SecurityOpts` rendering as the security flags.
 pub fn limits_to_create_flags(limits: ContainerLimits) -> Vec<String> {
-    let mut out = Vec::new();
-    if let Some(cpus) = limits.cpus {
-        out.push("--cpus".to_string());
-        out.push(format_cpus(cpus));
-    }
-    if let Some(bytes) = limits.memory_bytes {
-        out.push("--memory".to_string());
-        out.push(bytes.to_string());
-    }
-    if let Some(pids) = limits.pids_max {
-        out.push("--pids-limit".to_string());
-        out.push(pids.to_string());
-    }
-    out
+    limits.to_create_flags()
 }
 
-/// Format CPU shares without a trailing `.0` for integer values (`1.0` →
-/// `"1"`) so the resulting podman command line matches the convention
-/// `podman` itself emits in `inspect`.
-fn format_cpus(cpus: f32) -> String {
-    if cpus.fract() == 0.0 {
-        format!("{}", cpus.trunc() as i64)
+/// Resolve the limits actually applied to the container.
+///
+/// `ContainerLimits::default()` (every field `None`) means the caller
+/// did not specify caps; in that case we substitute the F-654
+/// conservative preset so a fork-bomb / OOM workload cannot starve
+/// the host. Any non-default input is honoured verbatim — operators
+/// who explicitly opt for tighter or looser caps get exactly what
+/// they asked for, including a single field that they wanted unset.
+fn effective_limits(requested: ContainerLimits) -> ContainerLimits {
+    if requested == ContainerLimits::default() {
+        ContainerLimits::conservative_default()
     } else {
-        format!("{cpus}")
+        requested
     }
 }
 
@@ -186,15 +163,22 @@ impl Level2Session {
     /// Sequence (matches the F-595 lifecycle):
     /// 1. `runtime.pull(image)` — idempotent; layers cached if already
     ///    present.
-    /// 2. `runtime.create(image, init_argv)` — the container's "init"
-    ///    process. We default this to a `sleep infinity`-style argv via
-    ///    [`Self::default_init_argv`] so the container stays alive long
-    ///    enough for `exec` to hit it.
+    /// 2. `runtime.create(image, init_argv, opts)` — the container's
+    ///    "init" process plus the F-642 hardening flags and F-654
+    ///    resource caps. We default the argv to `sleep infinity` via
+    ///    [`Self::default_init_argv`] so the container stays alive
+    ///    long enough for `exec` to hit it.
     /// 3. `runtime.start(handle)` — flips the container to running.
     ///
-    /// Resource limits live on the returned session for observability
-    /// and will be passed at `create` time once F-595's trait is
-    /// extended (see module docs).
+    /// Resource limits travel through
+    /// [`forge_oci::SecurityOpts::limits`]: callers passing
+    /// [`ContainerLimits::default`] (every field `None`) get the
+    /// F-654 strict preset
+    /// ([`ContainerLimits::conservative_default`]) so a config
+    /// without explicit overrides still gets bounded — 2 cpus, 4
+    /// GiB memory with swap disabled, 1024 pids. Callers that need
+    /// looser caps override the specific field; an explicit
+    /// `Some(value)` is always honoured.
     pub async fn create(
         runtime: Arc<dyn ContainerRuntime>,
         image: ImageRef,
@@ -203,38 +187,23 @@ impl Level2Session {
         runtime.pull(&image).await?;
         // F-642: every Level 2 container is created with the strict
         // hardening defaults — no-new-privileges, cap-drop ALL, read-only
-        // rootfs, no network, keep-id user namespace. Documented at
-        // `docs/architecture/isolation-model.md` §8.3.
+        // rootfs, no network, keep-id user namespace. F-654 extends the
+        // same opts struct with cgroup caps so the same
+        // `runtime.create` call applies both layers.
+        let effective_limits = effective_limits(limits);
+        let opts = SecurityOpts {
+            limits: effective_limits,
+            ..SecurityOpts::hardened_default()
+        };
         let handle = runtime
-            .create(
-                &image,
-                Self::default_init_argv(),
-                &SecurityOpts::hardened_default(),
-            )
+            .create(&image, Self::default_init_argv(), &opts)
             .await?;
         runtime.start(&handle).await?;
-        // Operator-facing notice when limits are configured but not
-        // yet enforced. Until follow-up #631 lands, the container
-        // inherits whatever limits its parent slice applies — which
-        // for rootless podman is "the user's slice", not the values
-        // captured here. Logging at runtime catches accidental
-        // reliance on the not-yet-wired path.
-        if limits != ContainerLimits::default() {
-            tracing::warn!(
-                cpus = ?limits.cpus,
-                memory_bytes = ?limits.memory_bytes,
-                pids_max = ?limits.pids_max,
-                container_id = %handle.id,
-                "Level 2 ContainerLimits captured but not enforced; \
-                 cgroup wiring deferred to follow-up #631 — container \
-                 will run with host-slice default limits"
-            );
-        }
         Ok(Self {
             runtime,
             image,
             handle,
-            limits,
+            limits: effective_limits,
             teardown_done: AtomicBool::new(false),
         })
     }
@@ -690,6 +659,12 @@ mod tests {
         // created with the strict hardening preset. If a refactor drops
         // this propagation, the integration test would still pass with
         // a mock runtime — this test pins the explicit opt-in.
+        //
+        // F-654: the hardened preset now also carries the
+        // conservative cgroup caps, which `Level2Session::create`
+        // applies whenever the caller passes
+        // `ContainerLimits::default()` (the historical "no caps"
+        // signal). The full struct must round-trip identically.
         let mock: Arc<MockRuntime> = Arc::new(MockRuntime::default());
         let runtime: Arc<dyn ContainerRuntime> = mock.clone();
 
@@ -708,61 +683,113 @@ mod tests {
         );
     }
 
+    // ── F-654: Level2Session plumbs ContainerLimits through SecurityOpts ──
+
+    #[tokio::test]
+    async fn create_substitutes_conservative_limits_when_requested_is_default() {
+        // The historical entry point passes `ContainerLimits::default()`
+        // (every field None) to mean "no per-step caps configured".
+        // F-654 says that must NOT mean "container runs unbounded" —
+        // the strict preset takes over so the host stays protected.
+        let mock: Arc<MockRuntime> = Arc::new(MockRuntime::default());
+        let runtime: Arc<dyn ContainerRuntime> = mock.clone();
+
+        let session = Level2Session::create(runtime, alpine(), ContainerLimits::default())
+            .await
+            .unwrap();
+        session.disable_drop_cleanup();
+
+        let opts = mock
+            .last_create_opts()
+            .expect("runtime.create must have been invoked");
+        assert_eq!(
+            opts.limits,
+            ContainerLimits::conservative_default(),
+            "default ContainerLimits must be substituted with the F-654 conservative preset"
+        );
+        // The session also reflects the substitution so callers
+        // observing `session.limits()` see what actually landed on
+        // the container, not the (empty) request.
+        assert_eq!(session.limits(), ContainerLimits::conservative_default());
+    }
+
+    #[tokio::test]
+    async fn create_honours_caller_supplied_limits_verbatim() {
+        // An explicit non-default `ContainerLimits` reaches the
+        // runtime untouched — including a single tightened field
+        // with the rest left unset. Operators who pin a value get
+        // exactly that value, no merge with the conservative preset.
+        let mock: Arc<MockRuntime> = Arc::new(MockRuntime::default());
+        let runtime: Arc<dyn ContainerRuntime> = mock.clone();
+
+        let requested = ContainerLimits {
+            cpus: Some(0.5),
+            memory_bytes: Some(128 * 1024 * 1024),
+            memory_swap_bytes: Some(128 * 1024 * 1024),
+            pids_max: Some(64),
+        };
+        let session = Level2Session::create(runtime, alpine(), requested)
+            .await
+            .unwrap();
+        session.disable_drop_cleanup();
+
+        let opts = mock
+            .last_create_opts()
+            .expect("runtime.create must have been invoked");
+        assert_eq!(opts.limits, requested);
+        assert_eq!(session.limits(), requested);
+    }
+
+    #[tokio::test]
+    async fn create_renders_limit_flags_in_security_opts_argv() {
+        // Companion to the integration test against a real podman:
+        // here we assert the SecurityOpts the trait observed would
+        // render the four expected flags (`--cpus`, `--memory`,
+        // `--memory-swap`, `--pids-limit`). The MockRuntime captures
+        // the SecurityOpts struct directly so we can render off the
+        // recorded value.
+        let mock: Arc<MockRuntime> = Arc::new(MockRuntime::default());
+        let runtime: Arc<dyn ContainerRuntime> = mock.clone();
+
+        let _session = Level2Session::create(runtime, alpine(), ContainerLimits::default())
+            .await
+            .unwrap();
+        _session.disable_drop_cleanup();
+
+        let opts = mock.last_create_opts().expect("create invoked");
+        let flags = opts.to_create_flags();
+        for required in ["--cpus", "--memory", "--memory-swap", "--pids-limit"] {
+            assert!(
+                flags.iter().any(|f| f == required),
+                "rendered argv missing F-654 limit flag {required:?}: {flags:?}"
+            );
+        }
+    }
+
     // ── ContainerLimits flag shaping ─────────────────────────────────
+    //
+    // The struct itself, including `--cpus` / `--memory` /
+    // `--memory-swap` / `--pids-limit` rendering and the F-654
+    // conservative preset, is owned by `forge-oci` and tested in that
+    // crate. The session-level wiring (substitute conservative when
+    // the caller passes default; honour explicit limits verbatim) is
+    // covered by the `create_substitutes_conservative_limits…` and
+    // `create_honours_caller_supplied_limits_verbatim` tests above.
 
     #[test]
-    fn limits_to_create_flags_emits_in_canonical_order() {
-        // Order is fixed: --cpus, --memory, --pids-limit. The eventual
-        // `create_with_limits` extension on the F-595 trait will feed
-        // these directly into the IMAGE-prefixed argv.
+    fn level2_helper_delegates_to_forge_oci_rendering() {
+        // `level2::limits_to_create_flags` is a thin wrapper kept on
+        // this module path for older call sites; it must stay
+        // consistent with the canonical `ContainerLimits` rendering
+        // owned by forge-oci so call sites grep'd against either path
+        // observe identical argv shape.
         let limits = ContainerLimits {
             cpus: Some(1.5),
             memory_bytes: Some(512 * 1024 * 1024),
+            memory_swap_bytes: Some(512 * 1024 * 1024),
             pids_max: Some(256),
         };
-        assert_eq!(
-            limits.to_create_flags(),
-            vec![
-                "--cpus".to_string(),
-                "1.5".to_string(),
-                "--memory".to_string(),
-                (512 * 1024 * 1024u64).to_string(),
-                "--pids-limit".to_string(),
-                "256".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn limits_to_create_flags_skips_none_fields() {
-        let limits = ContainerLimits {
-            cpus: None,
-            memory_bytes: Some(1_000),
-            pids_max: None,
-        };
-        assert_eq!(
-            limits.to_create_flags(),
-            vec!["--memory".to_string(), "1000".to_string()]
-        );
-    }
-
-    #[test]
-    fn limits_to_create_flags_default_is_empty() {
-        // No limits configured → no flags. Matches "inherit slice
-        // limits" semantics.
-        assert!(ContainerLimits::default().to_create_flags().is_empty());
-    }
-
-    #[test]
-    fn cpus_integer_value_renders_without_decimal() {
-        let limits = ContainerLimits {
-            cpus: Some(1.0),
-            ..Default::default()
-        };
-        assert_eq!(
-            limits.to_create_flags(),
-            vec!["--cpus".to_string(), "1".to_string()]
-        );
+        assert_eq!(limits_to_create_flags(limits), limits.to_create_flags());
     }
 
     // ── classify_detect_error: fallback variants ─────────────────────
@@ -921,6 +948,10 @@ mod tests {
         // F-642: every hardening flag must be present in the create argv —
         // end-to-end proof that Level2Session ships the strict preset
         // through the trait into PodmanRuntime's flag rendering.
+        // F-654: the conservative cgroup caps must travel through the
+        // same rendering when the caller asked for the default
+        // limits, so a host-default config still bounds the
+        // container.
         for required in [
             "--security-opt",
             "no-new-privileges",
@@ -931,10 +962,14 @@ mod tests {
             "none",
             "--userns",
             "keep-id",
+            "--cpus",
+            "--memory",
+            "--memory-swap",
+            "--pids-limit",
         ] {
             assert!(
                 create_args.iter().any(|a| a == required),
-                "create argv missing F-642 hardening flag {required:?}: {create_args:?}"
+                "create argv missing required flag {required:?}: {create_args:?}"
             );
         }
         // exec's argv carries the caller's command after the container id.
