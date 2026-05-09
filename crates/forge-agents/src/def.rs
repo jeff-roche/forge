@@ -10,6 +10,56 @@ use std::{fs, path::Path};
 
 use crate::error::{Error, Result};
 
+/// Maximum byte length for an agent name. Mirrors `MAX_AGENT_ID_BYTES`
+/// in `forge-shell::memory_ipc` so the IPC and parse paths agree.
+pub const MAX_AGENT_NAME_BYTES: usize = 64;
+
+/// F-649: validate an agent name as a path-safe filesystem stem.
+///
+/// Agent names land on disk as `<memory_root>/<name>.md`, so any input that
+/// could escape the root (path separators, `..`, leading `.`, whitespace) or
+/// blow up the filename (oversized stems) is rejected up front. Modeled on
+/// [`forge_core::skill::SkillId`] with an added 64-byte length cap matching
+/// the IPC `MAX_AGENT_ID_BYTES` ceiling.
+pub fn validate_agent_name(name: &str) -> Result<()> {
+    let invalid = |reason: &str| {
+        Err(Error::InvalidAgentName {
+            name: name.to_string(),
+            reason: reason.to_string(),
+        })
+    };
+
+    if name.is_empty() {
+        return invalid("name must not be empty");
+    }
+    if name.len() > MAX_AGENT_NAME_BYTES {
+        return invalid(&format!(
+            "name too large: {} bytes exceeds cap of {} bytes",
+            name.len(),
+            MAX_AGENT_NAME_BYTES
+        ));
+    }
+    if name.contains('/') || name.contains('\\') {
+        return invalid("name must not contain a path separator ('/' or '\\\\')");
+    }
+    if name.starts_with('.') {
+        return invalid("name must not start with '.'");
+    }
+    if name == ".." || name.contains("..") {
+        return invalid("name must not contain '..'");
+    }
+    if name.chars().any(|c| c.is_ascii_whitespace()) {
+        return invalid("name must not contain whitespace");
+    }
+    if name
+        .chars()
+        .any(|c| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+    {
+        return invalid("name must contain only [A-Za-z0-9_-]");
+    }
+    Ok(())
+}
+
 /// Runtime isolation level applied to a live [`AgentInstance`](crate::AgentInstance).
 ///
 /// `Trusted` bypasses sandboxing and is reserved for built-in skills shipped
@@ -113,6 +163,16 @@ pub(crate) fn parse_agent_file(path: &Path) -> Result<AgentDef> {
     match parsed.data {
         Some(fm) => {
             let name = fm.name.unwrap_or_else(|| stem.clone());
+            if let Err(err) = validate_agent_name(&name) {
+                tracing::warn!(
+                    target: "forge_agents::def",
+                    path = %path.display(),
+                    agent_name = %name,
+                    error = %err,
+                    "rejected agent: invalid name",
+                );
+                return Err(err);
+            }
             let isolation = match fm.isolation.as_deref() {
                 Some("trusted") => {
                     tracing::warn!(
@@ -151,14 +211,26 @@ pub(crate) fn parse_agent_file(path: &Path) -> Result<AgentDef> {
                 memory_enabled,
             })
         }
-        None => Ok(AgentDef {
-            name: stem,
-            description: None,
-            body: parsed.content,
-            allowed_paths: vec![],
-            isolation: Isolation::Process,
-            memory_enabled: false,
-        }),
+        None => {
+            if let Err(err) = validate_agent_name(&stem) {
+                tracing::warn!(
+                    target: "forge_agents::def",
+                    path = %path.display(),
+                    agent_name = %stem,
+                    error = %err,
+                    "rejected agent: invalid file stem",
+                );
+                return Err(err);
+            }
+            Ok(AgentDef {
+                name: stem,
+                description: None,
+                body: parsed.content,
+                allowed_paths: vec![],
+                isolation: Isolation::Process,
+                memory_enabled: false,
+            })
+        }
     }
 }
 
@@ -173,4 +245,101 @@ pub(crate) fn load_from_dir(dir: &Path) -> Result<Vec<AgentDef>> {
         .collect();
     paths.sort();
     paths.iter().map(|p| parse_agent_file(p)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    /// F-649: Path-traversal characters in `name` must be rejected before any
+    /// downstream consumer (e.g. `MemoryStore`) can join them onto a root.
+    #[test]
+    fn validate_agent_name_rejects_traversal_attempts() {
+        let traversal_inputs = [
+            "../../../etc/passwd",
+            "../escape",
+            "..",
+            "foo/../bar",
+            "foo/bar",
+            "foo\\bar",
+            "/abs/path",
+            ".hidden",
+            ".",
+            "",
+            "with space",
+            "tab\there",
+            "new\nline",
+            "weird:colon",
+            "ünïcödé",
+        ];
+        for input in traversal_inputs {
+            let err = validate_agent_name(input).unwrap_err();
+            assert!(
+                matches!(err, Error::InvalidAgentName { .. }),
+                "expected InvalidAgentName for {input:?}, got {err:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn validate_agent_name_rejects_oversized_input() {
+        let too_long = "a".repeat(MAX_AGENT_NAME_BYTES + 1);
+        let err = validate_agent_name(&too_long).unwrap_err();
+        assert!(matches!(err, Error::InvalidAgentName { .. }));
+    }
+
+    #[test]
+    fn validate_agent_name_accepts_safe_stems() {
+        for ok in ["scribe", "agent_1", "code-reviewer", "ABC123", "_private"] {
+            validate_agent_name(ok).expect(ok);
+        }
+        // Exact-cap length is fine.
+        let exact = "a".repeat(MAX_AGENT_NAME_BYTES);
+        validate_agent_name(&exact).unwrap();
+    }
+
+    /// F-649: a hostile agent definition with `name: "../../../tmp/owned"` in
+    /// frontmatter must be rejected at parse time, not happily handed downstream.
+    #[test]
+    fn parse_agent_file_rejects_traversal_in_frontmatter_name() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("legit.md");
+        fs::write(&path, "---\nname: \"../../../tmp/owned\"\n---\n\nbody").unwrap();
+        let err = parse_agent_file(&path).unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidAgentName { .. }),
+            "expected InvalidAgentName, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn parse_agent_file_rejects_path_separator_in_frontmatter_name() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("legit.md");
+        fs::write(&path, "---\nname: \"foo/bar\"\n---\n\nbody").unwrap();
+        let err = parse_agent_file(&path).unwrap_err();
+        assert!(matches!(err, Error::InvalidAgentName { .. }));
+    }
+
+    #[test]
+    fn parse_agent_file_rejects_dotfile_stem_fallback() {
+        // Frontmatter omits `name`, so the loader falls back to the file
+        // stem. A `.hidden.md` stem is `.hidden` — must be rejected just like
+        // a hostile frontmatter name.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(".hidden.md");
+        fs::write(&path, "---\ndescription: x\n---\n\nbody").unwrap();
+        let err = parse_agent_file(&path).unwrap_err();
+        assert!(matches!(err, Error::InvalidAgentName { .. }));
+    }
+
+    #[test]
+    fn parse_agent_file_accepts_safe_name() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("scribe.md");
+        fs::write(&path, "---\nname: scribe\n---\n\nbody").unwrap();
+        let def = parse_agent_file(&path).unwrap();
+        assert_eq!(def.name, "scribe");
+    }
 }
