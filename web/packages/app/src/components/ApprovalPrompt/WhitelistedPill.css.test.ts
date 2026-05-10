@@ -44,8 +44,12 @@ describe('WhitelistedPill — design-token adherence (F-090)', () => {
     expect(body).not.toMatch(/padding:\s*2px\b/);
   });
 
-  it('font-size matches mono-xs scale (9px), not raw 10px', () => {
-    expect(hasDecl(body, 'font-size', '9px')).toBe(true);
+  it('font-size resolves to mono-xs (9px) via the typography token, not raw 10px', () => {
+    // F-823 migrated the raw `font-size: 9px` to the `--type-mono-xs`
+    // typography token. The F-090 invariant is preserved (mono-xs scale,
+    // not 10px); we just assert on the token name now.
+    expect(hasDecl(body, 'font-size', 'var(--type-mono-xs)')).toBe(true);
     expect(body).not.toMatch(/font-size:\s*10px\b/);
+    expect(body).not.toMatch(/font-size:\s*9px\b/);
   });
 });
