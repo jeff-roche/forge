@@ -4,6 +4,14 @@ version = "0.3.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 
+[features]
+# Re-exports the `RecordingRunner` / `StubResponse` / `RecordedCalls` /
+# `RecordedCall` mock-runner toolkit so downstream crates can drive
+# `PodmanRuntime::with_runner` from their own tests without spawning a
+# real `podman`. Off by default to keep the published API surface
+# focused on production types.
+test-support = []
+
 [dependencies]
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
@@ -14,3 +22,14 @@ tracing = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+# F-626: integration test consumes the `RecordingRunner` mock toolkit
+# which is gated on the `test-support` feature. `required-features`
+# tells cargo to skip the target on plain `cargo test -p forge-oci`
+# (which does not enable the feature) instead of failing to compile.
+# CI exercises the integration test via `cargo test --all-features`
+# / `RUSTDOCFLAGS=-D warnings cargo doc --no-deps --all-features`.
+[[test]]
+name = "podman_integration"
+path = "tests/podman_integration.rs"
+required-features = ["test-support"]
