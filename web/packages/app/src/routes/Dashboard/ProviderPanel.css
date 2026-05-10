@@ -19,7 +19,7 @@
 
 .provider-panel__label {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--type-mono-xxs);
   letter-spacing: 0.2em;
   color: var(--color-text-tertiary);
   text-transform: uppercase;
@@ -35,7 +35,7 @@
 
 .provider-panel__loading {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   color: var(--color-text-secondary);
   letter-spacing: 0.2em;
   margin: 0;
@@ -73,7 +73,7 @@
 
 .provider-panel__url {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--type-body-sm);
   color: var(--color-text-secondary);
 }
 
@@ -99,7 +99,7 @@
 
 .provider-panel__model {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--type-body-sm);
   color: var(--color-text-primary);
 }
 
@@ -113,7 +113,7 @@
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.1em;
-  font-size: 12px;
+  font-size: var(--type-body-sm);
   padding: var(--sp-2) var(--sp-4);
   background: transparent;
   color: var(--color-text-primary);
@@ -160,13 +160,13 @@
 .provider-panel__error-code {
   margin: 0;
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--type-body-sm);
   color: var(--color-ember-300);
 }
 
 .provider-panel__error-detail {
   margin: 0;
-  font-size: 13px;
+  font-size: var(--type-mono-md);
   color: var(--color-text-secondary);
 }
 
@@ -186,6 +186,6 @@
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.1em;
-  font-size: 12px;
+  font-size: var(--type-body-sm);
   color: var(--color-ember-300);
 }

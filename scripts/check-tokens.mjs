@@ -35,17 +35,15 @@ const cssScanRoots = [
   resolve(repoRoot, 'web/packages/design/src'),
 ];
 
-// Pre-existing violations baseline (F-699 follow-up #820). 29 files at the
-// time of landing the rule; cleanup is tracked separately so this PR can
-// ship the gate without an unrelated style migration. Do NOT add new
-// entries — fix the violation instead, or use a typography token.
+// Justified residuals only (F-823). The original baseline from #820 had 29
+// files; #823 migrated the rest to typography tokens. The single remaining
+// entry is UsagePane.css, which uses a `font-size` declaration on an SVG
+// `<text>` element inside a `viewBox` — that's a userSpaceOnUse coordinate,
+// not a CSS px, so the typography scale doesn't apply. The justification is
+// inlined as a `/* token-allowlist: ... */` comment at the declaration site.
+// Do NOT add new entries — fix the violation or use a typography token.
 const cssTypographyAllowlist = new Set([
-  'web/packages/app/src/components/ApprovalPrompt/ApprovalPrompt.css',
-  'web/packages/app/src/components/ApprovalPrompt/WhitelistedPill.css',
   'web/packages/app/src/components/usage/UsagePane.css',
-  'web/packages/app/src/routes/AgentMonitor.css',
-  'web/packages/app/src/routes/Dashboard/ProviderPanel.css',
-  'web/packages/app/src/routes/Dashboard/SessionsPanel.css',
 ]);
 
 /**

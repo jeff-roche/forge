@@ -37,14 +37,14 @@
 
 .sessions__tab-label {
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: var(--type-mono-xs);
   letter-spacing: 0.2em;
   text-transform: uppercase;
 }
 
 .sessions__tab-count {
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: var(--type-mono-xs);
   letter-spacing: 0.15em;
   color: var(--color-text-tertiary);
   transition: color var(--ease);
@@ -70,7 +70,7 @@
 
 .sessions__empty {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   color: var(--color-text-tertiary);
   margin: var(--sp-6) 0;
 }
@@ -80,7 +80,7 @@
  * four-state coverage exemplar. */
 .sessions__loading {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   color: var(--color-text-secondary);
   margin: var(--sp-6) 0;
 }
@@ -100,7 +100,7 @@
 
 .sessions__list-error-title {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--type-mono-xxs);
   letter-spacing: 0.15em;
   text-transform: uppercase;
   color: var(--color-error);
@@ -109,7 +109,7 @@
 
 .sessions__list-error-detail {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   color: var(--color-text-primary);
   margin: 0;
   word-break: break-word;
@@ -121,7 +121,7 @@
   border: 1px solid var(--color-error-border);
   color: var(--color-error);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--type-mono-xxs);
   letter-spacing: 0.15em;
   text-transform: uppercase;
   padding: var(--sp-1) var(--sp-3);
@@ -141,7 +141,7 @@
 /* F-079: inline error surface for failed open_session invokes. */
 .sessions__error {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   color: var(--color-warning);
   margin: 0;
   padding: var(--sp-2) var(--sp-3);
@@ -196,7 +196,7 @@
 
 .session-card__subject {
   font-family: var(--font-body);
-  font-size: 17px;
+  font-size: var(--type-body-lg);
   font-weight: 500;
   line-height: 1.3;
   margin: 0;
@@ -211,7 +211,7 @@
 .session-card__badge {
   flex-shrink: 0;
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: var(--type-mono-xs);
   letter-spacing: 0.15em;
   text-transform: uppercase;
   padding: 2px var(--sp-2);
@@ -279,7 +279,7 @@
 
 .session-card__state-label {
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: var(--type-mono-xs);
   letter-spacing: 0.2em;
   text-transform: uppercase;
   color: var(--color-text-secondary);
@@ -297,6 +297,6 @@
 .session-card__provider,
 .session-card__last {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   color: var(--color-text-secondary);
 }

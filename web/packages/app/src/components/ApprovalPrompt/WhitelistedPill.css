@@ -16,7 +16,7 @@
   border: 1px solid var(--color-success-border);
   border-radius: 999px;
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: var(--type-mono-xs);
   color: var(--color-success);
   cursor: pointer;
   transition: var(--ease);
@@ -58,7 +58,7 @@
   background: transparent;
   border: none;
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   color: var(--color-error);
   cursor: pointer;
   text-align: left;

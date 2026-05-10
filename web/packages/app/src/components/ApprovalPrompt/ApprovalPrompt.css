@@ -16,7 +16,7 @@
 .approval-prompt__title {
   margin: 0;
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--type-mono-xxs);
   font-weight: 400;
   letter-spacing: 0.2em;
   text-transform: uppercase;
@@ -38,7 +38,7 @@
   margin: 0;
   padding: var(--sp-3) var(--sp-4);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   line-height: 1.6;
   color: var(--color-text-secondary);
   white-space: pre-wrap;
@@ -59,7 +59,7 @@
 
 .approval-prompt__level-label {
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: var(--type-mono-xs);
   letter-spacing: 0.3em;
   text-transform: uppercase;
   color: var(--color-text-secondary);
@@ -74,7 +74,7 @@
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.1em;
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   color: var(--color-text-secondary);
   cursor: pointer;
   transition: var(--ease);
@@ -109,7 +109,7 @@
 
 .approval-prompt__pattern-label {
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: var(--type-mono-xs);
   letter-spacing: 0.3em;
   text-transform: uppercase;
   color: var(--color-text-secondary);
@@ -128,7 +128,7 @@
   border: 1px solid var(--color-border-2);
   border-radius: var(--r-sm);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   color: var(--color-text-primary);
   outline: none;
 }
@@ -168,7 +168,7 @@
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.1em;
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   cursor: pointer;
   transition: var(--ease);
   line-height: 1;
@@ -236,7 +236,7 @@
   border: 1px solid currentColor;
   border-radius: 2px;
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: var(--type-mono-xs);
   opacity: 0.6;
   line-height: 1.4;
 }
@@ -251,7 +251,7 @@
   border-radius: var(--r-sm);
   background: rgba(255, 74, 18, 0.08);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   color: var(--color-ember-400);
 }
 
@@ -291,7 +291,7 @@
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.1em;
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   color: var(--color-text-primary);
   cursor: pointer;
   text-align: left;

@@ -40,7 +40,7 @@
   align-items: center;
   gap: var(--sp-2);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--color-text-secondary);
@@ -67,7 +67,7 @@
 
 .usage-pane__section-label {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--type-mono-xxs);
   letter-spacing: 0.2em;
   color: var(--color-text-tertiary);
   text-transform: uppercase;
@@ -80,7 +80,7 @@
 
 .usage-pane__empty {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   color: var(--color-text-secondary);
   letter-spacing: 0.2em;
   margin: 0;
@@ -112,7 +112,7 @@
   border-radius: var(--r-sm);
   margin: 0;
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--type-body-sm);
   color: var(--color-ember-300);
 }
 
@@ -122,13 +122,13 @@
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.1em;
-  font-size: 12px;
+  font-size: var(--type-body-sm);
   color: var(--color-ember-300);
 }
 
 .usage-pane__error-detail {
   margin: 0;
-  font-size: 13px;
+  font-size: var(--type-mono-md);
   color: var(--color-text-secondary);
 }
 
@@ -163,6 +163,10 @@
 
 .usage-pane__chart-axis-text {
   font-family: var(--font-mono);
+  /* token-allowlist: SVG userSpaceOnUse coordinate inside a <svg viewBox>; this
+   * is not a CSS px and scales with the chart. The typography token scale does
+   * not apply here. UsagePane.css stays in cssTypographyAllowlist for this
+   * one declaration. */
   font-size: 3.2px;
   fill: var(--color-text-tertiary);
 }
@@ -193,7 +197,7 @@
   flex-wrap: wrap;
   gap: var(--sp-3);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   color: var(--color-text-secondary);
 }
 
@@ -235,14 +239,14 @@
   width: 100%;
   border-collapse: collapse;
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--type-body-sm);
   color: var(--color-text-primary);
 }
 
 .usage-pane__table thead th {
   text-align: left;
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--type-mono-xxs);
   letter-spacing: 0.2em;
   text-transform: uppercase;
   color: var(--color-text-tertiary);
@@ -292,6 +296,6 @@
 
 .usage-pane__limit-meta {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   color: var(--color-text-secondary);
 }

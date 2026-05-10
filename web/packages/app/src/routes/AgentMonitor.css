@@ -39,7 +39,7 @@
   cursor: pointer;
   color: var(--color-text-secondary);
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: var(--type-mono-xs);
   letter-spacing: 0.2em;
   text-transform: uppercase;
   transition: color var(--ease);
@@ -108,7 +108,7 @@
 
 .agent-monitor__row-name {
   font-family: var(--font-body);
-  font-size: 13px;
+  font-size: var(--type-mono-md);
   display: inline-flex;
   align-items: center;
   gap: var(--sp-2);
@@ -148,7 +148,7 @@
 
 .agent-monitor__row-meta {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--type-mono-xxs);
   color: var(--color-text-secondary);
   letter-spacing: 0.1em;
   text-transform: uppercase;
@@ -183,7 +183,7 @@
 
 .agent-monitor__empty {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   color: var(--color-text-tertiary);
   margin: var(--sp-4) 0;
 }
@@ -193,7 +193,7 @@
  * the UNAVAILABLE block mirror ProviderPanel's exemplar. */
 .agent-monitor__loading {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   color: var(--color-text-secondary);
   margin: var(--sp-4) 0;
 }
@@ -213,7 +213,7 @@
 
 .agent-monitor__error-title {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--type-mono-xxs);
   letter-spacing: 0.15em;
   text-transform: uppercase;
   color: var(--color-error);
@@ -222,7 +222,7 @@
 
 .agent-monitor__error-detail {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   color: var(--color-text-primary);
   margin: 0;
   word-break: break-word;
@@ -234,7 +234,7 @@
   border: 1px solid var(--color-error-border);
   color: var(--color-error);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--type-mono-xxs);
   letter-spacing: 0.15em;
   text-transform: uppercase;
   padding: var(--sp-1) var(--sp-3);
@@ -271,7 +271,7 @@
 
 .agent-monitor__trace-name {
   font-family: var(--font-display);
-  font-size: 22px;
+  font-size: var(--type-display-md);
   font-weight: 500;
   margin: 0;
   letter-spacing: 0.02em;
@@ -279,7 +279,7 @@
 
 .agent-monitor__trace-id {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--type-mono-xxs);
   color: var(--color-text-secondary);
 }
 
@@ -288,7 +288,7 @@
    the neutral surface chip. Sized to match step chips and inspector pills. */
 .agent-monitor__trace-chip {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--type-mono-xxs);
   letter-spacing: 0.08em;
   padding: 2px var(--sp-2);
   border-radius: 2px;
@@ -319,7 +319,7 @@
   align-items: center;
   gap: var(--sp-2);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--type-mono-xxs);
   letter-spacing: 0.08em;
   color: var(--color-text-secondary);
   flex-wrap: wrap;
@@ -425,7 +425,7 @@
 
 .agent-monitor__step-chip {
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: var(--type-mono-xs);
   letter-spacing: 0.15em;
   text-transform: uppercase;
   padding: 2px var(--sp-2);
@@ -471,7 +471,7 @@
 }
 
 .agent-monitor__step-title {
-  font-size: 13px;
+  font-size: var(--type-mono-md);
   color: var(--color-text-primary);
 }
 
@@ -489,7 +489,7 @@
 
 .agent-monitor__inspector-heading {
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: var(--type-mono-xs);
   letter-spacing: 0.2em;
   text-transform: uppercase;
   color: var(--color-text-secondary);
@@ -502,7 +502,7 @@
   row-gap: var(--sp-2);
   column-gap: var(--sp-3);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   margin: 0;
 }
 
@@ -533,7 +533,7 @@
   background: var(--color-surface-2);
   color: var(--color-text-secondary);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--type-mono-xxs);
   letter-spacing: 0.08em;
 }
 
@@ -554,7 +554,7 @@
   border: 1px solid var(--color-error-border);
   color: var(--color-error);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--type-mono-xxs);
   letter-spacing: 0.15em;
   text-transform: uppercase;
   padding: var(--sp-2) var(--sp-4);
@@ -583,7 +583,7 @@
   border: 1px solid var(--color-border-2);
   color: var(--color-text-primary);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--type-mono-xxs);
   letter-spacing: 0.15em;
   text-transform: uppercase;
   padding: var(--sp-2) var(--sp-4);
@@ -641,7 +641,7 @@
 .agent-monitor__refine-head h3 {
   margin: 0;
   font-family: var(--font-display);
-  font-size: 17px;
+  font-size: var(--type-body-lg);
   font-weight: 500;
 }
 
@@ -650,12 +650,12 @@
   background: transparent;
   border: 0;
   color: var(--color-text-secondary);
-  font-size: 20px;
+  font-size: var(--type-display-md);
   cursor: pointer;
   padding: 0;
   width: 24px;
   height: 24px;
-  line-height: 20px;
+  line-height: 1;
 }
 
 .agent-monitor__refine-close:focus-visible {
@@ -665,7 +665,7 @@
 
 .agent-monitor__refine-text {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--type-body-sm);
   color: var(--color-text-primary);
   background: var(--color-bg);
   border: 1px solid var(--color-border-1);
@@ -717,7 +717,7 @@
 .agent-monitor__drawer-head h3 {
   margin: 0;
   font-family: var(--font-display);
-  font-size: 17px;
+  font-size: var(--type-body-lg);
   font-weight: 500;
 }
 
@@ -726,12 +726,12 @@
   background: transparent;
   border: 0;
   color: var(--color-text-secondary);
-  font-size: 20px;
+  font-size: var(--type-display-md);
   cursor: pointer;
   padding: 0;
   width: 24px;
   height: 24px;
-  line-height: 20px;
+  line-height: 1;
 }
 
 .agent-monitor__drawer-close:focus-visible {
@@ -741,7 +741,7 @@
 
 .agent-monitor__drawer-preview {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   color: var(--color-text-secondary);
   background: var(--color-bg);
   border: 1px solid var(--color-border-1);
