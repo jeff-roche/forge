@@ -315,3 +315,38 @@ fn memory_terse_alias_takes_effect() {
     assert_eq!(agents.len(), 1);
     assert!(agents[0].memory_enabled);
 }
+
+#[test]
+fn unknown_frontmatter_field_loads_and_emits_warn() {
+    // #702: forward-compat — an unknown key (typo or future field) MUST NOT
+    // fail the parse, but the loader MUST emit a `tracing::warn!` naming
+    // the unknown field so operators can spot YAML typos in logs.
+    let _guard = common::capture_test_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    common::install_capture_subscriber();
+    let _ = common::drain_capture();
+
+    let workspace = tempdir().unwrap();
+    let agents_dir = workspace.path().join(".agents");
+    write_agent(
+        &agents_dir,
+        "scribe.md",
+        "---\nname: scribe\nunkown_field: foo\n---\n\nNotes.",
+    );
+
+    let agents = load_workspace_agents(workspace.path())
+        .expect("unknown fields must not break the load (forward-compat)");
+    assert_eq!(agents.len(), 1, "load must succeed despite unknown field");
+    assert_eq!(agents[0].name, "scribe");
+
+    let logs = common::drain_capture();
+    assert!(
+        logs.contains("WARN") && logs.contains("forge_agents::def"),
+        "unknown-field warn must surface under forge_agents::def, got: {logs}"
+    );
+    assert!(
+        logs.contains("unkown_field"),
+        "warn must name the unknown key (got: {logs})"
+    );
+}

@@ -5,8 +5,8 @@
 
 use anyhow::Context;
 use gray_matter::{engine::YAML, Matter, ParsedEntity};
-use serde::Deserialize;
-use std::{fs, path::Path};
+use serde::{de::IgnoredAny, Deserialize};
+use std::{collections::BTreeMap, fs, path::Path};
 
 use crate::error::{Error, Result};
 
@@ -120,6 +120,11 @@ struct Frontmatter {
     /// F-601: terse alias `memory: true` accepted alongside `memory_enabled: true`.
     memory: Option<bool>,
     memory_enabled: Option<bool>,
+    /// Catch-all for keys not matched above. Forward-compat preserves silent
+    /// acceptance, but the loader emits a `tracing::warn!` per key so typos
+    /// (e.g. `isolaton:`) surface in operator logs instead of being swallowed.
+    #[serde(flatten)]
+    extra: BTreeMap<String, IgnoredAny>,
 }
 
 pub(crate) fn parse_agent_file(path: &Path) -> Result<AgentDef> {
@@ -162,6 +167,14 @@ pub(crate) fn parse_agent_file(path: &Path) -> Result<AgentDef> {
 
     match parsed.data {
         Some(fm) => {
+            for unknown in fm.extra.keys() {
+                tracing::warn!(
+                    target: "forge_agents::def",
+                    path = %path.display(),
+                    unknown_field = %unknown,
+                    "unknown frontmatter field; ignored (forward-compat) — verify it is not a typo",
+                );
+            }
             let name = fm.name.unwrap_or_else(|| stem.clone());
             if let Err(err) = validate_agent_name(&name) {
                 tracing::warn!(
