@@ -66,11 +66,20 @@ check-rust:
     cargo clippy --workspace --all-targets -- -D warnings
     RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 
-# Web lane: typecheck + design-token drift gate.
+# Web lane: typecheck + design-token drift gate + raw-button gate.
 # Mirrors the pnpm lint steps in the `frontend` job. Assumes deps installed.
+# `check-voice` is informational and lives in its own recipe; promote
+# it into this lane once the corpus is clean (F-699 follow-up #820).
 check-web:
     cd web && pnpm -r typecheck
     cd web && pnpm check-tokens
+    cd web && pnpm check-raw-buttons
+
+# Voice-terminology helper (F-699 follow-up #820, item 6). Informational:
+# always exits 0, prints findings for human triage. Promote into
+# `check-web` once the corpus is clean.
+check-voice:
+    cd web && pnpm check-voice
 
 # Markdown link-rot gate (F-705). Offline lane only — mirrors the
 # `internal-links` job in .github/workflows/link-check.yml. The

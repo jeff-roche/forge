@@ -254,9 +254,19 @@ jobs:
       - name: pnpm audit
         run: pnpm audit --audit-level moderate
 
-      - name: Web checks (typecheck + token drift)
+      - name: Web checks (typecheck + token drift + raw buttons)
         working-directory: .
         run: just check-web
+
+      # F-699 follow-up #820: voice-terminology helper. Informational
+      # only — `check-voice.mjs` always exits 0 and the step is
+      # `continue-on-error: true` so a transient phrasing nit never
+      # blocks a PR. Findings show up in the workflow summary for
+      # human triage. Promote to gating once the corpus is clean.
+      - name: Voice-terminology drift (informational)
+        working-directory: .
+        continue-on-error: true
+        run: just check-voice
 
       - name: Build
         run: pnpm -r build

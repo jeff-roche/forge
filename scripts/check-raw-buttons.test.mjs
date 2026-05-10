@@ -88,6 +88,26 @@ test('does not false-positive on a string containing the word button', async () 
   if (findings.length !== 0) throw new Error(`expected 0 findings, got ${findings.length}: ${JSON.stringify(findings)}`);
 });
 
+test('skips .test.tsx files (tests legitimately reference raw <button>)', async () => {
+  const findings = await runRule({
+    files: {
+      'web/packages/app/src/components/Foo.test.tsx':
+        "it('was a raw button', () => { render(() => <button>x</button>); });\n",
+    },
+  });
+  if (findings.length !== 0) throw new Error(`expected 0 findings, got ${findings.length}: ${JSON.stringify(findings)}`);
+});
+
+test('skips // line comments that mention <button>', async () => {
+  const findings = await runRule({
+    files: {
+      'web/packages/app/src/components/Foo.tsx':
+        '// state chip is a <button> that wraps the popover\nexport const Foo = () => <span>x</span>;\n',
+    },
+  });
+  if (findings.length !== 0) throw new Error(`expected 0 findings, got ${findings.length}: ${JSON.stringify(findings)}`);
+});
+
 let failed = 0;
 for (const { name, fn } of cases) {
   try {

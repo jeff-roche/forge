@@ -24,6 +24,53 @@ const tsxScanRoots = [
   resolve(repoRoot, 'web/packages/design/src'),
 ];
 
+// Scope for the CSS-side typography scan (F-699 follow-up #820, item 1).
+// We flag bare `font-size: <N>px` and `line-height: <N>px` declarations —
+// the two CSS properties where pixel literals most often drift from the
+// typography scale. Static contexts where px is intentional (border-width,
+// margin, padding, transform) are *not* covered: those have their own
+// design-time conventions and the false-positive rate would dominate.
+const cssScanRoots = [
+  resolve(repoRoot, 'web/packages/app/src'),
+  resolve(repoRoot, 'web/packages/design/src'),
+];
+
+// Pre-existing violations baseline (F-699 follow-up #820). 29 files at the
+// time of landing the rule; cleanup is tracked separately so this PR can
+// ship the gate without an unrelated style migration. Do NOT add new
+// entries — fix the violation instead, or use a typography token.
+const cssTypographyAllowlist = new Set([
+  'web/packages/app/src/commands/CommandPalette.css',
+  'web/packages/app/src/components/ApprovalPrompt/ApprovalPrompt.css',
+  'web/packages/app/src/components/ApprovalPrompt/WhitelistedPill.css',
+  'web/packages/app/src/components/BranchMetadataPopover.css',
+  'web/packages/app/src/components/BranchSelectorStrip.css',
+  'web/packages/app/src/components/catalog/CatalogPane.css',
+  'web/packages/app/src/components/ContextChip.css',
+  'web/packages/app/src/components/ContextPicker.css',
+  'web/packages/app/src/components/dashboard/ContainersSection.css',
+  'web/packages/app/src/components/dashboard/CredentialsSection.css',
+  'web/packages/app/src/components/dashboard/MemorySection.css',
+  'web/packages/app/src/components/dashboard/ProvidersSection.css',
+  'web/packages/app/src/components/RerunPopover.css',
+  'web/packages/app/src/components/SubAgentBanner.css',
+  'web/packages/app/src/components/SubAgentDetailsPopover.css',
+  'web/packages/app/src/components/usage/UsagePane.css',
+  'web/packages/app/src/panes/EditorPane.css',
+  'web/packages/app/src/panes/TerminalPane.css',
+  'web/packages/app/src/routes/AgentMonitor.css',
+  'web/packages/app/src/routes/Catalog.css',
+  'web/packages/app/src/routes/Dashboard/ProviderPanel.css',
+  'web/packages/app/src/routes/Dashboard/SessionsPanel.css',
+  'web/packages/app/src/routes/Session/ChatPane.css',
+  'web/packages/app/src/routes/Session/CompactButton.css',
+  'web/packages/app/src/routes/Session/PaneHeader.css',
+  'web/packages/app/src/routes/Session/SessionWindow.css',
+  'web/packages/app/src/shell/FilesSidebar.css',
+  'web/packages/app/src/shell/StatusBar.css',
+  'web/packages/design/src/components/forge-button.css',
+]);
+
 /**
  * Extract `--name: value;` declarations from a CSS string, preserving
  * original order and normalising whitespace inside values.
@@ -102,6 +149,25 @@ function* walkTsx(dir) {
   }
 }
 
+/** Recursively yield absolute paths of `.css` files under `dir`. */
+function* walkCss(dir) {
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue;
+    const full = resolve(dir, entry.name);
+    if (entry.isDirectory()) {
+      yield* walkCss(full);
+    } else if (entry.isFile() && entry.name.endsWith('.css')) {
+      yield full;
+    }
+  }
+}
+
 /**
  * Yield every JSX `style={...}` block body (the text between the outer
  * braces) as `{ body, offset }` where `offset` is the start index in the
@@ -161,6 +227,44 @@ for (const root of tsxScanRoots) {
           `raw hex in inline style (use tokens.css or a CSS class): ${rel}:${line} — ${hexMatch[0]}`,
         );
       }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// F-699 follow-up #820 (item 1): scan component CSS for raw `font-size: <N>px`
+// and `line-height: <N>px`. These are the two declarations where pixel
+// drift hurts the typography scale; other px declarations (border-width,
+// margin, transform) are intentional and out of scope.
+//
+// Skip token files (the design package owns the source of truth for sizing
+// custom properties) and skip declarations sourced from a CSS variable —
+// `font-size: var(--type-body)` resolves to a px value at runtime, but the
+// literal text is not a raw px. We match the literal `<N>px` *only* on the
+// right-hand side of `font-size:` / `line-height:`.
+// ---------------------------------------------------------------------------
+
+// Boundary `(?<![-a-zA-Z])` keeps us from false-positiving on hyphenated
+// custom properties like `--my-font-size: 13px;` (those are sizing tokens
+// in their own right, not bare declarations).
+const cssTypographyPxRe = /(?<![-a-zA-Z])(font-size|line-height)\s*:\s*\d+(?:\.\d+)?px\b/g;
+
+for (const root of cssScanRoots) {
+  for (const file of walkCss(root)) {
+    const rel = relative(repoRoot, file).split('\\').join('/');
+    // Tokens.css is the source of truth for sizing custom properties — px
+    // literals here define the scale that other files consume.
+    if (rel.endsWith('/tokens.css')) continue;
+    if (cssTypographyAllowlist.has(rel)) continue;
+    const source = readFileSync(file, 'utf-8');
+    cssTypographyPxRe.lastIndex = 0;
+    let m;
+    while ((m = cssTypographyPxRe.exec(source)) !== null) {
+      const upto = source.slice(0, m.index);
+      const line = upto.split('\n').length;
+      errors.push(
+        `raw ${m[1]} px in CSS (use a typography token): ${rel}:${line} — ${m[0]}`,
+      );
     }
   }
 }
