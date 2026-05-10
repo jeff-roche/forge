@@ -844,6 +844,64 @@ pub fn render_list(rows: &[InstalledSkillRow], out: &mut impl Write) -> Result<(
 /// as the symlink-escape boundary — re-canonicalizing here would silently
 /// re-follow a TOCTOU swap-in symlink at the root (F-656). The fingerprint
 /// is verified once more inside this call as defense-in-depth.
+///
+/// # F-656 — fd-anchored traversal (Linux)
+///
+/// On Linux, `copy_dir_recursive` opens `src` with `O_NOFOLLOW | O_DIRECTORY`,
+/// `fstat`s the fd to confirm `(dev, ino)` against the resolver's fingerprint,
+/// and then walks the tree via `/proc/self/fd/<n>` so every subsequent
+/// `read_dir` and `copy` runs against the pinned inode instead of a path that
+/// could be redirected by a concurrent symlink swap. The fd lives for the
+/// duration of the walk; once dropped, the inode is no longer pinned.
+///
+/// On non-Linux targets we fall back to the path-based walk with the
+/// fingerprint re-checked once at the root. This is the same window the
+/// pre-fix code carried and is acceptable on Windows where the threat model
+/// differs; Linux is the CI gate that exercises the race test.
+#[cfg(target_os = "linux")]
+fn copy_dir_recursive(src: &Path, dst: &Path, fingerprint: &SourceFingerprint) -> Result<()> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    // Open the source root with NOFOLLOW + DIRECTORY so a symlink swap at
+    // `src` between resolve and now surfaces as EMLINK/ELOOP. `O_CLOEXEC`
+    // keeps the fd from leaking into any child process the install spawns.
+    let dir_fd = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC)
+        .open(src)
+        .with_context(|| {
+            format!(
+                "opening source root {} for fd-anchored traversal",
+                src.display()
+            )
+        })?;
+
+    // Verify the opened inode against the resolver-captured fingerprint.
+    // `fstat` on the held fd cannot be redirected by a concurrent rename or
+    // symlink swap — whatever inode we just opened is the one we walk.
+    let meta = dir_fd
+        .metadata()
+        .with_context(|| format!("fstat on source root {} (TOCTOU check)", src.display()))?;
+    if meta.dev() != fingerprint.dev || meta.ino() != fingerprint.ino {
+        bail!(
+            "source root {} dev/ino changed between resolve and install \
+             (TOCTOU; refusing)",
+            src.display()
+        );
+    }
+
+    // `/proc/self/fd/<n>` resolves to the inode the fd points at, regardless
+    // of any subsequent rename or symlink swap on `src`. Walking via this
+    // path keeps the traversal pinned for the lifetime of `dir_fd`.
+    let proc_root = PathBuf::from(format!("/proc/self/fd/{}", dir_fd.as_raw_fd()));
+    let result = copy_dir_recursive_inner(&proc_root, dst, src);
+    // Hold the fd until the walk returns so /proc/self/fd/<n> stays live.
+    drop(dir_fd);
+    result
+}
+
+#[cfg(not(target_os = "linux"))]
 fn copy_dir_recursive(src: &Path, dst: &Path, fingerprint: &SourceFingerprint) -> Result<()> {
     // F-656 belt-and-suspenders: even though `install_resolved` verified the
     // fingerprint already, repeating the check here means any future caller
