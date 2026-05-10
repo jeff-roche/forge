@@ -25,6 +25,11 @@ futures = "0.3"
 # dependency tree; declared here for direct use.
 parking_lot = "0.12"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+# SEC-1 (#702): `secrecy::SecretString` for zeroize-on-drop storage of the
+# `CustomOpenAiProvider` API key. The header value is the only place the
+# plaintext bytes leave the secret container — built via `ExposeSecret` at
+# the HTTP-header-construction boundary and dropped with the request future.
+secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # F-593: parse the embedded `data/prices.toml` for cost lookups.

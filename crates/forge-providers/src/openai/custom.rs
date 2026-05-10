@@ -33,11 +33,10 @@
 //! ::1, `localhost`) HTTP hosts in debug builds, and rejects everything
 //! else (RFC-1918, link-local/IMDS, IPv6 unique-local, non-http schemes).
 
-use std::sync::Arc;
-
 use forge_core::settings::{AuthShapeSettings, CustomOpenAiEntry};
 use forge_core::Result;
 use futures::stream::BoxStream;
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 
 use crate::http_util::{self, HttpClientConfig};
@@ -81,13 +80,20 @@ pub enum AuthShape {
 /// `Debug` is hand-rolled so the api_key never appears in log output: the
 /// formatter prints a fixed `"<redacted>"` placeholder when the key is
 /// `Some`. Mirrors the redaction posture of `forge-mcp` URL logging.
+///
+/// The api_key is stored in a [`secrecy::SecretString`] (SEC-1, #702) so the
+/// plaintext bytes are zeroized on drop and never accidentally cloned as a
+/// plain `String`. The only place the plaintext leaves the secret container
+/// is the auth-header value built per request in the (private)
+/// `auth_headers` helper — created via [`ExposeSecret::expose_secret`] at
+/// the HTTP-header boundary and dropped with the outbound request future.
 pub struct CustomOpenAiProvider {
     /// Stable identifier (e.g. `"vllm-local"`, `"together"`) — exposed to
     /// the settings UI and surfaced in error messages so a multi-entry
     /// configuration can disambiguate failures.
     name: String,
     base_url: String,
-    api_key: Option<Arc<str>>,
+    api_key: Option<SecretString>,
     auth_shape: AuthShape,
     model: String,
     /// Model identifiers the user has declared this endpoint serves.
@@ -162,7 +168,7 @@ impl CustomOpenAiProvider {
         Ok(Self {
             name,
             base_url,
-            api_key: api_key.map(Arc::from),
+            api_key: api_key.map(SecretString::from),
             auth_shape,
             model,
             model_list,
@@ -249,13 +255,20 @@ impl CustomOpenAiProvider {
     fn auth_headers(&self) -> Vec<(reqwest::header::HeaderName, String)> {
         match (&self.auth_shape, &self.api_key) {
             (AuthShape::Bearer, Some(key)) => {
-                vec![(reqwest::header::AUTHORIZATION, format!("Bearer {key}"))]
+                // `expose_secret()` returns a `&str` borrow into the
+                // `SecretString`; the only allocation that escapes the
+                // secret container is the header value below, which is
+                // consumed by the request future and dropped with it.
+                vec![(
+                    reqwest::header::AUTHORIZATION,
+                    format!("Bearer {}", key.expose_secret()),
+                )]
             }
             (AuthShape::Header { name }, Some(key)) => {
                 let hname: reqwest::header::HeaderName = name
                     .parse()
                     .expect("auth.name validated at construction time");
-                vec![(hname, key.to_string())]
+                vec![(hname, key.expose_secret().to_string())]
             }
             _ => Vec::new(),
         }
@@ -556,6 +569,31 @@ mod tests {
         assert_eq!(h.len(), 1);
         assert_eq!(h[0].0.as_str(), "x-api-key");
         assert_eq!(h[0].1, "sk-secret");
+    }
+
+    /// SEC-1 (#702): the api_key field is stored in a zeroize-on-drop
+    /// container — `secrecy::SecretString` — not a plain `Arc<str>` or
+    /// `String`. A plain `Arc<str>` leaves the key bytes resident in the
+    /// heap after the provider is dropped; `SecretString` guarantees
+    /// zeroization on `Drop`. This test enforces the storage type at
+    /// compile time: it will fail to compile if `api_key` is ever
+    /// reverted to a non-`SecretString` type.
+    #[test]
+    fn api_key_field_is_secret_string() {
+        use secrecy::SecretString;
+        let p = CustomOpenAiProvider::new(
+            "x",
+            "https://api.example.com",
+            "any",
+            vec![],
+            AuthShape::Bearer,
+            Some("sk-secret".into()),
+        )
+        .unwrap();
+        // Compile-time type assertion. If `api_key` is ever changed back
+        // to `Option<Arc<str>>` (or any other non-Secret type) this
+        // binding will fail to type-check.
+        let _: &Option<SecretString> = &p.api_key;
     }
 
     #[test]
