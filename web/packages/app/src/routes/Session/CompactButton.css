@@ -17,7 +17,7 @@
   flex: 0 0 auto;
 }
 
-/* `font-size: 11px` is the project-wide chrome convention used by every
+/* `font-size: var(--type-mono-sm)` is the project-wide chrome convention used by every
    sibling pane (ChatPane streaming indicator, ContextPicker, ContextChip,
    ApprovalPrompt). The `@forge/design` token sheet exposes spacing and
    color tokens but no font-size scale today; introducing one is a
@@ -25,7 +25,7 @@
    `.context-compacted-marker` below. */
 .compact-button__toast {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   color: var(--color-text-secondary);
 }
 
@@ -46,7 +46,7 @@
   gap: var(--sp-2);
   padding: var(--sp-2) var(--sp-3);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   color: var(--color-text-tertiary);
   border-top: 1px dashed var(--color-border-1);
   border-bottom: 1px dashed var(--color-border-1);

@@ -42,7 +42,7 @@
   background: var(--color-surface-2);
   color: var(--color-text-tertiary);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   letter-spacing: 0.08em;
 }
 
@@ -57,6 +57,6 @@
   background: var(--color-surface-3);
   color: var(--color-text-primary);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   line-height: 1.4;
 }

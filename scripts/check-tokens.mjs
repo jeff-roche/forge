@@ -51,16 +51,10 @@ const cssTypographyAllowlist = new Set([
   'web/packages/app/src/components/SubAgentBanner.css',
   'web/packages/app/src/components/SubAgentDetailsPopover.css',
   'web/packages/app/src/components/usage/UsagePane.css',
-  'web/packages/app/src/panes/EditorPane.css',
-  'web/packages/app/src/panes/TerminalPane.css',
   'web/packages/app/src/routes/AgentMonitor.css',
   'web/packages/app/src/routes/Catalog.css',
   'web/packages/app/src/routes/Dashboard/ProviderPanel.css',
   'web/packages/app/src/routes/Dashboard/SessionsPanel.css',
-  'web/packages/app/src/routes/Session/ChatPane.css',
-  'web/packages/app/src/routes/Session/CompactButton.css',
-  'web/packages/app/src/routes/Session/PaneHeader.css',
-  'web/packages/app/src/routes/Session/SessionWindow.css',
 ]);
 
 /**
