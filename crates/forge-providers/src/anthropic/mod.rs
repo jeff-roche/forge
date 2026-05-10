@@ -66,6 +66,18 @@ impl AnthropicProvider {
 }
 
 impl Provider for AnthropicProvider {
+    /// F-682: `#[instrument]` enables ops-level latency attribution for the
+    /// per-turn chat path. `skip_all` keeps the request body (and any
+    /// large transcript fragment inside it) out of the span fields;
+    /// `provider = "anthropic"` and `model` are the only attributes
+    /// surfaced on the span. The exporter, when wired, sees one span
+    /// per `chat` call covering the full request → first byte → stream
+    /// duration.
+    #[tracing::instrument(
+        name = "provider.chat",
+        skip_all,
+        fields(provider = "anthropic", model = %self.model),
+    )]
     fn chat(
         &self,
         req: ChatRequest,

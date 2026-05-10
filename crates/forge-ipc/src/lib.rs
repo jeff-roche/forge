@@ -16,7 +16,38 @@ use ts_rs::TS;
 // `docs/architecture/agent-sidecar.md` §2.
 pub mod sidecar;
 
+/// Wire-protocol version negotiated at handshake (`Hello` /
+/// `HelloAck`). Bump this only when the *framing* contract changes —
+/// length-prefix size, magic bytes, the JSON-vs-bincode discriminator,
+/// etc. Adding a new variant to [`IpcMessage`] does **not** require a
+/// `PROTO_VERSION` bump: the receive side rejects unknown `t` tags as
+/// a deserialize error long before the framing layer sees them, and
+/// the existing schema-mismatch warn ([`warn_if_schema_mismatch`])
+/// already covers payload-shape drift.
+///
+/// See [`SCHEMA_VERSION`] for the version bumped on payload-shape
+/// changes; the F-640 `SwitchProvider` addition is a worked example
+/// that touched neither constant — additive variants don't perturb
+/// either layer.
 pub const PROTO_VERSION: u32 = 1;
+
+/// Schema version reported at handshake. Bump this when an existing
+/// payload field's serialization shape changes (renames, type
+/// widening, default semantics) — a peer that doesn't understand the
+/// new shape gets a `tracing::warn!` from
+/// [`warn_if_schema_mismatch`] but the connection still completes
+/// (the policy is informational today; F-678 leaves the door open to
+/// promote it to a hard reject behind a `strict_schema_version`
+/// toggle).
+///
+/// Adding a brand-new variant (e.g. F-640 `SwitchProvider`,
+/// F-603 `PauseSession`) is *additive* — older peers that don't
+/// emit it never trigger a deserialize failure, and newer peers
+/// emitting it against an older receiver fail at the
+/// `serde(tag = "t")` arm with a clear unknown-variant error. Neither
+/// case changes the wire shape of an *existing* variant, so neither
+/// requires a `SCHEMA_VERSION` bump. Bump only when an existing
+/// payload's field types or names drift.
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// F-678: log a `warn!` when a handshake peer reports a schema version

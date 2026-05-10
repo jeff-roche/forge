@@ -11,6 +11,24 @@
 //! Variants follow `docs/architecture/agent-sidecar.md` §2. This module
 //! defines the types only: transport, supervisor, and spawning land in
 //! later F-608 steps.
+//!
+//! ## Future work: centralized construction helpers
+//!
+//! Several payload structs in this module ([`SidecarHello`],
+//! [`SidecarRunTurn`], [`SidecarCredentials`]) are built across multiple
+//! call sites — supervisor side, agent-host side, and tests — with
+//! the same field invariants every time (non-empty `instance_id`,
+//! valid `proto`, redacted secret bytes). A small builder or factory
+//! that centralizes those checks (e.g.
+//! `SidecarHello::builder().proto(P).instance_id(id).build()`) would
+//! let us validate once instead of per-site, and would surface
+//! shape-drift at construction time rather than at serialize time.
+//!
+//! Tracked under F-682 quality-hygiene; deliberately deferred from this
+//! pass because a proper builder is a real refactor (every call site
+//! migrates) and is out of scope for a doc-only cleanup. Pick this up
+//! the next time a new field is added to one of those payloads —
+//! that's a natural touch point for the migration.
 
 use chrono::{DateTime, Utc};
 use forge_core::{AgentInstanceId, Event, MessageId, ProviderId};

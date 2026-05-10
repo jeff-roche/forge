@@ -53,5 +53,38 @@ pub trait EventSink: Send + Sync {
     /// converts a write failure into a hard turn error so the
     /// supervisor can observe the connection drop and recycle the
     /// sidecar.
+    ///
+    /// # Error contract (sidecar semantics)
+    ///
+    /// Implementors classify their internal failures into one of two
+    /// shapes before mapping into [`anyhow::Error`]:
+    ///
+    /// * **Fatal** — the underlying transport / log is unrecoverable
+    ///   for the *current turn*. Examples: the sidecar's UDS write
+    ///   half is closed, the daemon's `EventLog` returned an I/O
+    ///   error from a full disk, the broadcast channel has zero live
+    ///   receivers AND the persistence write also failed. The caller
+    ///   (`run_turn`) treats the error as terminal: the turn aborts
+    ///   and (in the sidecar case) the supervisor recycles the
+    ///   process so a clean handshake can re-establish the channel.
+    ///
+    ///   Fatal errors propagate unchanged through `emit(...)?` — do
+    ///   *not* swallow them and `Ok(())` to keep the turn alive.
+    ///   Silent loss of an event corrupts the post-mortem record and
+    ///   defeats the durable-log invariant.
+    ///
+    /// * **Recoverable** — a transient sub-failure that does *not*
+    ///   invalidate the channel. Examples: a broadcast receiver lag
+    ///   when at least one subscriber is still attached, a
+    ///   best-effort observer that doesn't gate the turn (telemetry
+    ///   exporters, mirror sinks). Implementors handle these
+    ///   internally — log via `tracing` and return `Ok(())`. They
+    ///   must *not* propagate via the trait, because every caller
+    ///   treats a returned error as fatal per the rule above.
+    ///
+    /// In short: if a sink returns `Err`, the turn ends. Anything a
+    /// sink can absorb without ending the turn must be absorbed
+    /// inside the sink, with a `tracing::warn!` (or lower) for
+    /// visibility, before returning `Ok(())`.
     async fn emit(&self, event: Event) -> anyhow::Result<()>;
 }

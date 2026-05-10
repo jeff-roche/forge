@@ -51,7 +51,12 @@
 //! `command`. The success path is silent. See `tests/ipc_authz_tracing.rs`
 //! for the schema contract.
 //!
-//! ## Error-message prefix style (F-673)
+//! ## Error handling (F-673)
+//!
+//! Two complementary patterns govern how `*_ipc.rs` Tauri commands
+//! shape the strings they return to the webview.
+//!
+//! ### Standardized prefix (default)
 //!
 //! Every outer error path returned from a `*_ipc.rs` Tauri command must
 //! begin with a command-named constant prefix of the form
@@ -59,14 +64,32 @@
 //! Format the wrapped error as `format!("{COMMAND_ERROR}{e}")`. This keeps
 //! the dashboard's end-user error surface and the server-side log filter
 //! consistent across modules — a glance at the prefix tells you which
-//! command produced the error.
+//! command produced the error. New error paths must use this style.
 //!
-//! **Exception.** Bare `e.to_string()` (or shared infrastructure constants
-//! like `LABEL_MISMATCH_ERROR`) is acceptable for IPC-infrastructure
-//! errors — bridge state lookups, Tauri-managed `State<'_, _>` access,
-//! window-label checks — where the surrounding code makes the source
-//! unambiguous. New error paths in a `*_ipc.rs` command body must follow
-//! the prefix rule.
+//! ### When bare `.to_string()` is acceptable (exception)
+//!
+//! Bare `e.to_string()` (or shared infrastructure constants like
+//! `LABEL_MISMATCH_ERROR`) is acceptable in three narrow cases where
+//! the *origin of the failure is unambiguous from context*, and where
+//! routing the same error through every command's prefix would add
+//! noise without adding signal:
+//!
+//! 1. **Tauri-managed state access** — `state.try_state::<T>()` /
+//!    `State<'_, _>` lookup failures. The error is produced by the
+//!    Tauri runtime itself; the command name is already on the
+//!    invocation log.
+//! 2. **Bridge state lookups** — calls into the cached `BridgeState`
+//!    (e.g. `cached_workspace_root`). The error type already names
+//!    its own subsystem; double-prefixing reads as `cmd: bridge:
+//!    <message>`, which is verbose without disambiguating.
+//! 3. **Window-label authz checks** — `require_window_label*` returns
+//!    a fixed-shape `LABEL_MISMATCH_ERROR` constant. Every command
+//!    rejects with the same string, on purpose: it is the label-
+//!    authentication failure mode, not a per-command condition.
+//!
+//! Anywhere outside those three cases a bare `.to_string()` is a
+//! style regression — wrap the error in the command's prefix
+//! constant.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
