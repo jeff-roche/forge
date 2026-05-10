@@ -1,4 +1,11 @@
-import { type Component, createResource, createSignal, For, Show } from 'solid-js';
+import {
+  type Component,
+  createEffect,
+  createResource,
+  createSignal,
+  For,
+  Show,
+} from 'solid-js';
 import { Button } from '@forge/design';
 import type { ProviderId } from '@forge/ipc';
 import { providerStatus, type ProviderStatus } from '../../ipc/dashboard';
@@ -70,22 +77,36 @@ export const ProviderPanel: Component = () => {
   );
 };
 
-// F-413: when reachable, pass the provider accent via an inline CSS custom
-// property so the `.provider-panel__health--ok` rule can paint the dot and the
-// §11.3 live-connected glow from one token. When unreachable, the inline
-// custom property is omitted and the error tint stays in charge.
-const HealthIndicator: Component<{ reachable: boolean; providerId: ProviderId }> = (props) => (
-  <span
-    class="provider-panel__health"
-    classList={{
-      'provider-panel__health--ok': props.reachable,
-      'provider-panel__health--down': !props.reachable,
-    }}
-    style={props.reachable ? { '--provider-accent': providerAccent(props.providerId) } : undefined}
-    role="img"
-    aria-label={props.reachable ? 'reachable' : 'unreachable'}
-  />
-);
+// F-413: when reachable, pass the provider accent via the `--provider-accent`
+// custom property so the `.provider-panel__health--ok` rule can paint the dot
+// and the §11.3 live-connected glow from one token. When unreachable, the
+// custom property is removed so the error tint stays in charge.
+//
+// F-805: written via `setProperty` on a ref rather than a JSX `style={...}`
+// binding so `style-src-attr` can drop `'unsafe-inline'`.
+const HealthIndicator: Component<{ reachable: boolean; providerId: ProviderId }> = (props) => {
+  let ref: HTMLSpanElement | undefined;
+  createEffect(() => {
+    if (!ref) return;
+    if (props.reachable) {
+      ref.style.setProperty('--provider-accent', providerAccent(props.providerId));
+    } else {
+      ref.style.removeProperty('--provider-accent');
+    }
+  });
+  return (
+    <span
+      ref={ref}
+      class="provider-panel__health"
+      classList={{
+        'provider-panel__health--ok': props.reachable,
+        'provider-panel__health--down': !props.reachable,
+      }}
+      role="img"
+      aria-label={props.reachable ? 'reachable' : 'unreachable'}
+    />
+  );
+};
 
 const ModelSection: Component<{
   models: string[];

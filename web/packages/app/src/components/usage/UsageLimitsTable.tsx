@@ -7,7 +7,7 @@
 // cap column when no entry exists. Once a future task wires limits into
 // `AppSettings`, the route can pass them in without touching this file.
 
-import { For, Show, type Component } from 'solid-js';
+import { For, Show, createEffect, type Component } from 'solid-js';
 import type { Money } from '@forge/ipc';
 import type { UsageBreakdownView } from '../../ipc/usage';
 import { formatMoney } from './format';
@@ -137,10 +137,14 @@ export const UsageLimitsTable: Component<UsageLimitsTableProps> = (props) => {
 const ProgressBar: Component<{ ratio: number }> = (props) => {
   const clamped = (): number => Math.max(0, Math.min(1, props.ratio));
   const state = (): string => progressState(props.ratio);
-  // Width travels through a CSS custom property so the component only writes
-  // a percentage string into a JSX style — no raw px or hex, satisfying the
-  // F-389 inline-style gate.
-  const styleVar = (): { width: string } => ({ width: `${(clamped() * 100).toFixed(1)}%` });
+  // Width is written via `setProperty` on a ref rather than a JSX `style={...}`
+  // binding so `style-src-attr` can drop `'unsafe-inline'` (F-805). The
+  // F-389 inline-style gate already keeps raw px/hex out of JSX; this
+  // tightening removes the inline binding entirely.
+  let fillRef: HTMLSpanElement | undefined;
+  createEffect(() => {
+    fillRef?.style.setProperty('width', `${(clamped() * 100).toFixed(1)}%`);
+  });
   return (
     <span
       class="usage-pane__progress"
@@ -150,9 +154,9 @@ const ProgressBar: Component<{ ratio: number }> = (props) => {
       aria-valuemax={100}
     >
       <span
+        ref={fillRef}
         class="usage-pane__progress-fill"
         data-state={state()}
-        style={styleVar()}
       />
     </span>
   );

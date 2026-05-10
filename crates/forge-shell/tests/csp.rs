@@ -7,9 +7,6 @@
 //! the F-664 finding) fails CI instead of shipping silently.
 //!
 //! What this test does *not* assert:
-//! - Inline `style="..."` attributes on JSX elements remain permitted
-//!   via `style-src-attr 'unsafe-inline'`. Hardening those call sites
-//!   is tracked as a follow-up to F-664.
 //! - The Vite dev server's `index.html` meta tag is not covered here;
 //!   it intentionally diverges from production to keep Vite HMR working
 //!   (see `web/packages/app/index.html`).
@@ -53,6 +50,26 @@ fn style_src_elem_drops_unsafe_inline() {
     assert!(
         elem.contains("'self'"),
         "style-src-elem must allow 'self' so the bundled hashed CSS still loads; got: {elem}"
+    );
+}
+
+#[test]
+fn style_src_attr_drops_unsafe_inline() {
+    // F-805: once the 11 catalogued JSX `style={...}` bindings are migrated
+    // to ref-based `element.style.setProperty(...)` calls, `style-src-attr`
+    // can drop `'unsafe-inline'` and lock to `'self'`. This pins that
+    // tightening so a regression that re-introduces an inline `style="..."`
+    // binding (and re-adds `'unsafe-inline'` to keep it working) fails CI.
+    let csp = load_csp();
+    let attr = directive(&csp, "style-src-attr")
+        .expect("CSP must declare style-src-attr; F-664 splits style-src into -elem/-attr");
+    assert!(
+        !attr.contains("'unsafe-inline'"),
+        "style-src-attr must not allow 'unsafe-inline' (F-805); got: {attr}"
+    );
+    assert!(
+        attr.contains("'self'"),
+        "style-src-attr must allow 'self'; got: {attr}"
     );
 }
 

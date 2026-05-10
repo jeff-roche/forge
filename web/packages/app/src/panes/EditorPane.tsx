@@ -19,7 +19,6 @@
 
 import {
   type Component,
-  type JSX,
   createEffect,
   createMemo,
   createSignal,
@@ -373,18 +372,10 @@ export const EditorPane: Component<EditorPaneProps> = (props) => {
         // Sandboxing intentionally allows scripts + same-origin — the
         // iframe is first-party and runs the trusted monaco-host bundle.
         sandbox="allow-scripts allow-same-origin"
-        style={iframeStyle()}
       />
     </section>
   );
 };
-
-function iframeStyle(): JSX.CSSProperties {
-  // Fill the remaining pane space under the header. Inline rather than in
-  // CSS because the header height is defined in the same CSS module and
-  // the iframe style depends on flex layout there.
-  return { flex: '1 1 auto', border: '0', width: '100%' };
-}
 
 function languageFromPath(path: string): string {
   const dot = path.lastIndexOf('.');

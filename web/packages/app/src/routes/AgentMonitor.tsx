@@ -20,7 +20,6 @@ import {
   onCleanup,
   Show,
   type Component,
-  type JSX,
 } from 'solid-js';
 import { createMountedSubscription } from '../ipc/useEventListener';
 import { useNavigate, useParams, useSearchParams } from '@solidjs/router';
@@ -682,8 +681,13 @@ const AgentListRow: Component<{
   active: boolean;
   onSelect: (id: string) => void;
 }> = (props) => {
-  const widthStyle = (): JSX.CSSProperties => ({
-    width: `${Math.max(0, Math.min(1, props.row.progress)) * 100}%`,
+  // Progress fill width is written via `setProperty` on a ref so the JSX
+  // carries no inline `style="..."` binding — `style-src-attr` can then drop
+  // `'unsafe-inline'` (F-805).
+  let fillRef: HTMLSpanElement | undefined;
+  createEffect(() => {
+    const pct = Math.max(0, Math.min(1, props.row.progress)) * 100;
+    fillRef?.style.setProperty('width', `${pct}%`);
   });
   return (
     <li>
@@ -713,7 +717,7 @@ const AgentListRow: Component<{
           data-state={props.row.state}
           aria-hidden="true"
         >
-          <span class="agent-monitor__progress-fill" style={widthStyle()} />
+          <span ref={fillRef} class="agent-monitor__progress-fill" />
         </span>
       </button>
     </li>

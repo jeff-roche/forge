@@ -1,4 +1,10 @@
-import { type Component, type JSX, createSignal, onCleanup } from 'solid-js';
+import {
+  type Component,
+  type JSX,
+  createEffect,
+  createSignal,
+  onCleanup,
+} from 'solid-js';
 import './SplitPane.css';
 
 /**
@@ -228,20 +234,29 @@ export const SplitPane: Component<SplitPaneProps> = (props) => {
   const ariaValueMin = Math.round(MIN_RATIO * 100);
   const ariaValueMax = Math.round((1 - MIN_RATIO) * 100);
 
-  const firstStyle = (): JSX.CSSProperties => {
-    const r = clamp(props.ratio);
-    return props.direction === 'v'
-      ? { width: `${r * 100}%` }
-      : { height: `${r * 100}%` };
+  // F-805: write the per-child sizing via `setProperty` on refs rather than
+  // a JSX `style={...}` binding. The previous inline form required
+  // `style-src-attr 'unsafe-inline'` in the production CSP; refs let us
+  // drop that. Toggling on `direction` clears the previously-written axis
+  // so a v↔h flip doesn't leave a stale `width` or `height` behind.
+  let firstRef: HTMLDivElement | undefined;
+  let secondRef: HTMLDivElement | undefined;
+  const applyChildSize = (el: HTMLDivElement | undefined, fraction: number) => {
+    if (!el) return;
+    const pct = `${fraction * 100}%`;
+    if (props.direction === 'v') {
+      el.style.setProperty('width', pct);
+      el.style.removeProperty('height');
+    } else {
+      el.style.setProperty('height', pct);
+      el.style.removeProperty('width');
+    }
   };
-
-  const secondStyle = (): JSX.CSSProperties => {
+  createEffect(() => {
     const r = clamp(props.ratio);
-    const rest = 1 - r;
-    return props.direction === 'v'
-      ? { width: `${rest * 100}%` }
-      : { height: `${rest * 100}%` };
-  };
+    applyChildSize(firstRef, r);
+    applyChildSize(secondRef, 1 - r);
+  });
 
   const [first, second] = props.children as [JSX.Element, JSX.Element];
 
@@ -256,7 +271,10 @@ export const SplitPane: Component<SplitPaneProps> = (props) => {
       data-testid="split-pane"
       ref={containerRef}
     >
-      <div class="split-pane__child split-pane__child--first" style={firstStyle()}>
+      <div
+        ref={firstRef}
+        class="split-pane__child split-pane__child--first"
+      >
         {first}
       </div>
       <div
@@ -275,7 +293,10 @@ export const SplitPane: Component<SplitPaneProps> = (props) => {
         onDblClick={handleDoubleClick}
         onKeyDown={handleKeyDown}
       />
-      <div class="split-pane__child split-pane__child--second" style={secondStyle()}>
+      <div
+        ref={secondRef}
+        class="split-pane__child split-pane__child--second"
+      >
         {second}
       </div>
     </div>

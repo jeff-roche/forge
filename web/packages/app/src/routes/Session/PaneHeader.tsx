@@ -1,5 +1,5 @@
 import type { Component, JSX } from 'solid-js';
-import { Show } from 'solid-js';
+import { Show, createEffect } from 'solid-js';
 import { Button } from '@forge/design';
 import type { ProviderId } from '@forge/ipc';
 import { providerAccent } from './providerAccent';
@@ -114,14 +114,23 @@ export interface PaneHeaderProps {
  * the banner landmark for the one top-level banner per document.
  */
 export const PaneHeader: Component<PaneHeaderProps> = (props) => {
-  // Inline custom property keeps `.pane-header__provider` rule generic; the
-  // rule reads `var(--pane-header-provider-accent, var(--color-provider-local))`.
-  const pillStyle = (): JSX.CSSProperties | undefined => {
-    if (!props.providerId) return undefined;
-    return {
-      '--pane-header-provider-accent': providerAccent(props.providerId),
-    };
-  };
+  // The `--pane-header-provider-accent` custom property keeps the
+  // `.pane-header__provider` rule generic; the rule reads
+  // `var(--pane-header-provider-accent, var(--color-provider-local))`.
+  // F-805: written via `setProperty` on a ref rather than a JSX `style={...}`
+  // binding so `style-src-attr` can drop `'unsafe-inline'`.
+  let pillRef: HTMLSpanElement | undefined;
+  createEffect(() => {
+    if (!pillRef) return;
+    if (props.providerId) {
+      pillRef.style.setProperty(
+        '--pane-header-provider-accent',
+        providerAccent(props.providerId),
+      );
+    } else {
+      pillRef.style.removeProperty('--pane-header-provider-accent');
+    }
+  });
   const compactness = (): Compactness => props.compactness ?? 'full';
   const typeLabel = (): PaneHeaderType => props.typeLabel ?? 'CHAT';
   const isIconLabel = (): boolean => compactness() !== 'full';
@@ -156,9 +165,9 @@ export const PaneHeader: Component<PaneHeaderProps> = (props) => {
         }
       >
         <span
+          ref={pillRef}
           class="pane-header__provider"
           data-testid="pane-header-provider"
-          style={pillStyle()}
         >
           {props.providerLabel}
         </span>

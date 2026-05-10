@@ -268,15 +268,23 @@ export const FilesSidebar: Component<FilesSidebarProps> = (props) => {
         </For>
       </div>
       <Show when={menu()}>
-        {(target) => (
+        {(target) => {
+          // F-805: `--menu-y` / `--menu-x` are written via `setProperty` on a
+          // ref so the JSX has no inline `style="..."` binding; that lets
+          // `style-src-attr` drop `'unsafe-inline'` in production CSP.
+          let menuRef: HTMLUListElement | undefined;
+          createEffect(() => {
+            const t = target();
+            if (!menuRef) return;
+            menuRef.style.setProperty('--menu-y', `${t.y}px`);
+            menuRef.style.setProperty('--menu-x', `${t.x}px`);
+          });
+          return (
           <ul
+            ref={menuRef}
             class="files-sidebar__menu"
             role="menu"
             data-testid="files-sidebar-menu"
-            style={{
-              '--menu-y': `${target().y}px`,
-              '--menu-x': `${target().x}px`,
-            }}
             onClick={(e) => e.stopPropagation()}
           >
             <li role="none">
@@ -310,7 +318,8 @@ export const FilesSidebar: Component<FilesSidebarProps> = (props) => {
               </MenuItem>
             </li>
           </ul>
-        )}
+          );
+        }}
       </Show>
     </aside>
   );
@@ -346,16 +355,24 @@ const TreeRow: Component<TreeRowProps> = (props) => {
     }
   };
 
+  // F-805: `--row-depth` is written via `setProperty` on a ref so the JSX
+  // has no inline `style="..."` binding; that lets `style-src-attr` drop
+  // `'unsafe-inline'` in production CSP.
+  let rowRef: HTMLDivElement | undefined;
+  createEffect(() => {
+    rowRef?.style.setProperty('--row-depth', String(props.depth));
+  });
+
   return (
     <>
       <div
+        ref={rowRef}
         class="files-sidebar__row"
         classList={{ 'files-sidebar__row--dir': isDir() }}
         role="treeitem"
         aria-expanded={isDir() ? isOpen() : undefined}
         data-testid="files-sidebar-row"
         data-path={props.node.path}
-        style={{ '--row-depth': String(props.depth) }}
         onClick={onClick}
         onDblClick={onDoubleClick}
         onContextMenu={(e) => props.onContext(e, props.node)}
