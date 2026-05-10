@@ -656,6 +656,85 @@ async fn exec_against_stopped_container_surfaces_nonzero_exit() {
     let _ = runtime.remove(&h).await;
 }
 
+/// Empirical justification for the issue #628 parse-time rejection:
+/// proves that real podman *would* misinterpret a leading-dash IMAGE
+/// positional as a runtime flag if `ImageRef::parse` ever stopped
+/// rejecting it.
+///
+/// We bypass the parser deliberately and shell out to `podman create`
+/// with the offending IMAGE token directly. The expected failure shape
+/// is podman complaining about an unknown flag (e.g. `-v` needs a
+/// value, `-evil.io/...` is not recognized) — *not* "invalid image
+/// reference" or "image not found". If a future podman release
+/// changes its argv grammar to terminate flag parsing earlier, this
+/// test will fail loudly so the parse-time rejection can be
+/// re-evaluated.
+#[test]
+#[ignore = "requires rootless podman on PATH (run with --ignored)"]
+fn podman_misinterprets_leading_dash_image_as_flag() {
+    // Use a name-segment dash because that is the worst-case from the
+    // threat model (`-v/host:/container:latest` would smuggle a
+    // bind-mount). Whatever podman emits to stderr, the exit code
+    // must be non-zero AND the message must reference flag/argument
+    // parsing — not a registry/digest/image-not-found error, which
+    // would mean podman accepted the token as IMAGE and only failed
+    // when it tried to pull.
+    let out = std::process::Command::new("podman")
+        .args([
+            "create",
+            "--rm",
+            // Leading-dash IMAGE positional. If podman parses this as
+            // IMAGE the failure will surface at pull time with a
+            // registry/digest error; if it parses as a flag we get an
+            // argv error. We assert the latter.
+            "-v/host:/container:latest",
+        ])
+        .output()
+        .expect("podman must be on PATH for --ignored runs");
+
+    assert!(
+        !out.status.success(),
+        "podman create must reject the leading-dash IMAGE; \
+         got success with stdout={:?} stderr={:?}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&out.stderr).to_lowercase();
+    // Podman's argv parser (cobra) emits one of these phrases when it
+    // mis-parses a leading-dash token as a flag. Cross-version we
+    // accept any of them; what matters is that the failure is at the
+    // argv layer, NOT at the registry/pull layer. A registry/pull
+    // error (e.g. "manifest unknown", "image not found", "no such
+    // image") would mean podman accepted the dash IMAGE — exactly the
+    // condition issue #628 closes.
+    let argv_layer_phrases = [
+        "unknown flag",
+        "unknown shorthand flag",
+        "needs an argument",
+        "invalid argument",
+        "flag needs an argument",
+        "unknown command",
+    ];
+    let registry_layer_phrases = [
+        "manifest unknown",
+        "image not found",
+        "no such image",
+        "pull access denied",
+    ];
+    assert!(
+        argv_layer_phrases.iter().any(|p| stderr.contains(p)),
+        "expected an argv-layer parse failure (one of {argv_layer_phrases:?}); \
+         got stderr={stderr:?}"
+    );
+    assert!(
+        !registry_layer_phrases.iter().any(|p| stderr.contains(p)),
+        "podman accepted the leading-dash IMAGE and failed at the \
+         registry layer ({registry_layer_phrases:?}) — issue #628's \
+         premise is violated; got stderr={stderr:?}"
+    );
+}
+
 /// `parse_stats` against a malformed JSON body returned by a future
 /// podman version (or a registry-injected payload, hypothetically)
 /// must surface `OciError::InvalidJson` rather than panicking or

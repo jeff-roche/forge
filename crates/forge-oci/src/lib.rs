@@ -161,6 +161,19 @@ impl ImageRef {
 
     /// Parse an image reference. See type-level docs for the accepted
     /// shapes and the allowlist semantics.
+    ///
+    /// # Rejections
+    ///
+    /// In addition to the digest and allowlist checks, `parse` rejects
+    /// any reference where the registry, name, or tag segment begins
+    /// with `-`. `to_image_string()` emits those segments verbatim into
+    /// the IMAGE positional of `podman create [...] IMAGE [COMMAND]`,
+    /// where a leading `-` would let podman parse the IMAGE token as a
+    /// runtime flag (`-v`, `-e`, `--privileged`, ...). The F-595
+    /// hardening pinned the *positional layout* of the rendered argv
+    /// but not the *content* of the IMAGE positional itself, so issue
+    /// #628 closes that vector at parse time. Returns
+    /// [`OciError::InvalidImageRef`].
     pub fn parse(input: &str) -> Result<Self, OciError> {
         let trimmed = input.trim();
         if trimmed.is_empty() {
@@ -207,6 +220,23 @@ impl ImageRef {
         // expects, but the F-643 supply-chain check below still rejects
         // the reference if it has no digest AND is not allowlisted.
         let tag = tag.unwrap_or_else(|| "latest".to_string());
+
+        // #628 flag-injection guard: `to_image_string()` emits these
+        // segments verbatim into the IMAGE positional of `podman create
+        // [...] IMAGE [COMMAND]`. A leading `-` on any segment lets
+        // podman parse the IMAGE token as a runtime flag (`-v`, `-e`,
+        // `--privileged`, ...). Reject before the supply-chain check so
+        // a digest-pinned ref with a poisoned segment still fails on
+        // the dash, not on the unrelated allowlist.
+        if name.starts_with('-')
+            || registry.as_deref().is_some_and(|r| r.starts_with('-'))
+            || tag.starts_with('-')
+        {
+            return Err(OciError::InvalidImageRef {
+                input: input.to_string(),
+                reason: "image segments must not begin with '-'",
+            });
+        }
 
         // Supply-chain guard: a reference with no digest is only safe if the
         // *canonical* registry-qualified path matches the first-party
@@ -969,6 +999,58 @@ mod tests {
             ImageRef::parse(&format!("alpine@{SHA}")),
             Err(OciError::InvalidDigest { .. })
         ));
+    }
+
+    // ── #628: reject image segments that begin with `-` ─────────────
+    //
+    // `to_image_string()` emits the parsed segments verbatim into the
+    // IMAGE positional of `podman create [...] IMAGE [COMMAND]`. A
+    // leading `-` on any segment would let podman misinterpret the
+    // IMAGE token as a flag (`-v`, `-e`, `--privileged`, etc.). The
+    // F-595 B1 hardening pinned the *positional layout* but not the
+    // *content* of the IMAGE positional itself, so we reject at parse
+    // time on every segment — registry, name, tag — regardless of
+    // whether the reference is digest-pinned (a digest-pinned ref
+    // still renders the registry/name on the wire).
+
+    #[test]
+    fn image_ref_rejects_name_starting_with_dash() {
+        // Worst case from the threat model: `-v/host:/container:latest`
+        // would render verbatim into IMAGE and podman would parse `-v`
+        // as the volume flag. Reject before it ever reaches the argv.
+        let err = ImageRef::parse("-v/host:/container:latest").unwrap_err();
+        assert!(
+            matches!(err, OciError::InvalidImageRef { .. }),
+            "expected InvalidImageRef, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn image_ref_rejects_registry_starting_with_dash() {
+        // A `-` registry is structurally identical to the name case but
+        // walks a different parser branch (the `head.contains('.')` arm
+        // of the registry split). Cover it explicitly so a future
+        // refactor of that branch can't silently re-open the hole.
+        // We use a digest-pinned form to bypass the F-643 tag-only
+        // guard and prove the dash check fires first.
+        let err = ImageRef::parse(&format!("-evil.io/myorg/myapp@sha256:{SHA}")).unwrap_err();
+        assert!(
+            matches!(err, OciError::InvalidImageRef { .. }),
+            "expected InvalidImageRef, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn image_ref_rejects_tag_starting_with_dash() {
+        // A leading-dash tag would render as `name:-v` on the wire and
+        // podman *also* parses that as a flag because it's part of the
+        // single IMAGE token. Use the allowlisted first-party path so
+        // the F-643 guard doesn't intercept first.
+        let err = ImageRef::parse("oci.io/forge/rust-tools:-v").unwrap_err();
+        assert!(
+            matches!(err, OciError::InvalidImageRef { .. }),
+            "expected InvalidImageRef, got {err:?}"
+        );
     }
 
     #[test]
