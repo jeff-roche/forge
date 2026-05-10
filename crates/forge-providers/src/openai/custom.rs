@@ -306,6 +306,16 @@ fn custom_redirect_policy() -> reqwest::redirect::Policy {
 }
 
 impl Provider for CustomOpenAiProvider {
+    /// F-682: see [`crate::anthropic::AnthropicProvider::chat`] for the
+    /// full instrumentation rationale. The `provider` field carries
+    /// the user-supplied provider name (e.g. `"vllm"`, `"together"`)
+    /// so latency attribution distinguishes between two
+    /// `custom_openai:*` deployments at the same dashboard.
+    #[tracing::instrument(
+        name = "provider.chat",
+        skip_all,
+        fields(provider = %self.name(), model = %self.model),
+    )]
     fn chat(
         &self,
         req: ChatRequest,

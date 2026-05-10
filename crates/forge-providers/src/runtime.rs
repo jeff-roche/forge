@@ -147,6 +147,25 @@ impl Provider for SwappableProvider {
         // holds Arc-backed state and can outlive any subsequent swap.
         // This is the contract that lets the next turn use the new inner
         // without disturbing the in-flight stream.
+        //
+        // Why clone the entire `RuntimeProvider` rather than borrow
+        // `&self.inner` into the future:
+        //
+        // 1. `parking_lot::RwLockReadGuard<'_, RuntimeProvider>` is not
+        //    `Send`. Holding it across an `.await` would refuse to compile
+        //    — the future has to be `Send` to satisfy the trait return
+        //    bound (`+ Send`).
+        //
+        // 2. `RuntimeProvider::Clone` is *cheap*: every variant wraps an
+        //    `Arc<ConcreteProvider>`, so the clone is a per-variant
+        //    refcount bump, not a deep copy of provider state (HTTP
+        //    client, API key bytes, model name).
+        //
+        // 3. Holding the snapshot decouples the in-flight chat from any
+        //    future swap: a `provider:changed` event mid-stream replaces
+        //    `self.inner` but the captured `Arc` keeps the previous inner
+        //    alive until the stream finishes. Swap-during-stream cannot
+        //    yank the network connection out from under an active turn.
         let snapshot: RuntimeProvider = self.inner.read().clone();
         async move { snapshot.chat(req).await }
     }

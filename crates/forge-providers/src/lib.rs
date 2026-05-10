@@ -127,6 +127,25 @@ pub enum ChatChunk {
 }
 
 /// Why a provider stream terminated abnormally.
+///
+/// # Asymmetry with [`crate::sse::SseError`]
+///
+/// `StreamErrorKind` is `Copy` and carries no payload, while the
+/// upstream [`crate::sse::SseError::Transport`] variant *does* carry
+/// a `String` description of the underlying transport failure
+/// (reqwest error, redirect refusal, malformed framing, etc.). The
+/// asymmetry is intentional: the descriptive transport string is
+/// surfaced separately on the [`ChatChunk::Error`] envelope via its
+/// sibling `message` field, so the kind→envelope mapping can stay
+/// allocation-free (`Copy` of an enum tag, no `Clone` of a heap
+/// string).
+///
+/// At the crate-internal boundary (`http_util::map_sse_error`), every
+/// `SseError` collapses to a `StreamErrorKind`: variants that already
+/// describe themselves (`LineTooLong`, `IdleTimeout`, `WallClockTimeout`)
+/// map one-to-one; `SseError::Transport(string)` drops the string here
+/// — the caller is expected to copy it into the surrounding
+/// `ChatChunk::Error.message` so the wire shape is consistent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamErrorKind {
     /// A single NDJSON line exceeded the per-line byte cap.
@@ -135,13 +154,35 @@ pub enum StreamErrorKind {
     IdleTimeout,
     /// The overall stream exceeded its wall-clock budget.
     WallClockTimeout,
-    /// Transport-level error from the underlying reader.
+    /// Transport-level error from the underlying reader. The
+    /// descriptive message lives on the sibling
+    /// [`ChatChunk::Error::message`] field — see the type-level
+    /// asymmetry note above.
     Transport,
 }
 
 // ── Provider trait ────────────────────────────────────────────────────────────
 
 /// Streaming chat provider.
+///
+/// # Why `impl Future`, not `dyn`
+///
+/// `Provider` returns `impl std::future::Future<Output = ...> + Send`
+/// rather than `Pin<Box<dyn Future ...>>`. The `impl Future` shape is
+/// monomorphized per concrete provider, so we get zero allocation on
+/// the hot per-turn entry path and the compiler's auto-trait inference
+/// can confirm `Send` without manual `Box::pin`-ing each variant.
+///
+/// The cost is that `Provider` is **not object-safe**: `Arc<dyn Provider>`
+/// is rejected by the compiler. That trade is deliberate — every
+/// caller in the workspace today knows the concrete provider at
+/// compile time except the hot-swap path, and the hot-swap path
+/// resolves the lack of dynamic dispatch with the
+/// [`crate::runtime::RuntimeProvider`] tagged-union enum: one `match`
+/// arm per built-in provider, zero virtual call. See
+/// [`crate::runtime::RuntimeProvider`] and
+/// [`crate::runtime::SwappableProvider`] for the rationale and the
+/// per-call dispatch shape.
 pub trait Provider: Send + Sync {
     fn chat(
         &self,

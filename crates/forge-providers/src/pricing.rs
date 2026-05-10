@@ -67,6 +67,14 @@ impl PriceTable {
     /// The compile-time–embedded table from `data/prices.toml`. Panics on a
     /// malformed in-tree file (a release blocker — caught by the
     /// `embedded_table_parses` test below).
+    ///
+    /// Backed by a process-lifetime `OnceLock` so the TOML parse runs
+    /// at most once per process. Every subsequent call returns the
+    /// same `&'static PriceTable` reference — there is no per-call
+    /// allocation, no per-call parse, and no lock contention beyond
+    /// the OnceLock's one-time initialization fence. Safe to call
+    /// from any thread, including the hot per-tick pricing path that
+    /// runs on every provider chunk.
     pub fn embedded() -> &'static Self {
         static TABLE: OnceLock<PriceTable> = OnceLock::new();
         TABLE.get_or_init(|| {

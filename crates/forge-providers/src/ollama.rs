@@ -309,6 +309,14 @@ impl OllamaProvider {
 }
 
 impl Provider for OllamaProvider {
+    /// F-682: see [`crate::anthropic::AnthropicProvider::chat`] for the
+    /// full instrumentation rationale; same shape, different provider
+    /// label.
+    #[tracing::instrument(
+        name = "provider.chat",
+        skip_all,
+        fields(provider = "ollama", model = %self.model),
+    )]
     fn chat(
         &self,
         req: ChatRequest,
