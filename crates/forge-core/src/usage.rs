@@ -160,8 +160,20 @@ impl Default for SessionUsage {
 }
 
 impl SessionUsage {
-    /// All-zero starting point; cost is `Some(0 USD)` until a tick without a
-    /// priced row arrives.
+    /// All-zero starting point.
+    ///
+    /// `cost = Some(Money::usd(0))` is a *known* zero — the session has
+    /// observed no priced traffic *yet*, but the price table is in
+    /// scope and ready to attribute the next tick. This is distinct
+    /// from `cost = None`, which is the *missing-price* sentinel
+    /// produced by [`Self::fold`] once any priced tick lacks a row in
+    /// the embedded `prices.toml`. Once `None` is observed the value is
+    /// sticky — every subsequent fold leaves it `None` so live and
+    /// flushed totals report a missing price the same way (mirrors
+    /// [`MonthlyAggregate::record`]).
+    ///
+    /// UI rule of thumb: `Some(0)` renders as `$0.00`; `None` renders
+    /// as `—` (or "price unavailable").
     pub fn zero() -> Self {
         Self {
             tokens_in: 0,

@@ -37,6 +37,13 @@ use ts_rs::TS;
 use crate::config_file::{load_toml_or_default, save_raw_atomic, save_toml_atomic};
 use crate::Result;
 
+/// Open-keyed boolean map written by the dashboard's dotted-key
+/// `set_setting` path. Keys are arbitrary user-supplied identifiers
+/// (catalog asset ids, agent names, etc.) and order on the wire is not
+/// stable. Used as the inner shape of [`CatalogSettings::enabled`] and
+/// directly as [`MemorySettings::enabled`].
+pub type OpenKeyMap = HashMap<String, bool>;
+
 /// Notification delivery mode for background-agent events (F-138 consumer).
 /// Serialized as snake_case string so TOML files read naturally
 /// (`bg_agents = "toast"`) and ts-rs emits a string literal union.
@@ -199,7 +206,7 @@ pub struct CatalogSettings {
     /// `enabled.<kind>.<id> = <bool>`. Outer key is the catalog tab
     /// (`"skills"`, `"mcp"`, `"agents"`); inner key is the asset id.
     #[serde(default)]
-    pub enabled: HashMap<String, HashMap<String, bool>>,
+    pub enabled: HashMap<String, OpenKeyMap>,
 }
 
 /// `[dashboard]` section. Per-user UI preferences for the Dashboard
@@ -238,7 +245,7 @@ pub struct MemorySettings {
     /// `enabled.<agent> = <bool>`. Absent agents fall back to the def-level
     /// `memory_enabled` frontmatter flag.
     #[serde(default)]
-    pub enabled: HashMap<String, bool>,
+    pub enabled: OpenKeyMap,
 }
 
 /// Top-level settings shape persisted to `settings.toml`.
