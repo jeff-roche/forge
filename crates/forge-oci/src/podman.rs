@@ -159,12 +159,18 @@ impl ContainerRuntime for PodmanRuntime {
                 source,
             })?;
 
-        let rootless = parsed
-            .get("host")
-            .and_then(|h| h.get("security"))
-            .and_then(|s| s.get("rootless"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        // Drill down with explicit type checks so a malformed payload
+        // (e.g. `host` returned as a string, `security` returned as a
+        // list, `rootless` returned as a number) fails with a typed
+        // `InvalidJson` instead of silently collapsing to "rootless
+        // unavailable". Each step distinguishes "key absent" (still a
+        // typed error — the schema is load-bearing) from "key present
+        // but wrong shape".
+        let rootless = extract_rootless(&parsed).map_err(|reason| OciError::InvalidJson {
+            tool: PODMAN,
+            subcommand: "info",
+            source: <serde_json::Error as serde::de::Error>::custom(reason),
+        })?;
 
         if !rootless {
             return Err(OciError::RootlessUnavailable {
@@ -256,6 +262,24 @@ impl ContainerRuntime for PodmanRuntime {
                 args: args.iter().map(|s| s.to_string()).collect(),
                 exit_code: outcome.exit_code,
                 stderr: "podman create returned empty container id".to_string(),
+            });
+        }
+        // Podman emits a 64-char lowercase hex container id. Reject
+        // anything else so a corrupted / wrapper-prefixed stdout cannot
+        // leak through to `start` / `exec` / `rm` and cause a
+        // hard-to-diagnose podman error or, worse, hit a different
+        // container with a coincidentally-matching short id.
+        if !is_valid_container_id(&id) {
+            return Err(OciError::CommandFailed {
+                tool: PODMAN,
+                args: args.iter().map(|s| s.to_string()).collect(),
+                exit_code: outcome.exit_code,
+                stderr: format!(
+                    "podman create returned malformed container id (expected 64-char \
+                     lowercase hex, got {} chars: {:?})",
+                    id.len(),
+                    id
+                ),
             });
         }
         tracing::info!(
@@ -397,9 +421,19 @@ impl ContainerRuntime for PodmanRuntime {
         //   - `mem_usage`: string like `"178.3MB / 67.31GB"` (we surface only
         //     the first number)
         //   - `pids`: string or integer
-        // Missing/transitional fields are surfaced as `None` rather than
-        // failing the call — see `parse_size_first` for the `"-- / --"`
-        // placeholder podman emits while a container is mid-state.
+        //
+        // We distinguish two cases on each field:
+        //   1. **Absent / null** — `Ok(None)` on the matching `Stats`
+        //      field. Podman omits fields for containers in transitional
+        //      states (just-created, exited), and the `"-- / --"`
+        //      placeholder for `mem_usage` is a documented podman convention
+        //      we treat the same way.
+        //   2. **Present but unparseable** — `Err(OciError::InvalidJson)`.
+        //      Surfacing the error means version-skew or schema drift in
+        //      podman bubbles up to the caller instead of being silently
+        //      reported as "metric missing", which previously hid genuine
+        //      breakage behind a `None` that looks identical to "container
+        //      starting up".
         let parsed: serde_json::Value =
             serde_json::from_slice(raw).map_err(|source| OciError::InvalidJson {
                 tool: PODMAN,
@@ -413,21 +447,125 @@ impl ContainerRuntime for PodmanRuntime {
             .unwrap_or(serde_json::Value::Null);
 
         Ok(Stats {
-            cpu_percent: entry
-                .get("cpu_percent")
-                .and_then(|v| v.as_str())
-                .and_then(parse_percent),
-            memory_bytes: entry
-                .get("mem_usage")
-                .and_then(|v| v.as_str())
-                .and_then(parse_size_first),
-            pids: entry.get("pids").and_then(|v| match v {
-                serde_json::Value::String(s) => s.parse().ok(),
-                serde_json::Value::Number(n) => n.as_u64(),
-                _ => None,
-            }),
+            cpu_percent: parse_optional_field(&entry, "cpu_percent", parse_cpu_percent_field)?,
+            memory_bytes: parse_optional_field(&entry, "mem_usage", parse_mem_usage_field)?,
+            pids: parse_optional_field(&entry, "pids", parse_pids_field)?,
         })
     }
+}
+
+/// Read an optional Stats field. Absent / `null` → `Ok(None)`. Present
+/// → delegate to `parser`, which returns `Ok(Some(_))` for a successful
+/// parse, `Ok(None)` for a documented placeholder podman emits while a
+/// container is mid-state, and `Err(reason)` for anything else (schema
+/// drift, version skew). The `Err` path is wrapped in the same
+/// [`OciError::InvalidJson`] variant the surrounding `parse_stats` uses
+/// so callers get one typed error covering both "blob is not JSON" and
+/// "blob is JSON but doesn't match the podman stats schema".
+fn parse_optional_field<T>(
+    entry: &serde_json::Value,
+    field: &'static str,
+    parser: impl FnOnce(&serde_json::Value) -> Result<Option<T>, String>,
+) -> Result<Option<T>, OciError> {
+    let value = match entry.get(field) {
+        None => return Ok(None),
+        Some(serde_json::Value::Null) => return Ok(None),
+        Some(v) => v,
+    };
+    parser(value).map_err(|reason| OciError::InvalidJson {
+        tool: PODMAN,
+        subcommand: "stats",
+        source: <serde_json::Error as serde::de::Error>::custom(format!(
+            "stats field {field:?}: {reason}"
+        )),
+    })
+}
+
+fn parse_cpu_percent_field(v: &serde_json::Value) -> Result<Option<f64>, String> {
+    let Some(s) = v.as_str() else {
+        return Err(format!("expected string, got {v}"));
+    };
+    parse_percent(s).map(Some).ok_or_else(|| {
+        format!("could not parse {s:?} as a podman percent string (expected e.g. \"1.35%\")")
+    })
+}
+
+fn parse_mem_usage_field(v: &serde_json::Value) -> Result<Option<u64>, String> {
+    let Some(s) = v.as_str() else {
+        return Err(format!("expected string, got {v}"));
+    };
+    // Podman emits `"-- / --"` for containers mid-transition. That is
+    // a documented placeholder, not a schema drift — keep it as
+    // `Ok(None)` so callers see "metric missing" rather than an error
+    // every time they sample a just-created container.
+    if s.trim() == "-- / --" {
+        return Ok(None);
+    }
+    parse_size_first(s).map(Some).ok_or_else(|| {
+        format!("could not parse {s:?} as a podman mem_usage string (expected e.g. \"178.3MB / 67.31GB\")")
+    })
+}
+
+fn parse_pids_field(v: &serde_json::Value) -> Result<Option<u64>, String> {
+    match v {
+        serde_json::Value::String(s) => s
+            .parse::<u64>()
+            .map(Some)
+            .map_err(|e| format!("could not parse pids string {s:?} as u64: {e}")),
+        serde_json::Value::Number(n) => n
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| format!("pids number {n} is not a non-negative u64")),
+        other => Err(format!(
+            "expected string or non-negative number, got {other}"
+        )),
+    }
+}
+
+/// Extract the `host.security.rootless` boolean from a `podman info --format
+/// json` payload with explicit type checks at each step.
+///
+/// Returns `Err(reason)` if any intermediate node is missing or the wrong
+/// shape so the caller can surface a typed `InvalidJson` error. A previous
+/// `and_then` chain collapsed every malformed-shape case into "rootless =
+/// false" via `unwrap_or(false)`, which masked schema drift behind the
+/// existing `RootlessUnavailable` error.
+fn extract_rootless(parsed: &serde_json::Value) -> Result<bool, String> {
+    let Some(host) = parsed.get("host") else {
+        return Err("podman info: missing top-level `host` object".to_string());
+    };
+    if !host.is_object() {
+        return Err(format!(
+            "podman info: expected `host` to be an object, got {host}"
+        ));
+    }
+    let Some(security) = host.get("security") else {
+        return Err("podman info: missing `host.security` object".to_string());
+    };
+    if !security.is_object() {
+        return Err(format!(
+            "podman info: expected `host.security` to be an object, got {security}"
+        ));
+    }
+    let Some(rootless) = security.get("rootless") else {
+        return Err("podman info: missing `host.security.rootless` field".to_string());
+    };
+    rootless.as_bool().ok_or_else(|| {
+        format!("podman info: expected `host.security.rootless` to be a boolean, got {rootless}")
+    })
+}
+
+/// Validate a podman container id from `podman create` stdout. Real
+/// podman emits exactly 64 lowercase hex characters (the truncated form
+/// `--format '{{.ID}}'` would surface 12 chars, but our argv passes no
+/// such flag — we get the full form). Anything else is a schema-drift
+/// or wrapper signal; reject so callers see a typed error rather than
+/// a downstream `start` / `exec` / `rm` failure against a bogus id.
+fn is_valid_container_id(id: &str) -> bool {
+    id.len() == 64
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 #[async_trait]
@@ -504,12 +642,18 @@ impl ContainerLogs for PodmanRuntime {
 
 /// Parse one `podman logs --timestamps` line into a [`LogLine`]. Podman's
 /// timestamp prefix is RFC-3339 followed by a single space; everything
-/// after the first space is the original line text. Lines without a
-/// recognisable timestamp prefix are returned with `timestamp = None` so
-/// the caller never silently drops them.
+/// after the first space is the original line text.
+///
+/// The first whitespace-delimited token is validated against strict
+/// RFC-3339 via [`chrono::DateTime::parse_from_rfc3339`]. If the token
+/// is not a valid RFC-3339 timestamp the entire `raw` line is returned
+/// as the log message with `timestamp = None` — the previous heuristic
+/// (`contains('T') && contains('-')`) would silently misparse any line
+/// whose first word happened to contain both characters (e.g. a path
+/// like `/etc/foo-bar.conf T=1`) and strip the first token.
 fn parse_podman_log_line(stream: &str, raw: &str) -> LogLine {
     if let Some((maybe_ts, rest)) = raw.split_once(' ') {
-        if maybe_ts.contains('T') && maybe_ts.contains('-') {
+        if chrono::DateTime::parse_from_rfc3339(maybe_ts).is_ok() {
             return LogLine {
                 stream: stream.to_string(),
                 line: rest.to_string(),
@@ -693,7 +837,10 @@ mod tests {
     #[tokio::test]
     async fn create_returns_handle_from_stdout() {
         let runner = RecordingRunner::new();
-        runner.push(StubResponse::ok_stdout(b"abc1234deadbeef\n".to_vec()));
+        // Podman emits a 64-char lowercase hex container id. The
+        // post-`create` validator requires this exact shape.
+        let id_bytes = format!("{SHA}\n");
+        runner.push(StubResponse::ok_stdout(id_bytes.into_bytes()));
         let calls = runner.calls.clone();
 
         let runtime = rt(runner);
@@ -702,7 +849,7 @@ mod tests {
             .create(&img, &["echo", "hi"], &SecurityOpts::permissive())
             .await
             .unwrap();
-        assert_eq!(h.id, "abc1234deadbeef");
+        assert_eq!(h.id, SHA);
 
         let calls = calls.lock().unwrap();
         // SecurityOpts::permissive emits zero flags, keeping the
@@ -729,7 +876,8 @@ mod tests {
         // `create_does_not_apply_caller_flags_as_runtime_flags`; this unit
         // test pins the *positional* invariant the safety story rests on.
         let runner = RecordingRunner::new();
-        runner.push(StubResponse::ok_stdout(b"abc1234\n".to_vec()));
+        let id_bytes = format!("{SHA}\n");
+        runner.push(StubResponse::ok_stdout(id_bytes.into_bytes()));
         let calls = runner.calls.clone();
 
         let runtime = rt(runner);
@@ -1345,7 +1493,7 @@ mod tests {
         // the IMAGE positional, where podman would treat it as the
         // in-container command) fails the test loudly.
         let runner = RecordingRunner::new();
-        runner.push(StubResponse::ok_stdout(b"abc1234\n".to_vec()));
+        runner.push(StubResponse::ok_stdout(format!("{SHA}\n").into_bytes()));
         let calls = runner.calls.clone();
 
         let runtime = rt(runner);
@@ -1396,7 +1544,7 @@ mod tests {
         // through review. The order is documented on
         // `SecurityOpts::to_create_flags`.
         let runner = RecordingRunner::new();
-        runner.push(StubResponse::ok_stdout(b"abc1234\n".to_vec()));
+        runner.push(StubResponse::ok_stdout(format!("{SHA}\n").into_bytes()));
         let calls = runner.calls.clone();
 
         let runtime = rt(runner);
@@ -1451,7 +1599,7 @@ mod tests {
         // SecurityOpts::permissive expects a clean argv with no
         // hardening flags interleaved.
         let runner = RecordingRunner::new();
-        runner.push(StubResponse::ok_stdout(b"abc1234\n".to_vec()));
+        runner.push(StubResponse::ok_stdout(format!("{SHA}\n").into_bytes()));
         let calls = runner.calls.clone();
 
         let runtime = rt(runner);
@@ -1478,5 +1626,331 @@ mod tests {
         assert_eq!(l.stream, "stderr");
         assert_eq!(l.line, "plain output");
         assert_eq!(l.timestamp, None);
+    }
+
+    // ── #702: strict RFC-3339 in parse_podman_log_line ───────────────
+
+    #[test]
+    fn parse_podman_log_line_rejects_non_rfc3339_first_token() {
+        // The old heuristic accepted any first token containing both
+        // 'T' and '-', so a path like `/etc/foo-bar.conf` followed by
+        // text was misread as a timestamp and the rest of the line was
+        // silently truncated. With strict RFC-3339 the whole line is
+        // preserved as the message.
+        let l = parse_podman_log_line("stdout", "/etc/foo-bar.conf T=1 some message");
+        assert_eq!(l.stream, "stdout");
+        assert_eq!(l.line, "/etc/foo-bar.conf T=1 some message");
+        assert_eq!(l.timestamp, None);
+    }
+
+    #[test]
+    fn parse_podman_log_line_accepts_real_rfc3339_with_offset() {
+        // RFC-3339 admits both 'Z' and explicit offsets — both must
+        // parse cleanly so podman emissions across host TZs round-trip.
+        let l = parse_podman_log_line("stdout", "2025-04-26T10:00:00+02:00 hello");
+        assert_eq!(l.line, "hello");
+        assert_eq!(l.timestamp.as_deref(), Some("2025-04-26T10:00:00+02:00"));
+    }
+
+    #[test]
+    fn parse_podman_log_line_treats_almost_rfc3339_as_message() {
+        // Looks similar to RFC-3339 (has 'T' and '-') but is missing
+        // the timezone — chrono::parse_from_rfc3339 rejects this, so
+        // the whole token is treated as part of the message.
+        let l = parse_podman_log_line("stdout", "2025-04-26T10:00:00 hello");
+        assert_eq!(l.line, "2025-04-26T10:00:00 hello");
+        assert_eq!(l.timestamp, None);
+    }
+
+    // ── #702: type-checked detect JSON drill-down ────────────────────
+
+    #[tokio::test]
+    async fn detect_reports_invalid_json_when_host_is_wrong_type() {
+        // `host` is a string instead of an object. The old `.and_then`
+        // chain swallowed this and collapsed to `rootless=false`,
+        // surfacing as a misleading `RootlessUnavailable`. The new code
+        // surfaces it as `InvalidJson` — schema drift, not "rootless
+        // off".
+        let runner = RecordingRunner::new();
+        runner.push(StubResponse::ok_stdout(b"podman version 5.0\n".to_vec()));
+        runner.push(StubResponse::ok_stdout(
+            br#"{"host":"not an object"}"#.to_vec(),
+        ));
+        let err = rt(runner).detect().await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                OciError::InvalidJson {
+                    tool: "podman",
+                    subcommand: "info",
+                    ..
+                }
+            ),
+            "expected InvalidJson, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn detect_reports_invalid_json_when_security_is_wrong_type() {
+        let runner = RecordingRunner::new();
+        runner.push(StubResponse::ok_stdout(b"podman version 5.0\n".to_vec()));
+        runner.push(StubResponse::ok_stdout(
+            br#"{"host":{"security":["unexpected","array"]}}"#.to_vec(),
+        ));
+        let err = rt(runner).detect().await.unwrap_err();
+        assert!(matches!(
+            err,
+            OciError::InvalidJson {
+                tool: "podman",
+                subcommand: "info",
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn detect_reports_invalid_json_when_rootless_is_not_bool() {
+        // `rootless` is a string, not a boolean — the old code
+        // collapsed this to `false` and reported `RootlessUnavailable`.
+        // The new code reports schema drift.
+        let runner = RecordingRunner::new();
+        runner.push(StubResponse::ok_stdout(b"podman version 5.0\n".to_vec()));
+        runner.push(StubResponse::ok_stdout(
+            br#"{"host":{"security":{"rootless":"true"}}}"#.to_vec(),
+        ));
+        let err = rt(runner).detect().await.unwrap_err();
+        assert!(matches!(
+            err,
+            OciError::InvalidJson {
+                tool: "podman",
+                subcommand: "info",
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn detect_reports_invalid_json_when_rootless_key_absent() {
+        // The key is structurally missing entirely. This is also schema
+        // drift relative to the documented podman `info` payload, so
+        // surface it as InvalidJson rather than silently collapsing to
+        // "rootless unavailable".
+        let runner = RecordingRunner::new();
+        runner.push(StubResponse::ok_stdout(b"podman version 5.0\n".to_vec()));
+        runner.push(StubResponse::ok_stdout(
+            br#"{"host":{"security":{}}}"#.to_vec(),
+        ));
+        let err = rt(runner).detect().await.unwrap_err();
+        assert!(matches!(
+            err,
+            OciError::InvalidJson {
+                tool: "podman",
+                subcommand: "info",
+                ..
+            }
+        ));
+    }
+
+    // ── #702: container ID format validation in `create` ─────────────
+
+    #[test]
+    fn is_valid_container_id_accepts_64_char_lowercase_hex() {
+        // 64 lowercase hex chars — what real podman emits.
+        assert!(is_valid_container_id(SHA));
+    }
+
+    #[test]
+    fn is_valid_container_id_rejects_short_id() {
+        assert!(!is_valid_container_id("abc1234"));
+        // Truncated 12-char form podman would emit with --format '{{.ID}}'
+        // (we don't pass that flag, so we reject it here defensively).
+        assert!(!is_valid_container_id("abc1234deadbe"));
+    }
+
+    #[test]
+    fn is_valid_container_id_rejects_uppercase_hex() {
+        // Podman's container ids are lowercase. An uppercase id is a
+        // wrapper / parsing artefact, not real podman output.
+        let upper: String = SHA.chars().map(|c| c.to_ascii_uppercase()).collect();
+        assert!(!is_valid_container_id(&upper));
+    }
+
+    #[test]
+    fn is_valid_container_id_rejects_non_hex_chars() {
+        // 64 chars but contains a non-hex character.
+        let mut bad = String::from(SHA);
+        bad.replace_range(0..1, "g");
+        assert_eq!(bad.len(), 64);
+        assert!(!is_valid_container_id(&bad));
+    }
+
+    #[tokio::test]
+    async fn create_rejects_malformed_container_id_from_podman_stdout() {
+        // `podman create` returned a short / non-hex id. The new
+        // validator must surface this as CommandFailed rather than
+        // hand it back as a usable handle that would then misbehave
+        // in `start` / `exec` / `rm`.
+        let runner = RecordingRunner::new();
+        runner.push(StubResponse::ok_stdout(b"not-a-container-id\n".to_vec()));
+        let runtime = rt(runner);
+        let img = alpine_pinned();
+        let err = runtime
+            .create(&img, &["sh"], &SecurityOpts::permissive())
+            .await
+            .unwrap_err();
+        match err {
+            OciError::CommandFailed { stderr, .. } => {
+                assert!(
+                    stderr.contains("malformed container id"),
+                    "expected malformed-id message, got {stderr:?}"
+                );
+            }
+            other => panic!("expected CommandFailed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_rejects_container_id_with_uppercase_hex() {
+        // 64 chars but uppercase — defensive rejection so wrapper /
+        // schema-drift sources surface immediately.
+        let upper_id: String = SHA.chars().map(|c| c.to_ascii_uppercase()).collect();
+        let runner = RecordingRunner::new();
+        runner.push(StubResponse::ok_stdout(
+            format!("{upper_id}\n").into_bytes(),
+        ));
+        let runtime = rt(runner);
+        let img = alpine_pinned();
+        let err = runtime
+            .create(&img, &["sh"], &SecurityOpts::permissive())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, OciError::CommandFailed { .. }));
+    }
+
+    // ── #702: Stats parsing — Err vs absent ──────────────────────────
+
+    #[test]
+    fn parse_stats_returns_none_for_absent_fields() {
+        // Container is mid-transition: podman emits the entry with no
+        // metrics yet. `None` is the correct surface — caller renders
+        // "metric pending" rather than "metric broken".
+        let runtime = PodmanRuntime::new();
+        let stats = runtime.parse_stats(b"[{\"id\":\"xyz\"}]").unwrap();
+        assert_eq!(stats.cpu_percent, None);
+        assert_eq!(stats.memory_bytes, None);
+        assert_eq!(stats.pids, None);
+    }
+
+    #[test]
+    fn parse_stats_returns_none_for_explicit_null_fields() {
+        // Same shape as "absent", but the field is present with `null`.
+        // Podman has emitted both forms across versions; both are the
+        // documented "no data yet" signal, not an error.
+        let runtime = PodmanRuntime::new();
+        let stats = runtime
+            .parse_stats(br#"[{"cpu_percent":null,"mem_usage":null,"pids":null}]"#)
+            .unwrap();
+        assert_eq!(stats.cpu_percent, None);
+        assert_eq!(stats.memory_bytes, None);
+        assert_eq!(stats.pids, None);
+    }
+
+    #[test]
+    fn parse_stats_treats_mem_usage_placeholder_as_none() {
+        // Documented podman placeholder for mid-state containers.
+        // Predates this change; preserved so the dashboards continue to
+        // render "metric pending" instead of an error every time a
+        // container is just-starting.
+        let runtime = PodmanRuntime::new();
+        let stats = runtime
+            .parse_stats(br#"[{"mem_usage":"-- / --"}]"#)
+            .unwrap();
+        assert_eq!(stats.memory_bytes, None);
+    }
+
+    #[test]
+    fn parse_stats_errors_on_unparseable_cpu_percent_string() {
+        // Field is present but unparseable — schema drift, not "no
+        // data". The old code returned `None` here, masking the drift.
+        let runtime = PodmanRuntime::new();
+        let err = runtime
+            .parse_stats(br#"[{"cpu_percent":"banana"}]"#)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            OciError::InvalidJson {
+                tool: "podman",
+                subcommand: "stats",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_stats_errors_on_cpu_percent_wrong_type() {
+        // Field is the wrong JSON type entirely (number instead of
+        // string). Surface as a typed error so the caller can log /
+        // alert on schema skew rather than silently dropping a metric.
+        let runtime = PodmanRuntime::new();
+        let err = runtime
+            .parse_stats(br#"[{"cpu_percent":1.35}]"#)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            OciError::InvalidJson {
+                tool: "podman",
+                subcommand: "stats",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_stats_errors_on_unparseable_mem_usage_string() {
+        // String shape diverges from `"178.3MB / 67.31GB"` and is not
+        // the `"-- / --"` placeholder — schema drift.
+        let runtime = PodmanRuntime::new();
+        let err = runtime
+            .parse_stats(br#"[{"mem_usage":"definitely not a size"}]"#)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            OciError::InvalidJson {
+                tool: "podman",
+                subcommand: "stats",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_stats_errors_on_unparseable_pids_string() {
+        let runtime = PodmanRuntime::new();
+        let err = runtime
+            .parse_stats(br#"[{"pids":"not a number"}]"#)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            OciError::InvalidJson {
+                tool: "podman",
+                subcommand: "stats",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_stats_errors_on_pids_wrong_type() {
+        // pids as an array — wrong type entirely.
+        let runtime = PodmanRuntime::new();
+        let err = runtime.parse_stats(br#"[{"pids":[1,2]}]"#).unwrap_err();
+        assert!(matches!(
+            err,
+            OciError::InvalidJson {
+                tool: "podman",
+                subcommand: "stats",
+                ..
+            }
+        ));
     }
 }

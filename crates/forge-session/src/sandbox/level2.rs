@@ -40,6 +40,7 @@
 //! those handles. The `Arc` carries the same dyn-trait surface area and is
 //! cheaper than re-detecting / re-warming per step.
 
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -54,17 +55,76 @@ use forge_oci::{ContainerHandle, ContainerRuntime, ImageRef, OciError, SecurityO
 /// strict preset (2 cpus, 4 GiB, 1024 pids, no swap).
 pub use forge_oci::ContainerLimits;
 
-/// Binary used by [`Level2Session::drop`]'s panic-safety net to reap
-/// a leaked container. Hardcoded because the only `ContainerRuntime`
-/// impl in the workspace today is `PodmanRuntime`; if a second
-/// implementation is added the safety net would need a small
-/// abstraction (e.g. each impl supplies its own teardown argv).
+/// Binary name used by [`Level2Session::drop`]'s panic-safety net to
+/// reap a leaked container. Hardcoded because the only
+/// `ContainerRuntime` impl in the workspace today is `PodmanRuntime`;
+/// if a second implementation is added the safety net would need a
+/// small abstraction (e.g. each impl supplies its own teardown argv).
+///
+/// The bare name is only used to *resolve* the absolute path at
+/// session-creation time via [`resolve_drop_cleanup_binary`]. The
+/// resolved [`PathBuf`] is stored on the session and used by
+/// [`Level2Session::drop`]; the unwind path never re-walks `PATH`,
+/// which protects the cleanup from a `PATH` mutation, working-
+/// directory change, or sandbox-induced PATH scrub between session
+/// creation and drop.
 ///
 /// TODO(F-682, issue #718): refactor into a per-impl shutdown command
 /// when the second container runtime lands. Tracker explicitly defers
 /// the change until then — adding the abstraction now would be
 /// speculative scaffolding with one consumer.
 const DROP_CLEANUP_BINARY: &str = "podman";
+
+/// Walk `PATH` once and return the absolute path of the
+/// `DROP_CLEANUP_BINARY`. Symlinks are *not* canonicalised — we want
+/// the same binary the rest of the host invokes via PATH lookup, even
+/// if it lives behind `/usr/bin/podman -> /usr/local/bin/podman`.
+///
+/// Returns `None` if `PATH` is unset, empty, or does not contain a
+/// regular file with the binary name. Callers fall back to a
+/// PATH-relative spawn in that case and log a warning — the host is
+/// already in an unusual state if we get here, but Drop is best-effort
+/// and we should not panic in the unwind path.
+fn resolve_drop_cleanup_binary() -> Option<PathBuf> {
+    resolve_on_path(DROP_CLEANUP_BINARY)
+}
+
+/// Tiny dep-free PATH walker. Returns the first entry whose
+/// `{entry}/{binary}` is a regular file. Mirrors how
+/// `std::process::Command::new("podman")` resolves `podman` at spawn
+/// time, but captures the result eagerly so a subsequent `PATH`
+/// mutation cannot change which binary is chosen.
+fn resolve_on_path(binary: &str) -> Option<PathBuf> {
+    // Reject paths that already look absolute or contain a path
+    // separator — those would either bypass PATH lookup (so we have
+    // nothing to resolve) or attempt to escape the lookup, neither of
+    // which fits the "find a bare command name" contract.
+    if binary.is_empty() || binary.contains('/') {
+        return None;
+    }
+    let path_var = std::env::var_os("PATH")?;
+    for entry in std::env::split_paths(&path_var) {
+        if entry.as_os_str().is_empty() {
+            continue;
+        }
+        let candidate = entry.join(binary);
+        if is_executable_file(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    // We only need a "the binary exists and is regular" predicate —
+    // `std::process::Command::spawn` will surface the precise reason
+    // (mode bits, ENOEXEC, etc.) if it fails. Symlinks resolve through
+    // `metadata` (not `symlink_metadata`) so a typical `/usr/bin/podman
+    // -> /usr/local/bin/podman` arrangement is accepted.
+    std::fs::metadata(path)
+        .map(|m| m.is_file())
+        .unwrap_or(false)
+}
 
 /// Render [`ContainerLimits`] into the argv fragment that would be
 /// inserted between `podman create` and the IMAGE positional.
@@ -156,6 +216,15 @@ pub struct Level2Session {
     image: ImageRef,
     handle: ContainerHandle,
     limits: ContainerLimits,
+    /// Absolute path of the cleanup binary, resolved once at
+    /// [`Self::create`] time. [`Self::drop`] uses this verbatim so
+    /// the unwind path never re-walks `PATH` — a `PATH` mutation, CWD
+    /// change, or sandbox-imposed environment scrub between session
+    /// creation and drop cannot redirect the cleanup at a different
+    /// `podman` binary (or, worse, leave it unresolvable). `None`
+    /// when no `podman` was found on `PATH` at create time; Drop then
+    /// falls back to the bare-name spawn and logs a warning.
+    cleanup_binary: Option<PathBuf>,
     /// Set by [`Level2Session::teardown`]; checked by
     /// [`Level2Session::drop`] so an explicit clean shutdown skips the
     /// `podman rm -f` panic-safety fire-and-forget.
@@ -223,11 +292,27 @@ impl Level2Session {
             }
             return Err(start_err);
         }
+        // Resolve `podman` once now, while the runtime environment is
+        // still in the shape that successfully ran `pull → create →
+        // start`. Drop must not re-walk PATH at unwind time — that
+        // would race with `PATH` mutations, sandbox env scrubs, or a
+        // CWD change that altered the lookup. We log (not panic) if
+        // resolution fails because Drop is best-effort.
+        let cleanup_binary = resolve_drop_cleanup_binary();
+        if cleanup_binary.is_none() {
+            tracing::warn!(
+                binary = DROP_CLEANUP_BINARY,
+                "Level 2 panic-safety teardown could not resolve absolute path at session \
+                 creation; falling back to PATH-relative spawn at drop time — container leak \
+                 risk if PATH is mutated before drop"
+            );
+        }
         Ok(Self {
             runtime,
             image,
             handle,
             limits: effective_limits,
+            cleanup_binary,
             teardown_done: AtomicBool::new(false),
         })
     }
@@ -328,10 +413,16 @@ impl Drop for Level2Session {
     ///   `teardown_done` and the Drop impl becomes a no-op. The Drop
     ///   path is for the cases where `teardown` could not run
     ///   (panic, early `?`, task cancellation).
-    /// - **Hardcoded `podman`.** Today there is exactly one
-    ///   `ContainerRuntime` impl in the workspace. If a second one
-    ///   ships, this Drop should grow a tiny abstraction (each impl
-    ///   exposing its own teardown argv).
+    /// - **Absolute path resolved at create time.** Spawning by bare
+    ///   binary name re-walks `PATH` at unwind time, which races with
+    ///   `PATH` mutations, sandbox env scrubs, and CWD changes
+    ///   between session creation and drop. We resolve `podman` once
+    ///   in [`Self::create`] and use the captured [`PathBuf`] here so
+    ///   the cleanup is anchored to the binary the rest of the
+    ///   session was running against. If resolution failed at create
+    ///   time we fall back to PATH-relative spawn (preserving the old
+    ///   behaviour) and emit a warning — the same situation that
+    ///   would have failed `runtime.pull` upstream anyway.
     /// - **Errors are swallowed.** A failing `spawn` here would mean
     ///   `podman` is missing or the cleanup couldn't be launched —
     ///   both situations that already imply a leaked container we
@@ -342,7 +433,14 @@ impl Drop for Level2Session {
             return;
         }
         let argv = drop_cleanup_argv(&self.handle);
-        match std::process::Command::new(DROP_CLEANUP_BINARY)
+        // Prefer the absolute path captured at create time; fall back
+        // to the bare name only when resolution failed. Production
+        // callers go through the absolute-path branch.
+        let mut command = match self.cleanup_binary.as_ref() {
+            Some(abs) => std::process::Command::new(abs),
+            None => std::process::Command::new(DROP_CLEANUP_BINARY),
+        };
+        match command
             .args(argv.iter().map(String::as_str))
             // Detach: we are a fire-and-forget guard, not a wait()er.
             .stdin(std::process::Stdio::null())
@@ -359,7 +457,7 @@ impl Drop for Level2Session {
                 tracing::warn!(
                     error = %e,
                     container_id = %self.handle.id,
-                    binary = DROP_CLEANUP_BINARY,
+                    binary = ?self.cleanup_binary.as_deref().unwrap_or_else(|| Path::new(DROP_CLEANUP_BINARY)),
                     "Level 2 panic-safety teardown could not spawn 'podman rm -f'; \
                      container may leak — invoke `podman rm -f <id>` manually"
                 );
@@ -703,6 +801,174 @@ mod tests {
         session.disable_drop_cleanup();
     }
 
+    // ── #702: drop-cleanup binary resolved to absolute path ──────────
+
+    /// Serialize the env-mutation tests below — std::env is process-
+    /// global and cargo runs tests in parallel within a binary by
+    /// default. Without this lock concurrent `set_var("PATH", ...)`
+    /// calls race and the resolve-on-path assertions flake.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn resolve_on_path_finds_binary_in_first_matching_path_entry() {
+        // Place a fake `podman` (an executable file at a known path)
+        // in a temp dir, point `PATH` at that dir, and assert
+        // `resolve_on_path` returns the absolute path. This pins the
+        // "look up PATH at create time" contract independently of
+        // whether a real podman exists on the test host.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        use std::io::Write;
+        let tmp = tempfile::tempdir().unwrap();
+        let binary_path = tmp.path().join("podman");
+        // Empty file is sufficient — `resolve_on_path` checks
+        // existence + regular-file, not executability.
+        let mut f = std::fs::File::create(&binary_path).unwrap();
+        f.write_all(b"").unwrap();
+
+        let prev = std::env::var_os("PATH");
+        std::env::set_var("PATH", tmp.path());
+        let got = resolve_on_path("podman");
+        match prev {
+            Some(v) => std::env::set_var("PATH", v),
+            None => std::env::remove_var("PATH"),
+        }
+        assert_eq!(got, Some(binary_path));
+    }
+
+    #[test]
+    fn resolve_on_path_returns_none_when_binary_absent() {
+        // PATH points only at an empty dir. The function must return
+        // `None` rather than panicking or producing a partial path.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let prev = std::env::var_os("PATH");
+        std::env::set_var("PATH", tmp.path());
+        let got = resolve_on_path("this-binary-does-not-exist-anywhere");
+        match prev {
+            Some(v) => std::env::set_var("PATH", v),
+            None => std::env::remove_var("PATH"),
+        }
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn resolve_on_path_rejects_inputs_that_contain_a_separator() {
+        // The contract is "find a bare binary name on PATH"; anything
+        // with a `/` is either already absolute or is trying to
+        // escape PATH lookup. Both should short-circuit to None so
+        // the bare-name fallback in Drop is not silently bypassed.
+        assert!(resolve_on_path("/usr/bin/podman").is_none());
+        assert!(resolve_on_path("./podman").is_none());
+        assert!(resolve_on_path("").is_none());
+    }
+
+    // The two async tests below hold the `ENV_LOCK` across an
+    // `.await` because the awaited future (`Level2Session::create`)
+    // reads `PATH` synchronously inside `resolve_drop_cleanup_binary`
+    // and must see the staged value. An async mutex would defeat the
+    // purpose — std::env is process-global, so the lock has to serialise
+    // every test that mutates it, including the awaiting ones. Clippy's
+    // `await_holding_lock` would normally flag this; we silence it
+    // because the lock is test-only and the held duration is short.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn create_resolves_cleanup_binary_to_absolute_path() {
+        // The session must capture an absolute `podman` PathBuf at
+        // create time so Drop is not re-walking PATH at unwind. We
+        // stage a fake `podman` in a temp dir and point PATH at it
+        // for the duration of `create`. The captured path must equal
+        // the staged absolute path.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        use std::io::Write;
+        let tmp = tempfile::tempdir().unwrap();
+        let podman = tmp.path().join("podman");
+        std::fs::File::create(&podman)
+            .unwrap()
+            .write_all(b"")
+            .unwrap();
+
+        let prev_path = std::env::var_os("PATH");
+        std::env::set_var("PATH", tmp.path());
+
+        let mock: Arc<MockRuntime> = Arc::new(MockRuntime::default());
+        let runtime: Arc<dyn ContainerRuntime> = mock.clone();
+        let session = Level2Session::create(runtime, alpine(), ContainerLimits::default())
+            .await
+            .unwrap();
+        // Disarm Drop before restoring PATH so the panic-safety net
+        // (which would now have an absolute path to a fake `podman`)
+        // doesn't spawn against the empty file.
+        session.disable_drop_cleanup();
+        let captured = session.cleanup_binary.clone();
+
+        match prev_path {
+            Some(v) => std::env::set_var("PATH", v),
+            None => std::env::remove_var("PATH"),
+        }
+
+        let captured = captured.expect(
+            "Level2Session::create must resolve `podman` to an absolute path when it is on PATH",
+        );
+        assert_eq!(captured, podman);
+        assert!(
+            captured.is_absolute(),
+            "captured cleanup binary path must be absolute (got {captured:?})"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn drop_path_mutation_does_not_change_cleanup_target() {
+        // The whole point of resolving once at create time: a
+        // PATH mutation between `create` and `drop` must not change
+        // which binary the cleanup spawns. We verify by capturing the
+        // resolved path, mutating PATH to point somewhere else, and
+        // confirming the captured path is unchanged.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        use std::io::Write;
+        let tmp_a = tempfile::tempdir().unwrap();
+        let podman_a = tmp_a.path().join("podman");
+        std::fs::File::create(&podman_a)
+            .unwrap()
+            .write_all(b"")
+            .unwrap();
+
+        let prev_path = std::env::var_os("PATH");
+        std::env::set_var("PATH", tmp_a.path());
+
+        let mock: Arc<MockRuntime> = Arc::new(MockRuntime::default());
+        let runtime: Arc<dyn ContainerRuntime> = mock.clone();
+        let session = Level2Session::create(runtime, alpine(), ContainerLimits::default())
+            .await
+            .unwrap();
+        session.disable_drop_cleanup();
+
+        // After `create`, point PATH at an entirely different dir
+        // that has its own `podman`. The session must still hold the
+        // *original* resolved path.
+        let tmp_b = tempfile::tempdir().unwrap();
+        let podman_b = tmp_b.path().join("podman");
+        std::fs::File::create(&podman_b)
+            .unwrap()
+            .write_all(b"")
+            .unwrap();
+        std::env::set_var("PATH", tmp_b.path());
+
+        let captured = session.cleanup_binary.clone();
+
+        match prev_path {
+            Some(v) => std::env::set_var("PATH", v),
+            None => std::env::remove_var("PATH"),
+        }
+
+        let captured = captured.expect("create must resolve cleanup binary");
+        assert_eq!(
+            captured, podman_a,
+            "cleanup binary must not follow PATH mutations after create"
+        );
+        assert_ne!(captured, podman_b);
+    }
+
     // ── F-655: container leak on start failure ──────────────────────
 
     #[tokio::test]
@@ -1023,8 +1289,15 @@ mod tests {
         let recorder = RecordingRunner::new();
         // pull → empty success
         recorder.push(StubResponse::ok_stdout(b"".to_vec()));
-        // create → returns container id on stdout
-        recorder.push(StubResponse::ok_stdout(b"abc123\n".to_vec()));
+        // create → returns container id on stdout. Must be the 64-char
+        // lowercase hex shape real podman emits; the #702 validator in
+        // `PodmanRuntime::create` rejects anything else with a
+        // CommandFailed.
+        const FAKE_CONTAINER_ID: &str =
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        recorder.push(StubResponse::ok_stdout(
+            format!("{FAKE_CONTAINER_ID}\n").into_bytes(),
+        ));
         // start → empty success
         recorder.push(StubResponse::ok_stdout(b"".to_vec()));
         // exec → stdout + exit 0
