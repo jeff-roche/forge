@@ -41,6 +41,7 @@ fn expected_chunks() -> Vec<ChatChunk> {
         ChatChunk::TextDelta("Hello".into()),
         ChatChunk::TextDelta(" world".into()),
         ChatChunk::ToolCall {
+            id: "call_abc".into(),
             name: "get_weather".into(),
             args: serde_json::json!({"city": "sf"}),
         },

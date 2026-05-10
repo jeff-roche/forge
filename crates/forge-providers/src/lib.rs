@@ -113,7 +113,17 @@ pub enum ChatBlock {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChatChunk {
     TextDelta(String),
+    /// A complete tool call emitted by the provider.
+    ///
+    /// `id` is the provider-assigned identifier (Anthropic `toolu_…`,
+    /// OpenAI `call_…`) needed to round-trip a `ChatBlock::ToolResult`
+    /// back to that provider — the assistant message that initiated the
+    /// tool use carries the id, and the user-role tool result references
+    /// it. Providers that do not surface an id on the wire (Ollama,
+    /// `MockProvider`) emit an empty string; the orchestrator falls back
+    /// to its own internal id in that case.
     ToolCall {
+        id: String,
         name: String,
         args: serde_json::Value,
     },
@@ -202,6 +212,12 @@ enum RawChunk {
 
 #[derive(Deserialize)]
 struct RawToolCall {
+    /// Optional in the NDJSON mock shape. Real providers (Anthropic,
+    /// OpenAI) always carry an id; the mock shape predates the field
+    /// and falls back to an empty string so the orchestrator's
+    /// internal id is used for round-trip.
+    #[serde(default)]
+    id: String,
     name: String,
     args: serde_json::Value,
 }
@@ -215,6 +231,7 @@ fn parse_ndjson(content: &str) -> Result<Vec<ChatChunk>> {
             Ok(match raw {
                 RawChunk::Delta { delta } => ChatChunk::TextDelta(delta),
                 RawChunk::ToolCall { tool_call } => ChatChunk::ToolCall {
+                    id: tool_call.id,
                     name: tool_call.name,
                     args: tool_call.args,
                 },

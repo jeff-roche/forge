@@ -47,7 +47,12 @@ async fn parse_events_yields_text_and_tool_call_and_done() {
         vec![
             ChatChunk::TextDelta("Hello".into()),
             ChatChunk::TextDelta(" world".into()),
+            // Regression: the OpenAI-assigned `call_…` id captured on the
+            // first delta for an index must round-trip end-to-end so the
+            // orchestrator can reference it as `tool_call_id` on the
+            // follow-up `role: "tool"` message.
             ChatChunk::ToolCall {
+                id: "call_abc".into(),
                 name: "get_weather".into(),
                 args: serde_json::json!({"city": "sf"}),
             },
@@ -91,7 +96,9 @@ async fn chat_round_trip_yields_expected_chunks() {
         vec![
             ChatChunk::TextDelta("Hello".into()),
             ChatChunk::TextDelta(" world".into()),
+            // Regression: id preserved across the full HTTP-mock round-trip.
             ChatChunk::ToolCall {
+                id: "call_abc".into(),
                 name: "get_weather".into(),
                 args: serde_json::json!({"city": "sf"}),
             },

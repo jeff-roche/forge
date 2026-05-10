@@ -63,7 +63,12 @@ async fn chat_streams_text_tool_call_and_done() {
         vec![
             ChatChunk::TextDelta("Hel".into()),
             ChatChunk::TextDelta("lo".into()),
+            // Ollama's wire shape carries no tool-call id; the chunk
+            // surfaces an empty string so the orchestrator falls back to
+            // its own internal id when constructing the round-trip
+            // assistant `ChatBlock::ToolCall` / user `ChatBlock::ToolResult`.
             ChatChunk::ToolCall {
+                id: String::new(),
                 name: "fs.read".into(),
                 args: serde_json::json!({"path": "/x"}),
             },
