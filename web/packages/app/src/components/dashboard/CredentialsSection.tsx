@@ -17,6 +17,12 @@
 //     regardless of outcome (success or rejection) — and on rotation
 //     cancel. The user can re-type if they want; the value never
 //     persists past a terminal state.
+//   - During the rotation confirm step the value is briefly mirrored
+//     into a `pendingRotation` buffer so the modal can render and the
+//     confirm handler can dispatch. That buffer is cleared
+//     synchronously the moment the user clicks confirm — before the
+//     IPC dispatch awaits — so the plaintext is never held in two
+//     signals concurrently, even across an IPC failure.
 //   - The DOM never contains a rendered key — only the `password` input
 //     (browser-DOM-only) ever holds the typed value.
 //   - Logging / aria-labels never echo the key.
@@ -135,9 +141,14 @@ const CredentialRow: Component<CredentialRowProps> = (props) => {
       // the IPC call resolves regardless of outcome so the runtime heap
       // no longer holds a copy. The user can re-type if they want; a stuck
       // input would otherwise persist the secret across an error path.
+      //
+      // `pendingRotation` is intentionally NOT cleared here: the rotation
+      // confirm handler clears it synchronously before dispatching, so by
+      // the time we reach this block it is already null. Re-clearing would
+      // imply the buffer might still hold the secret across the IPC await,
+      // which is exactly the invariant we are enforcing against (#702).
       setDraft('');
       setPending(false);
-      setPendingRotation(null);
     }
   };
 
@@ -243,8 +254,15 @@ const CredentialRow: Component<CredentialRowProps> = (props) => {
             setDraft('');
           }}
           onConfirm={() => {
+            // Snapshot the pending value into a local, then clear the
+            // signal synchronously *before* dispatching the IPC. This
+            // guarantees the plaintext never lives in two signals at
+            // once — even if the `loginProvider` promise rejects, the
+            // `pendingRotation` buffer is already null. See #702.
             const value = pendingRotation();
-            if (value !== null) void submit(value);
+            if (value === null) return;
+            setPendingRotation(null);
+            void submit(value);
           }}
           pending={pending()}
         />

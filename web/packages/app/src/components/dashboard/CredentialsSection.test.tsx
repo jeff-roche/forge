@@ -299,6 +299,55 @@ describe('CredentialsSection (F-588)', () => {
     expect(input.value).toBe('');
   });
 
+  it('rotation confirm clears pendingRotation synchronously — modal dismisses before IPC resolves', async () => {
+    // Regression for #702 (Phase 3 security hygiene). The plaintext credential
+    // must never live in two signals at once: when the user confirms rotation
+    // the `pendingRotation` buffer must be cleared *before* the IPC dispatch,
+    // not in the post-resolution finally block. A stubbed pending IPC promise
+    // lets us observe the gap.
+    let resolveLogin: (() => void) | undefined;
+    const stalledInvoke = vi.fn(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'has_credential') {
+        return (args?.['providerId'] as string) === 'anthropic';
+      }
+      if (cmd === 'login_provider') {
+        return new Promise<void>((r) => {
+          resolveLogin = r;
+        });
+      }
+      return undefined;
+    });
+    setInvokeForTesting(stalledInvoke as never);
+
+    const { findByTestId, queryByTestId } = render(() => <CredentialsSection />);
+    const input = (await findByTestId('credential-input-anthropic')) as HTMLInputElement;
+    const submit = await findByTestId('credential-submit-anthropic');
+
+    await waitFor(() => {
+      expect(queryByTestId('credential-logout-anthropic')).toBeTruthy();
+    });
+
+    fireEvent.input(input, { target: { value: 'sk-ant-NEW' } });
+    fireEvent.click(submit);
+
+    const confirm = await findByTestId('credential-rotation-confirm');
+    fireEvent.click(confirm);
+
+    // The modal is mounted via `<Show when={pendingRotation() !== null}>`.
+    // If the confirm handler clears `pendingRotation` synchronously, the
+    // modal disappears while the IPC promise is still pending. If it waits
+    // until the `finally` block, the modal stays mounted and the secret
+    // lives in two signals at once.
+    await waitFor(() => {
+      expect(queryByTestId('credential-rotation-modal')).toBeNull();
+    });
+
+    // Sanity: the IPC call is still in-flight, so we proved the cleanup is
+    // genuinely synchronous (not just fast).
+    expect(resolveLogin).toBeDefined();
+    resolveLogin?.();
+  });
+
   it('async submit button carries aria-busy for accessibility', async () => {
     let resolveLogin: (() => void) | undefined;
     const slowInvoke = vi.fn(async (cmd: string) => {
