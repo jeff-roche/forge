@@ -543,6 +543,7 @@ The client then sends either:
 - On restart (including post-archive reactivation), the session replays from the log, recomputing in-memory state
 - Periodic snapshots (every 500 events or 5 minutes) go to `snapshots/<seq>.msgpack` to accelerate replay — optimization, not a requirement for correctness
 - Clients can subscribe from any `seq`; session streams everything after
+- **`Event::UsageTick`** carries an optional `at: DateTime<Utc>` (F-593-followup, issue #646) tagging the wall-clock emission moment of the tick. The post-flush monthly aggregator buckets by this timestamp so a session crossing a month boundary records each tick into the correct calendar month. Logs predating the field deserialize `at` as `None` and the aggregator falls back to flush time for those rows — pre-fix behavior preserved for replay.
 
 ### 5.5 Schema versioning and migrations
 

@@ -61,7 +61,7 @@ pub enum Event {
     SubAgentSpawned { parent: AgentInstanceId, child: AgentInstanceId, from_msg: MessageId },
     BackgroundAgentStarted { id: AgentInstanceId, agent: AgentId, at: DateTime<Utc> },
     BackgroundAgentCompleted { id: AgentInstanceId, at: DateTime<Utc> },
-    UsageTick { provider: ProviderId, model: String, tokens_in: u64, tokens_out: u64, cost_usd: f64, scope: RosterScope },
+    UsageTick { at: Option<DateTime<Utc>>, session_id: Option<SessionId>, provider: ProviderId, model: String, tokens_in: u64, tokens_out: u64, cost_usd: f64, scope: RosterScope },
     ContextCompacted { at: DateTime<Utc>, summarized_turns: u32, summary_msg_id: MessageId, trigger: CompactTrigger },
     SessionEnded { at: DateTime<Utc>, reason: EndReason, archived: bool },
     StepStarted { step_id: StepId, instance_id: Option<AgentInstanceId>, kind: StepKind, started_at: DateTime<Utc> },                  // F-139

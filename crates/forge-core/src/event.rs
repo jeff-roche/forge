@@ -197,7 +197,17 @@ pub enum Event {
     /// silently mis-attribute legacy ticks). New emissions always populate
     /// `Some(session_id)`; replay consumers treat `None` as "legacy /
     /// unattributed" and skip session-scoped accounting.
+    ///
+    /// `at` (F-593-followup, issue #646) is the wall-clock emission time
+    /// of the tick. The post-flush monthly aggregator buckets by this
+    /// timestamp so a session that crosses a month boundary records each
+    /// tick into the correct calendar month. Modeled as
+    /// `Option<DateTime<Utc>>` for the same backward-compat reason as
+    /// `session_id`: legacy logs deserialize as `None` and the aggregator
+    /// falls back to flush time for those rows (matching pre-fix behavior).
     UsageTick {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<DateTime<Utc>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session_id: Option<SessionId>,
         provider: ProviderId,

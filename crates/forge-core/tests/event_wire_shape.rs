@@ -566,8 +566,12 @@ fn usage_tick_wire_shape() {
     // F-155: per-provider token / cost accounting — feeds the usage HUD.
     // F-605: every live tick now carries the originating `session_id` so
     // the AgentMonitor toolbar can pre-filter the shared event stream.
+    // F-593-followup: ticks now carry an emission timestamp `at` so the
+    // post-flush aggregator can bucket each tick into its own calendar
+    // month rather than the month of flush time.
     assert_wire_eq(
         Event::UsageTick {
+            at: Some(fixed_time()),
             session_id: Some(session_id("deadbeefcafebabe")),
             provider: provider_id("mock"),
             model: "mock-1".into(),
@@ -578,6 +582,7 @@ fn usage_tick_wire_shape() {
         },
         json!({
             "type": "usage_tick",
+            "at": "2026-04-18T10:00:00Z",
             "session_id": "deadbeefcafebabe",
             "provider": "mock",
             "model": "mock-1",
@@ -591,11 +596,11 @@ fn usage_tick_wire_shape() {
 
 #[test]
 fn usage_tick_legacy_log_replays_without_session_id() {
-    // F-605 backward-compat: logs written before this field landed must
-    // still replay cleanly. `session_id` deserializes to `None` when the
-    // key is absent, and re-serializing skips it (per
-    // `skip_serializing_if = "Option::is_none"`) so a round-trip yields
-    // the legacy shape exactly.
+    // F-605 / F-593-followup backward-compat: logs written before either
+    // field landed must still replay cleanly. `session_id` and `at`
+    // both deserialize to `None` when their keys are absent, and
+    // re-serializing skips them (`skip_serializing_if = "Option::is_none"`)
+    // so a round-trip yields the legacy shape exactly.
     let legacy = json!({
         "type": "usage_tick",
         "provider": "mock",
@@ -607,15 +612,16 @@ fn usage_tick_legacy_log_replays_without_session_id() {
     });
     let event: Event = serde_json::from_value(legacy.clone()).expect("legacy log replays");
     match &event {
-        Event::UsageTick { session_id, .. } => {
+        Event::UsageTick { session_id, at, .. } => {
             assert!(session_id.is_none(), "legacy ticks deserialize as None");
+            assert!(at.is_none(), "legacy ticks have no `at` timestamp");
         }
         _ => panic!("expected UsageTick"),
     }
     let reserialized = serde_json::to_value(&event).expect("re-serializes");
     assert_eq!(
         reserialized, legacy,
-        "round-trip preserves the legacy on-disk shape (no `session_id` key)",
+        "round-trip preserves the legacy on-disk shape (no `session_id` / `at` keys)",
     );
 }
 
