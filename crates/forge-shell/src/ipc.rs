@@ -3081,6 +3081,12 @@ pub async fn session_switch_provider<R: Runtime>(
         &format!("session-{session_id}"),
         "session_switch_provider",
     )?;
+    // Tracker #702: size-cap + non-empty guard, matching every other
+    // provider IPC (`set_active_provider`, credential commands). Without
+    // this, a webview could submit an arbitrarily long `provider_id`
+    // and force the daemon to allocate / log it before the resolver
+    // rejects it.
+    crate::providers_ipc::validate_provider_id(&provider_id)?;
     state
         .bridge
         .switch_provider(&session_id, provider_id)
@@ -3324,19 +3330,83 @@ impl AllowedHostsState {
             .clone()
     }
 
-    /// Replace the allowlist wholesale. Whitespace is trimmed off each
-    /// entry; empty entries are dropped. Case-insensitive matching runs
-    /// inside `context_fetch::enforce_url_policy`, so the stored form
-    /// keeps the user-visible casing.
-    pub fn replace(&self, hosts: Vec<String>) {
-        let cleaned: Vec<String> = hosts
-            .into_iter()
-            .map(|h| h.trim().to_string())
-            .filter(|h| !h.is_empty())
-            .collect();
+    /// Replace the allowlist wholesale. Each entry is trimmed of
+    /// surrounding whitespace and then validated against RFC 1123
+    /// hostname rules (alphanumeric + hyphen + dot, ≤ 253 bytes, ≤
+    /// 63-byte labels, no leading/trailing hyphen per label). Invalid
+    /// entries surface as `Err` — silent filtering used to mask
+    /// malformed inputs that would never match a real host, tracked
+    /// as part of #702.
+    /// Case-insensitive matching runs inside
+    /// `context_fetch::enforce_url_policy`, so the stored form keeps
+    /// the user-visible casing.
+    pub fn replace(&self, hosts: Vec<String>) -> Result<(), String> {
+        let mut cleaned: Vec<String> = Vec::with_capacity(hosts.len());
+        for host in hosts {
+            let trimmed = host.trim().to_string();
+            validate_hostname(&trimmed)?;
+            cleaned.push(trimmed);
+        }
         let mut guard = self.hosts.lock().expect("allowed hosts state poisoned");
         *guard = cleaned;
+        Ok(())
     }
+}
+
+/// Validate an allowed-host entry against RFC 1123 hostname rules.
+///
+/// Tracker #702 / `AllowedHostsState::replace`. Rules:
+///
+/// - Non-empty after trim.
+/// - ≤ 253 bytes overall.
+/// - Each dot-separated label is non-empty, ≤ 63 bytes, starts and
+///   ends with `[a-zA-Z0-9]`, and contains only `[a-zA-Z0-9-]`.
+/// - No wildcards, path characters, control characters, or whitespace.
+///
+/// Returns a single error message starting with `"invalid host"` so
+/// the caller's surface stays consistent across reject reasons —
+/// callers (and tests) match on the prefix, not the specific reason.
+fn validate_hostname(host: &str) -> Result<(), String> {
+    if host.is_empty() {
+        return Err("invalid host: empty".to_string());
+    }
+    if host.len() > 253 {
+        return Err(format!(
+            "invalid host: {} bytes exceeds 253-byte hostname cap",
+            host.len()
+        ));
+    }
+    for label in host.split('.') {
+        if label.is_empty() {
+            return Err("invalid host: empty label (leading/trailing/consecutive dot)".to_string());
+        }
+        if label.len() > 63 {
+            return Err(format!(
+                "invalid host: label '{label}' exceeds 63-byte limit"
+            ));
+        }
+        let bytes = label.as_bytes();
+        let first = bytes[0];
+        let last = bytes[bytes.len() - 1];
+        if !first.is_ascii_alphanumeric() {
+            return Err(format!(
+                "invalid host: label '{label}' must start with [a-zA-Z0-9]"
+            ));
+        }
+        if !last.is_ascii_alphanumeric() {
+            return Err(format!(
+                "invalid host: label '{label}' must end with [a-zA-Z0-9]"
+            ));
+        }
+        for b in bytes {
+            if !(b.is_ascii_alphanumeric() || *b == b'-') {
+                return Err(format!(
+                    "invalid host: label '{label}' contains disallowed character"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Tauri-managed client pool for the context fetcher. One client per App,
@@ -3433,8 +3503,45 @@ pub async fn context_fetch_url<R: Runtime>(
     let client = fetch_state.client_for(&hosts)?;
     let ok = crate::context_fetch::fetch_url(&client, &url, &hosts)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(sanitize_fetch_url_error)?;
     Ok(FetchedUrl::from(ok))
+}
+
+/// Tracker #702: collapse a [`crate::context_fetch::FetchUrlError`] to a
+/// generic wire message and log the detailed reason internally.
+///
+/// The detailed `FetchUrlError` variants leak which gate fired (scheme,
+/// userinfo, host-not-on-allowlist, link-local IP, port, transport
+/// failure). A hostile webview could use that to probe internal
+/// network topology — what IP ranges resolve as private, which host
+/// patterns are on the allowlist. We keep the detail in `tracing` for
+/// operators and return one of two generic messages on the wire:
+///
+/// - `"URL not allowed by policy"` for any policy violation
+///   (invalid URL / scheme / userinfo / host / IP / port).
+/// - `"fetch failed"` for transport-layer failures (timeout, refused
+///   connect, non-2xx status).
+fn sanitize_fetch_url_error(err: crate::context_fetch::FetchUrlError) -> String {
+    use crate::context_fetch::FetchUrlError;
+    let (public, category): (&str, &str) = match &err {
+        FetchUrlError::InvalidUrl { .. }
+        | FetchUrlError::SchemeNotAllowed { .. }
+        | FetchUrlError::UserinfoPresent
+        | FetchUrlError::MissingHost
+        | FetchUrlError::HostNotAllowed { .. }
+        | FetchUrlError::BlockedIpRange { .. }
+        | FetchUrlError::PortNotAllowed { .. } => ("URL not allowed by policy", "policy"),
+        FetchUrlError::TransportFailed { .. } | FetchUrlError::HttpStatus { .. } => {
+            ("fetch failed", "transport")
+        }
+    };
+    tracing::warn!(
+        target: "forge_shell::ipc::context_fetch",
+        category = category,
+        error = %err,
+        "context_fetch_url rejected",
+    );
+    format!("context_fetch_url: {public}")
 }
 
 /// Replace the server-side URL allowlist. The webview's settings panel
@@ -3457,7 +3564,7 @@ pub async fn set_context_allowed_hosts<R: Runtime>(
     for h in &hosts {
         require_size("host", h, MAX_ALLOWED_HOST_BYTES)?;
     }
-    allowed.replace(hosts);
+    allowed.replace(hosts)?;
     Ok(())
 }
 
