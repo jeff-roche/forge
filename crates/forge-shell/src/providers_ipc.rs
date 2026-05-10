@@ -243,6 +243,27 @@ pub fn validate_provider_id(provider_id: &str) -> Result<(), String> {
             MAX_PROVIDER_ID_BYTES
         ));
     }
+    // `custom_openai:<name>` ids must carry a non-empty, charset-clean
+    // suffix. The bare prefix (`custom_openai:`) and whitespace-only
+    // suffixes would otherwise pass the size cap and reach
+    // `is_known_provider_id` / `apply_setting_update`, where they alias
+    // an empty map key or surprise the downstream display. Mirror the
+    // catalog/credential id shape used elsewhere in the repo.
+    if let Some(suffix) = provider_id.strip_prefix(CUSTOM_OPENAI_PREFIX) {
+        if suffix.is_empty() || suffix.chars().all(char::is_whitespace) {
+            return Err(format!(
+                "provider_id {CUSTOM_OPENAI_PREFIX}<name> must have a non-empty name"
+            ));
+        }
+        if !suffix
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(format!(
+                "provider_id {CUSTOM_OPENAI_PREFIX}<name> name must contain only [A-Za-z0-9_-]"
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -587,5 +608,57 @@ mod tests {
     fn validate_provider_id_accepts_realistic_slugs() {
         validate_provider_id("anthropic").expect("anthropic");
         validate_provider_id("custom_openai:together").expect("custom_openai:together");
+    }
+
+    #[test]
+    fn validate_provider_id_rejects_custom_openai_empty_suffix() {
+        let err = validate_provider_id("custom_openai:").unwrap_err();
+        assert!(
+            err.contains("custom_openai"),
+            "expected custom_openai-specific error, got: {err}",
+        );
+    }
+
+    #[test]
+    fn validate_provider_id_rejects_custom_openai_whitespace_suffix() {
+        for bad in ["custom_openai: ", "custom_openai:\t", "custom_openai:   "] {
+            let err = validate_provider_id(bad)
+                .err()
+                .unwrap_or_else(|| panic!("expected rejection for {bad:?}"));
+            assert!(
+                err.contains("custom_openai"),
+                "expected custom_openai-specific error for {bad:?}, got: {err}",
+            );
+        }
+    }
+
+    #[test]
+    fn validate_provider_id_rejects_custom_openai_bad_charset() {
+        // The first `:` is the prefix separator; a second `:` or any
+        // other non-allowlist byte in the suffix must trip the charset
+        // guard.
+        for bad in [
+            "custom_openai:foo:bar",
+            "custom_openai:foo/bar",
+            "custom_openai:foo bar",
+            "custom_openai:foo.bar",
+        ] {
+            assert!(
+                validate_provider_id(bad).is_err(),
+                "expected rejection for {bad:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn validate_provider_id_accepts_custom_openai_named_suffix() {
+        for good in [
+            "custom_openai:vllm",
+            "custom_openai:together-ai",
+            "custom_openai:my_endpoint",
+            "custom_openai:Endpoint1",
+        ] {
+            validate_provider_id(good).unwrap_or_else(|e| panic!("{good:?}: {e}"));
+        }
     }
 }

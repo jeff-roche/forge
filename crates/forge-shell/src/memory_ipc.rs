@@ -137,6 +137,15 @@ pub fn validate_agent_id(agent_id: &str) -> Result<(), String> {
             MAX_AGENT_ID_BYTES
         ));
     }
+    // Reject explicitly — silent strip-and-accept would let `" agent"` and
+    // `"agent "` route to the same file as `"agent"`, indistinguishable in
+    // the UI but split in any downstream id comparison. The body charset
+    // already excludes whitespace, but an explicit guard yields a clearer
+    // error than "must contain only [A-Za-z0-9_-]" for the common
+    // copy-paste mishap.
+    if agent_id.chars().any(char::is_whitespace) {
+        return Err("agent_id must not contain whitespace".to_string());
+    }
     if !agent_id
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
@@ -546,6 +555,25 @@ mod tests {
                 "expected acceptance for {good:?}",
             );
         }
+    }
+
+    #[test]
+    fn validate_agent_id_rejects_whitespace_padded_ids() {
+        // Silent stripping would let `" agent"` and `"agent "` route to the
+        // same file as `"agent"` — visually distinct, behaviourally aliased.
+        // Reject explicitly so the caller sees the mismatch.
+        for bad in [" agent", "agent ", " agent ", "\tagent", "agent\n"] {
+            let err = validate_agent_id(bad)
+                .err()
+                .unwrap_or_else(|| panic!("expected rejection for {bad:?}"));
+            assert!(
+                err.contains("whitespace"),
+                "expected whitespace-specific error for {bad:?}, got: {err}",
+            );
+        }
+        // Happy path still passes.
+        validate_agent_id("agent").unwrap();
+        validate_agent_id("my-agent_42").unwrap();
     }
 
     #[test]

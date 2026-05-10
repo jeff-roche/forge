@@ -257,6 +257,17 @@ pub fn validate_container_id(container_id: &str) -> Result<(), String> {
             MAX_CONTAINER_ID_BYTES
         ));
     }
+    // Leading `.` and `-` are explicitly rejected, mirroring the F-628
+    // ImageRef hardening: a dot-prefix would alias a hidden filesystem
+    // entry if the id ever escapes argv into a path, and a dash-prefix
+    // collides with `podman <cmd> -<flag>` argv conventions. The body
+    // charset below rejects `.` outright anyway, but the explicit guard
+    // yields a clearer error for the common mis-paste.
+    if let Some(first) = container_id.chars().next() {
+        if first == '.' || first == '-' {
+            return Err(format!("container_id must not start with {first:?}"));
+        }
+    }
     // Container IDs from podman are 64-char hex; podman container *names*
     // accept `[a-zA-Z0-9][a-zA-Z0-9_.-]*`. Our allowlist is a deliberate
     // superset of the hex-id form and a subset of the name form (we omit
@@ -517,6 +528,34 @@ mod tests {
     fn validate_container_id_accepts_named_id() {
         assert!(validate_container_id("forge-session-abc").is_ok());
         assert!(validate_container_id("forge_sandbox_1").is_ok());
+    }
+
+    #[test]
+    fn validate_container_id_rejects_leading_dot() {
+        // Dot is already outside the body charset, but the explicit
+        // leading-dot guard yields a clearer error and parallels the
+        // F-628 ImageRef hardening that just merged.
+        let err = validate_container_id(".abc").unwrap_err();
+        assert!(
+            err.contains("must not start with"),
+            "expected leading-dot rejection, got: {err}",
+        );
+        assert!(validate_container_id(".").is_err());
+        assert!(validate_container_id(".hidden").is_err());
+    }
+
+    #[test]
+    fn validate_container_id_rejects_leading_dash() {
+        // Hyphen is in the body charset (so `"-abc"` would otherwise sneak
+        // past), but a leading dash collides with `podman <cmd> -<flag>`
+        // argv conventions — mirror the F-628 ImageRef rule.
+        let err = validate_container_id("-abc").unwrap_err();
+        assert!(
+            err.contains("must not start with"),
+            "expected leading-dash rejection, got: {err}",
+        );
+        assert!(validate_container_id("-").is_err());
+        assert!(validate_container_id("--flag").is_err());
     }
 
     #[test]
