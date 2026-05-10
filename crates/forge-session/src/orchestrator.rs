@@ -643,11 +643,16 @@ pub(crate) async fn run_request_loop<P: Provider>(
                         .await?;
                 }
 
-                ChatChunk::ToolCall { name, args } => {
+                ChatChunk::ToolCall {
+                    id: provider_id,
+                    name,
+                    args,
+                } => {
                     pending_calls.push(PendingToolCall {
                         name,
                         args,
                         call_id: ToolCallId::new(),
+                        provider_id,
                     });
                 }
 
@@ -884,7 +889,35 @@ pub(crate) async fn run_request_loop<P: Provider>(
 struct PendingToolCall {
     name: String,
     args: serde_json::Value,
+    /// Orchestrator-internal id used to correlate `ToolCall*` events,
+    /// approval-channel keys, and tool steps. Independent of any
+    /// provider-supplied id — events stay on the local wire and never
+    /// flow back to the provider.
     call_id: ToolCallId,
+    /// Provider-assigned id (Anthropic `toolu_…`, OpenAI `call_…`)
+    /// captured from [`ChatChunk::ToolCall`]. Used as the round-trip
+    /// id on the assistant [`ChatBlock::ToolCall`] and matching user
+    /// [`ChatBlock::ToolResult`] so the provider can correlate the
+    /// follow-up `tool_result` / `role: "tool"` message back to the
+    /// original tool use. Empty for providers that do not carry an id
+    /// on the wire (Ollama, mock); the orchestrator falls back to
+    /// `call_id` in that case via [`PendingToolCall::round_trip_id`].
+    provider_id: String,
+}
+
+impl PendingToolCall {
+    /// The id to thread back to the provider on the assistant
+    /// `ChatBlock::ToolCall` and matching `ChatBlock::ToolResult`.
+    /// Prefer the provider-supplied id when present so the provider can
+    /// correlate the round-trip; fall back to the orchestrator's
+    /// internal id for providers (Ollama, mock) that surface none.
+    fn round_trip_id(&self) -> String {
+        if self.provider_id.is_empty() {
+            self.call_id.to_string()
+        } else {
+            self.provider_id.clone()
+        }
+    }
 }
 
 /// F-599: outcome of dispatching the buffered tool batch for one model
@@ -1229,13 +1262,14 @@ async fn dispatch_tool_calls(
                     })
                     .await?;
 
+                let block_id = pc.round_trip_id();
                 tc_blocks.push(ChatBlock::ToolCall {
-                    id: pc.call_id.to_string(),
+                    id: block_id.clone(),
                     name: pc.name.clone(),
                     args: pc.args.clone(),
                 });
                 tr_blocks.push(ChatBlock::ToolResult {
-                    id: pc.call_id.to_string(),
+                    id: block_id,
                     result,
                 });
             }
@@ -1414,13 +1448,14 @@ async fn dispatch_tool_calls(
                     })
                     .await?;
 
+                let block_id = pc.round_trip_id();
                 tc_blocks.push(ChatBlock::ToolCall {
-                    id: pc.call_id.to_string(),
+                    id: block_id.clone(),
                     name: pc.name.clone(),
                     args: pc.args.clone(),
                 });
                 tr_blocks.push(ChatBlock::ToolResult {
-                    id: pc.call_id.to_string(),
+                    id: block_id,
                     result,
                 });
             }

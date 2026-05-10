@@ -579,7 +579,11 @@ pub fn parse_line_bytes(line: &[u8]) -> Option<ChatChunk> {
     // be discarded by the text-delta branch below.
     if let Some(first) = message.tool_calls.into_iter().next() {
         if let Some(func) = first.function {
+            // Ollama's wire shape does not assign an id to tool calls;
+            // emit an empty string so the orchestrator falls back to
+            // its own internal id for round-trip.
             return Some(ChatChunk::ToolCall {
+                id: String::new(),
                 name: func.name.into_owned(),
                 args: func.arguments,
             });
@@ -1342,6 +1346,7 @@ mod tests {
         assert_eq!(
             parse_line(line),
             Some(ChatChunk::ToolCall {
+                id: String::new(),
                 name: "fs.read".into(),
                 args: serde_json::json!({"path": "/tmp/x"}),
             })

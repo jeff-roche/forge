@@ -107,7 +107,11 @@ fn legacy_parse_line(line: &str) -> Option<ChatChunk> {
                 .get("arguments")
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
-            return Some(ChatChunk::ToolCall { name, args });
+            return Some(ChatChunk::ToolCall {
+                id: String::new(),
+                name,
+                args,
+            });
         }
     }
 

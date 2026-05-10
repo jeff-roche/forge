@@ -288,13 +288,9 @@ impl<'a> Serialize for AnthropicToolResultMessage<'a> {
 /// starting block. The accumulator tracks the active tool-use block by its
 /// index; when the matching `content_block_stop` arrives it parses the
 /// accumulated `partial_json` chunks into a structured `args` value and
-/// emits the [`ChatChunk::ToolCall`].
-///
-/// TODO(post-F-583): [`ChatChunk::ToolCall`] does not currently carry the
-/// Anthropic-assigned `id` (`toolu_…`). Once the round-trip back to Anthropic
-/// requires the id (so the assistant message can reference it as
-/// `tool_use_id` on the follow-up `tool_result`), extend `ChatChunk::ToolCall`
-/// with an `id` field and surface it here.
+/// emits the [`ChatChunk::ToolCall`] — preserving the Anthropic-assigned
+/// `toolu_…` id captured at `content_block_start` so callers can
+/// reference it as `tool_use_id` on the follow-up `tool_result`.
 #[derive(Default)]
 pub struct AnthropicEventAccumulator {
     /// Block index → in-progress tool_use block.
@@ -306,6 +302,11 @@ pub struct AnthropicEventAccumulator {
 
 struct ToolUseInProgress {
     index: u64,
+    /// Anthropic-assigned `toolu_…` id from `content_block_start`.
+    /// Surfaced on the emitted [`ChatChunk::ToolCall`] so the orchestrator
+    /// can round-trip it back as `tool_use_id` on the matching
+    /// `tool_result`.
+    id: String,
     name: String,
     /// Accumulated `partial_json` strings from `input_json_delta` events.
     args_buf: String,
@@ -335,6 +336,11 @@ impl AnthropicEventAccumulator {
         };
         let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
         if block_type == "tool_use" {
+            let id = block
+                .get("id")
+                .and_then(|i| i.as_str())
+                .unwrap_or("")
+                .to_string();
             let name = block
                 .get("name")
                 .and_then(|n| n.as_str())
@@ -342,6 +348,7 @@ impl AnthropicEventAccumulator {
                 .to_string();
             self.active_tool_use = Some(ToolUseInProgress {
                 index,
+                id,
                 name,
                 args_buf: String::new(),
             });
@@ -400,6 +407,7 @@ impl AnthropicEventAccumulator {
                     serde_json::from_str(&active.args_buf).unwrap_or(json!({}))
                 };
                 return vec![ChatChunk::ToolCall {
+                    id: active.id,
                     name: active.name,
                     args,
                 }];
@@ -651,6 +659,7 @@ mod tests {
         assert_eq!(
             chunks,
             vec![ChatChunk::ToolCall {
+                id: "toolu_01".into(),
                 name: "get_weather".into(),
                 args: json!({"city": "sf"}),
             }]

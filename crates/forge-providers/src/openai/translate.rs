@@ -305,14 +305,11 @@ impl<'a> Serialize for OpenAiAssistantOrUserMessage<'a> {
 /// 2. The literal `data: [DONE]` line arrives as an event whose `data`
 ///    payload is exactly `b"[DONE]"`.
 /// 3. On `[DONE]`, the accumulator first emits any tracked tool calls in
-///    `index` order, then emits [`ChatChunk::Done`] with the cached reason
-///    (defaulting to `"stop"` if none was seen).
-///
-/// TODO(post-F-584): [`ChatChunk::ToolCall`] does not currently carry the
-/// OpenAI-assigned `id` (`call_…`). Once the round-trip back to OpenAI requires
-/// the id (so the assistant message can reference it as `tool_call_id` on the
-/// follow-up `tool` message), extend `ChatChunk::ToolCall` with an `id` field
-/// and surface it here. (Mirrors the same TODO on the Anthropic accumulator.)
+///    `index` order — preserving the OpenAI-assigned `call_…` id captured
+///    on the first delta for each `index` — then emits [`ChatChunk::Done`]
+///    with the cached reason (defaulting to `"stop"` if none was seen).
+///    Callers reference that id as `tool_call_id` on the follow-up
+///    `role: "tool"` message.
 #[derive(Default)]
 pub struct OpenAiEventAccumulator {
     /// In-progress tool calls keyed by their delta `index`.
@@ -323,6 +320,11 @@ pub struct OpenAiEventAccumulator {
 
 struct ToolCallInProgress {
     index: u64,
+    /// OpenAI-assigned `call_…` id from the first delta for this index.
+    /// Surfaced on the emitted [`ChatChunk::ToolCall`] so the orchestrator
+    /// can round-trip it back as `tool_call_id` on the matching
+    /// `role: "tool"` message.
+    id: String,
     name: String,
     args_buf: String,
 }
@@ -382,12 +384,22 @@ impl OpenAiEventAccumulator {
             None => {
                 self.tool_calls.push(ToolCallInProgress {
                     index,
+                    id: String::new(),
                     name: String::new(),
                     args_buf: String::new(),
                 });
                 self.tool_calls.last_mut().expect("just pushed")
             }
         };
+
+        // First delta for an index carries the `call_…` id; later deltas
+        // typically omit it. Only overwrite when non-empty so a stray
+        // `"id": ""` does not clobber.
+        if let Some(id) = delta.get("id").and_then(|i| i.as_str()) {
+            if !id.is_empty() {
+                entry.id = id.to_string();
+            }
+        }
 
         if let Some(name) = delta
             .get("function")
@@ -421,6 +433,7 @@ impl OpenAiEventAccumulator {
                 serde_json::from_str(&tc.args_buf).unwrap_or(json!({}))
             };
             out.push(ChatChunk::ToolCall {
+                id: tc.id,
                 name: tc.name,
                 args,
             });
@@ -702,12 +715,14 @@ mod tests {
             ))
             .is_empty());
 
-        // [DONE] sentinel: emit the tool call, then Done.
+        // [DONE] sentinel: emit the tool call (carrying the `call_…` id
+        // captured on the first delta), then Done.
         let chunks = acc.consume(&ev("[DONE]"));
         assert_eq!(
             chunks,
             vec![
                 ChatChunk::ToolCall {
+                    id: "call_abc".into(),
                     name: "get_weather".into(),
                     args: json!({"city": "sf"}),
                 },
@@ -767,10 +782,12 @@ mod tests {
             chunks,
             vec![
                 ChatChunk::ToolCall {
+                    id: "call_a".into(),
                     name: "a".into(),
                     args: json!({}),
                 },
                 ChatChunk::ToolCall {
+                    id: "call_b".into(),
                     name: "b".into(),
                     args: json!({}),
                 },
