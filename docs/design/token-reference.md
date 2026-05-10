@@ -16,6 +16,7 @@ These tokens should be defined at `:root` and used throughout. Never use raw val
 :root {
   /* Ember brand scale */
   --color-ember-900: #2a0800;
+  --color-ember-600: #a32e00;
   --color-ember-500: #cc3a00;
   --color-ember-400: #ff4a12;   /* primary brand */
   --color-ember-300: #ff7a30;

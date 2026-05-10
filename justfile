@@ -88,8 +88,15 @@ check-voice:
 check-links:
     lychee --offline --no-progress 'docs/**/*.md' 'crates/**/README.md' 'web/packages/**/README.md' README.md CHANGELOG.md AGENTS.md
 
-# Both lanes.
-check: check-rust check-web
+# DESIGN.md lane: validates the design-system spec against the Stitch
+# design.md schema (https://github.com/google-labs-code/design.md). Runs
+# through scripts/lint-design.mjs so the contrast floor is the locked
+# status-bar ratio (3.37:1) rather than the upstream WCAG AA default.
+check-design:
+    node scripts/lint-design.mjs
+
+# All lanes.
+check: check-rust check-web check-design
 
 # Rust test suite.
 test-rust:
