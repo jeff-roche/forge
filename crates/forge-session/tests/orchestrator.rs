@@ -10,9 +10,23 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::net::UnixStream;
 
-// Script 1: provider returns a text delta, then a tool call, then Done("tool_use")
+// Script 1: provider returns a text delta, then a `fs.read` tool call,
+// then Done("tool_use"). `fs.read` is read-only so the orchestrator
+// auto-approves it (issue #647) — the recorded event sequence skips
+// `ToolCallApprovalRequested` and emits `ToolCallApproved { by: Auto }`.
 const SCRIPT_INITIAL: &str = r#"{"delta":"Hi there. "}
 {"tool_call":{"name":"fs.read","args":{"path":"readme.txt"}}}
+{"done":"tool_use"}
+"#;
+
+// Mirror of `SCRIPT_INITIAL` that drives a non-read-only tool (`fs.write`)
+// so the approval gate actually fires. Tests that pin behaviour of the
+// interactive approval flow (gate firing, scope fidelity, malformed-scope
+// rejection, pause-during-approval) use this script — switching `fs.read`
+// to read-only would otherwise auto-approve them and bypass the gate
+// entirely.
+const SCRIPT_INITIAL_NEEDS_APPROVAL: &str = r#"{"delta":"Hi there. "}
+{"tool_call":{"name":"fs.write","args":{"path":"readme.txt","content":"x"}}}
 {"done":"tool_use"}
 "#;
 
@@ -62,13 +76,17 @@ fn extract_event(msg: &IpcMessage) -> Option<Event> {
 
 /// Full turn with tool call: verifies correct event sequence end-to-end.
 ///
+/// `fs.read` is read-only (issue #647), so the orchestrator skips the
+/// interactive approval gate and emits `ToolCallApproved { by: Auto }`
+/// directly. The expected sequence is otherwise identical to the
+/// pre-#647 shape.
+///
 /// Expected sequence:
 ///   UserMessage
 ///   AssistantMessage { stream_finalised: false }   ← opened before first chunk
 ///   AssistantDelta("Hi there. ")
 ///   ToolCallStarted { tool: "fs.read" }
-///   ToolCallApprovalRequested   ← approval gate fires for non-whitelisted tool
-///   ToolCallApproved            ← logged after client approves
+///   ToolCallApproved { by: Auto }   ← read-only tools skip the gate
 ///   ToolCallCompleted
 ///   AssistantMessage { stream_finalised: true }    ← finalised when Done("tool_use") arrives
 ///   AssistantMessage { stream_finalised: false }   ← continuation turn opens
@@ -122,7 +140,7 @@ async fn full_turn_with_tool_call_emits_correct_event_sequence() {
     // Collect events; when we see ToolCallApprovalRequested, send approval back.
     // The full turn produces two AssistantMessage(final) events: one when the
     // initial stream ends with Done("tool_use"), and one when the continuation ends.
-    let (mut reader, mut writer) = stream.into_split();
+    let (mut reader, _writer) = stream.into_split();
     let mut events: Vec<Event> = Vec::new();
     let mut final_count = 0;
 
@@ -132,16 +150,8 @@ async fn full_turn_with_tool_call_emits_correct_event_sequence() {
             continue;
         };
 
-        // Auto-approve tool calls during the test
-        if let Event::ToolCallApprovalRequested { ref id, .. } = event {
-            let approval = IpcMessage::ToolCallApproved(ToolCallApproved {
-                id: id.to_string(),
-                scope: "Once".to_string(),
-            });
-            forge_ipc::write_frame(&mut writer, &approval)
-                .await
-                .unwrap();
-        }
+        // No client-side approval needed — `fs.read` is read-only and the
+        // orchestrator emits `ToolCallApproved { by: Auto }` on its own.
 
         if matches!(
             event,
@@ -194,8 +204,7 @@ async fn full_turn_with_tool_call_emits_correct_event_sequence() {
             "AssistantMessage(open)", // opened before first chunk
             "AssistantDelta",
             "ToolCallStarted",
-            "ToolCallApprovalRequested",
-            "ToolCallApproved",
+            "ToolCallApproved", // read-only auto-approval (#647) — no prompt
             "ToolCallCompleted",
             "AssistantMessage(final)", // finalised when Done("tool_use") arrives
             "AssistantMessage(open)",  // continuation turn opens
@@ -203,6 +212,20 @@ async fn full_turn_with_tool_call_emits_correct_event_sequence() {
             "AssistantMessage(final)", // continuation turn finalised
         ],
         "event sequence mismatch: got {kinds:?}"
+    );
+
+    // The single ToolCallApproved must carry `ApprovalSource::Auto` so the
+    // event log reflects that no human approved the call.
+    use forge_core::ApprovalSource;
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            Event::ToolCallApproved {
+                by: ApprovalSource::Auto,
+                ..
+            }
+        )),
+        "expected ToolCallApproved {{ by: Auto }} for read-only fs.read"
     );
 
     // Verify text delta content
@@ -254,9 +277,12 @@ async fn approval_gate_fires_and_blocks_until_client_approves() {
     let sock_path = dir.path().join("test2.sock");
 
     let session = Arc::new(Session::create(log_path).await.unwrap());
-    // Single-script provider: tool call only (no continuation needed for this test)
-    let provider =
-        Arc::new(MockProvider::from_responses(vec![SCRIPT_INITIAL.to_string()]).unwrap());
+    // Single-script provider: tool call only (no continuation needed for this test).
+    // Use the non-read-only script so the approval gate actually fires
+    // (issue #647 made `fs.read` auto-approve).
+    let provider = Arc::new(
+        MockProvider::from_responses(vec![SCRIPT_INITIAL_NEEDS_APPROVAL.to_string()]).unwrap(),
+    );
 
     let server_session = Arc::clone(&session);
     let server_provider = Arc::clone(&provider);
@@ -334,6 +360,11 @@ async fn approval_gate_fires_and_blocks_until_client_approves() {
 
 /// With --auto-approve-unsafe, tool calls proceed without client approval.
 /// ToolCallApproved { by: Auto } must be emitted; ToolCallApprovalRequested must not.
+///
+/// Uses the non-read-only `fs.write` script so this exercises the server-
+/// level `--auto-approve-unsafe` flag rather than the per-tool read-only
+/// shortcut introduced in #647 (which would also emit `Auto` and mask a
+/// regression in the flag itself).
 #[tokio::test]
 async fn auto_approve_skips_approval_gate_and_emits_auto_approved() {
     let dir = TempDir::new().unwrap();
@@ -343,7 +374,7 @@ async fn auto_approve_skips_approval_gate_and_emits_auto_approved() {
     let session = Arc::new(Session::create(log_path).await.unwrap());
     let provider = Arc::new(
         MockProvider::from_responses(vec![
-            SCRIPT_INITIAL.to_string(),
+            SCRIPT_INITIAL_NEEDS_APPROVAL.to_string(),
             SCRIPT_CONTINUATION.to_string(),
         ])
         .unwrap(),
@@ -596,8 +627,11 @@ async fn approval_with_this_tool_scope_is_recorded_faithfully() {
     let sock_path = dir.path().join("scope_fidelity.sock");
 
     let session = Arc::new(Session::create(log_path).await.unwrap());
-    let provider =
-        Arc::new(MockProvider::from_responses(vec![SCRIPT_INITIAL.to_string()]).unwrap());
+    // Use the non-read-only script — `fs.read` auto-approves under #647 and
+    // would never reach the gate this test is asserting on.
+    let provider = Arc::new(
+        MockProvider::from_responses(vec![SCRIPT_INITIAL_NEEDS_APPROVAL.to_string()]).unwrap(),
+    );
 
     let server_session = Arc::clone(&session);
     let server_provider = Arc::clone(&provider);
@@ -680,8 +714,11 @@ async fn malformed_approval_scope_rejects_instead_of_silently_downgrading_to_onc
     let sock_path = dir.path().join("scope_reject.sock");
 
     let session = Arc::new(Session::create(log_path).await.unwrap());
-    let provider =
-        Arc::new(MockProvider::from_responses(vec![SCRIPT_INITIAL.to_string()]).unwrap());
+    // Use the non-read-only script — `fs.read` auto-approves under #647 so
+    // the gate we're stress-testing here would never fire on it.
+    let provider = Arc::new(
+        MockProvider::from_responses(vec![SCRIPT_INITIAL_NEEDS_APPROVAL.to_string()]).unwrap(),
+    );
 
     let server_session = Arc::clone(&session);
     let server_provider = Arc::clone(&provider);

@@ -22,6 +22,14 @@ impl Tool for FsReadTool {
         Self::NAME
     }
 
+    /// F-599 follow-up (#647): `fs.read` never mutates external state, so
+    /// the orchestrator can auto-approve it (logging `ApprovalSource::Auto`
+    /// in place of an interactive prompt) and dispatch consecutive reads in
+    /// the parallel branch alongside other read-only tools.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn approval_preview(&self, args: &serde_json::Value) -> ApprovalPreview {
         // Preview shows whatever the client sent (including blank) so the user
         // sees exactly what was requested before approval. Required-argument

@@ -1,10 +1,10 @@
 #![allow(deprecated)] // F-652: tests/benches still drive the deprecated bare read_frame helpers.
 /// Integration test: Mock provider scripts an fs.read tool call against a real
-/// temp file. Verifies ToolCallCompleted.result contains content, bytes, sha256.
-use forge_core::Event;
+/// temp file. Verifies ToolCallCompleted.result contains content, bytes, sha256
+/// and that `fs.read` auto-approves under the read-only fast path (#647).
+use forge_core::{ApprovalSource, Event};
 use forge_ipc::{
-    ClientInfo, Hello, IpcEvent, IpcMessage, SendUserMessage, Subscribe, ToolCallApproved,
-    PROTO_VERSION,
+    ClientInfo, Hello, IpcEvent, IpcMessage, SendUserMessage, Subscribe, PROTO_VERSION,
 };
 use forge_providers::MockProvider;
 use forge_session::{server::serve_with_session, session::Session};
@@ -117,8 +117,10 @@ async fn fs_read_tool_returns_content_bytes_sha256() {
     .await
     .unwrap();
 
-    let (mut reader, mut writer) = stream.into_split();
+    let (mut reader, _writer) = stream.into_split();
     let mut tool_completed_result: Option<serde_json::Value> = None;
+    let mut auto_approved = false;
+    let mut saw_approval_requested = false;
 
     for _ in 0..20 {
         let frame = forge_ipc::read_frame(&mut reader).await.unwrap();
@@ -126,25 +128,31 @@ async fn fs_read_tool_returns_content_bytes_sha256() {
             continue;
         };
 
-        // Auto-approve tool calls
-        if let Event::ToolCallApprovalRequested { ref id, .. } = event {
-            forge_ipc::write_frame(
-                &mut writer,
-                &IpcMessage::ToolCallApproved(ToolCallApproved {
-                    id: id.to_string(),
-                    scope: "Once".to_string(),
-                }),
-            )
-            .await
-            .unwrap();
-        }
-
-        if let Event::ToolCallCompleted { result, .. } = event {
-            tool_completed_result = Some(result);
-            break;
+        match event {
+            // #647: `fs.read` is read-only — the orchestrator must NOT
+            // emit an interactive approval prompt. We track and assert on
+            // this below.
+            Event::ToolCallApprovalRequested { .. } => saw_approval_requested = true,
+            Event::ToolCallApproved {
+                by: ApprovalSource::Auto,
+                ..
+            } => auto_approved = true,
+            Event::ToolCallCompleted { result, .. } => {
+                tool_completed_result = Some(result);
+                break;
+            }
+            _ => {}
         }
     }
 
+    assert!(
+        !saw_approval_requested,
+        "fs.read is read-only — the orchestrator must skip the interactive approval gate (#647)"
+    );
+    assert!(
+        auto_approved,
+        "fs.read must surface a ToolCallApproved {{ by: Auto }} so the event log records why no human approved"
+    );
     let result = tool_completed_result.expect("ToolCallCompleted event not received");
 
     assert_eq!(
