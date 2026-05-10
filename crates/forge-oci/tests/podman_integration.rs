@@ -578,3 +578,103 @@ async fn mismatched_signature_is_rejected() {
         "podman pull must not be invoked when signature verification fails"
     );
 }
+
+// ── F-682: failure-path coverage ────────────────────────────────────────
+//
+// The end-to-end happy paths above prove podman's argv grammar; this
+// section pins the *failure* shapes operators see in the field. Each
+// test is `#[ignore]`-gated so CI's default run skips them, but
+// `cargo test -p forge-oci -- --ignored` exercises them against a real
+// rootless podman.
+
+/// Pulling a nonexistent image must surface `OciError::CommandFailed`
+/// with podman's stderr captured in the variant — operators rely on
+/// the stderr text to disambiguate "registry rejected" from
+/// "rate-limited" from "network down" without re-running the
+/// command. The runtime must NOT collapse the failure into a generic
+/// "image not found" string and must NOT silently succeed.
+#[tokio::test]
+#[ignore = "requires rootless podman on PATH (run with --ignored)"]
+async fn pull_nonexistent_image_surfaces_command_failed() {
+    let runtime = PodmanRuntime::new().with_verifier(
+        Box::new(forge_oci::NoopVerifier),
+        SignaturePolicy::Permissive,
+    );
+    // Synthetic registry name that no public registry resolves. Using
+    // an invalid hostname keeps the failure local-side (DNS / dial),
+    // not registry-side, so the test is hermetic — no rate limit, no
+    // 24h cache miss, no flaky upstream.
+    let img = ImageRef::parse(&format!(
+        "registry.invalid.forge-test.example/nonexistent@sha256:{SHA}"
+    ))
+    .expect("digest-pinned ref must parse");
+    let err = runtime.pull(&img).await.unwrap_err();
+    assert!(
+        matches!(err, OciError::CommandFailed { tool: "podman", .. }),
+        "expected CommandFailed for nonexistent image, got {err:?}"
+    );
+}
+
+/// `exec` against a stopped container must surface a captured exit
+/// code and the runtime's stderr — not a runtime panic and not a
+/// silent zero-exit. The semantics matter: the dashboard's
+/// AgentMonitor reads stderr to render the failure to operators.
+#[tokio::test]
+#[ignore = "requires rootless podman on PATH (run with --ignored)"]
+async fn exec_against_stopped_container_surfaces_nonzero_exit() {
+    let runtime = PodmanRuntime::new().with_verifier(
+        Box::new(forge_oci::NoopVerifier),
+        SignaturePolicy::Permissive,
+    );
+    let img =
+        ImageRef::parse(&format!("docker.io/library/alpine@{ALPINE_DIGEST}")).expect("alpine ref");
+    runtime.pull(&img).await.expect("pull alpine");
+
+    // Create a container that exits immediately, do NOT start it (or
+    // start+let it exit), then exec against it. Either path leaves
+    // the container in a non-running state where `podman exec` must
+    // refuse with non-zero exit.
+    let h = runtime
+        .create(&img, &["true"], &SecurityOpts::permissive())
+        .await
+        .expect("create");
+
+    let res = runtime
+        .exec(&h, &["echo", "hi"])
+        .await
+        .expect("exec returns Ok");
+    assert!(
+        res.exit_code.unwrap_or(0) != 0,
+        "exec against non-running container must surface nonzero exit, got {res:?}"
+    );
+    assert!(
+        !res.stderr.is_empty(),
+        "exec against non-running container must surface stderr, got {res:?}"
+    );
+
+    // Cleanup so we don't leak the container into the host's podman state.
+    let _ = runtime.remove(&h).await;
+}
+
+/// `parse_stats` against a malformed JSON body returned by a future
+/// podman version (or a registry-injected payload, hypothetically)
+/// must surface `OciError::InvalidJson` rather than panicking or
+/// returning a `Stats` with garbage fields. The unit-test sibling
+/// covers this against a stub runner; this test pins the same shape
+/// through the real runtime so a future runtime swap doesn't quietly
+/// break the contract.
+#[tokio::test]
+#[ignore = "requires rootless podman on PATH (run with --ignored)"]
+async fn parse_stats_surfaces_invalid_json_via_real_runtime() {
+    // We can't easily make real podman emit malformed JSON, so this
+    // exercises the trait method directly through a real runtime
+    // instance. Hermetic, fast, but kept under `#[ignore]` so the
+    // failure-path suite groups together for `--ignored` runs.
+    let runtime = PodmanRuntime::new();
+    let err = ContainerRuntime::parse_stats(&runtime, b"not json")
+        .expect_err("malformed json must surface as typed error");
+    assert!(
+        matches!(err, OciError::InvalidJson { tool: "podman", .. }),
+        "expected InvalidJson, got {err:?}"
+    );
+}

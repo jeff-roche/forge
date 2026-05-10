@@ -59,6 +59,11 @@ pub use forge_oci::ContainerLimits;
 /// impl in the workspace today is `PodmanRuntime`; if a second
 /// implementation is added the safety net would need a small
 /// abstraction (e.g. each impl supplies its own teardown argv).
+///
+/// TODO(F-682, issue #718): refactor into a per-impl shutdown command
+/// when the second container runtime lands. Tracker explicitly defers
+/// the change until then — adding the abstraction now would be
+/// speculative scaffolding with one consumer.
 const DROP_CLEANUP_BINARY: &str = "podman";
 
 /// Render [`ContainerLimits`] into the argv fragment that would be

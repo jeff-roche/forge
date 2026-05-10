@@ -186,8 +186,25 @@ impl ContainerRuntime for PodmanRuntime {
             enforce_policy(image, self.policy, verr)?;
         }
         let img = image.to_image_string();
-        self.run_or_fail(&["pull", &img]).await?;
-        Ok(())
+        match self.run_or_fail(&["pull", &img]).await {
+            Ok(_) => {
+                tracing::info!(
+                    target: "forge_oci::podman",
+                    image = %img,
+                    "container.pull succeeded"
+                );
+                Ok(())
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "forge_oci::podman",
+                    image = %img,
+                    error = %e,
+                    "container.pull failed"
+                );
+                Err(e)
+            }
+        }
     }
 
     async fn create(
@@ -220,7 +237,18 @@ impl ContainerRuntime for PodmanRuntime {
         }
         args.push(&img);
         args.extend_from_slice(argv);
-        let outcome = self.run_or_fail(&args).await?;
+        let outcome = match self.run_or_fail(&args).await {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::warn!(
+                    target: "forge_oci::podman",
+                    image = %img,
+                    error = %e,
+                    "container.create failed"
+                );
+                return Err(e);
+            }
+        };
         let id = String::from_utf8_lossy(&outcome.stdout).trim().to_string();
         if id.is_empty() {
             return Err(OciError::CommandFailed {
@@ -230,12 +258,35 @@ impl ContainerRuntime for PodmanRuntime {
                 stderr: "podman create returned empty container id".to_string(),
             });
         }
+        tracing::info!(
+            target: "forge_oci::podman",
+            image = %img,
+            container_id = %id,
+            "container.create succeeded"
+        );
         Ok(ContainerHandle::new(id))
     }
 
     async fn start(&self, handle: &ContainerHandle) -> Result<(), OciError> {
-        self.run_or_fail(&["start", &handle.id]).await?;
-        Ok(())
+        match self.run_or_fail(&["start", &handle.id]).await {
+            Ok(_) => {
+                tracing::info!(
+                    target: "forge_oci::podman",
+                    container_id = %handle.id,
+                    "container.start succeeded"
+                );
+                Ok(())
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "forge_oci::podman",
+                    container_id = %handle.id,
+                    error = %e,
+                    "container.start failed"
+                );
+                Err(e)
+            }
+        }
     }
 
     async fn exec(&self, handle: &ContainerHandle, argv: &[&str]) -> Result<ExecResult, OciError> {
@@ -251,14 +302,30 @@ impl ContainerRuntime for PodmanRuntime {
         // exec captures the inner program's stdout/stderr/exit even on a
         // non-zero exit — that's a meaningful signal, not a runtime failure.
         // So we go around `run_or_fail` here.
-        let outcome = self
-            .runner
-            .run(PODMAN, &args)
-            .await
-            .map_err(|source| OciError::Io {
-                tool: PODMAN,
-                source,
-            })?;
+        let outcome = match self.runner.run(PODMAN, &args).await {
+            Ok(o) => o,
+            Err(source) => {
+                tracing::warn!(
+                    target: "forge_oci::podman",
+                    container_id = %handle.id,
+                    error = %source,
+                    "container.exec spawn failed"
+                );
+                return Err(OciError::Io {
+                    tool: PODMAN,
+                    source,
+                });
+            }
+        };
+        // exec captures the inner program's stdout/stderr/exit even on a
+        // non-zero exit — that's a meaningful signal, not a runtime failure.
+        // We log at info regardless so latency attribution stays consistent.
+        tracing::info!(
+            target: "forge_oci::podman",
+            container_id = %handle.id,
+            exit_code = ?outcome.exit_code,
+            "container.exec completed"
+        );
         Ok(ExecResult {
             exit_code: outcome.exit_code,
             stdout: String::from_utf8_lossy(&outcome.stdout).into_owned(),
@@ -267,14 +334,48 @@ impl ContainerRuntime for PodmanRuntime {
     }
 
     async fn stop(&self, handle: &ContainerHandle) -> Result<(), OciError> {
-        self.run_or_fail(&["stop", &handle.id]).await?;
-        Ok(())
+        match self.run_or_fail(&["stop", &handle.id]).await {
+            Ok(_) => {
+                tracing::info!(
+                    target: "forge_oci::podman",
+                    container_id = %handle.id,
+                    "container.stop succeeded"
+                );
+                Ok(())
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "forge_oci::podman",
+                    container_id = %handle.id,
+                    error = %e,
+                    "container.stop failed"
+                );
+                Err(e)
+            }
+        }
     }
 
     async fn remove(&self, handle: &ContainerHandle) -> Result<(), OciError> {
         // -f forces removal of running containers (podman stop+rm in one step).
-        self.run_or_fail(&["rm", "-f", &handle.id]).await?;
-        Ok(())
+        match self.run_or_fail(&["rm", "-f", &handle.id]).await {
+            Ok(_) => {
+                tracing::info!(
+                    target: "forge_oci::podman",
+                    container_id = %handle.id,
+                    "container.remove succeeded"
+                );
+                Ok(())
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "forge_oci::podman",
+                    container_id = %handle.id,
+                    error = %e,
+                    "container.remove failed"
+                );
+                Err(e)
+            }
+        }
     }
 
     async fn stats(&self, handle: &ContainerHandle) -> Result<Stats, OciError> {
@@ -431,10 +532,36 @@ fn parse_percent(s: &str) -> Option<f64> {
 /// Parse the *first* size value from a podman `mem_usage` string of the form
 /// `"178.3MB / 67.31GB"` into bytes. The second number is the host total,
 /// which we don't surface.
+///
+/// Returns `None` when the input is the podman `"-- / --"` placeholder
+/// (mid-state container, expected) **or** when the string shape diverges
+/// from what we've seen in the wild. The latter is a podman-version-skew
+/// signal — emit a `tracing::debug!` so the log captures the offending
+/// payload while still treating the call as "metric missing" rather than
+/// failing the whole `stats` invocation.
 fn parse_size_first(s: &str) -> Option<u64> {
-    let first = s.split('/').next()?.trim();
-    let (num, unit) = split_number_unit(first)?;
-    let value: f64 = num.parse().ok()?;
+    fn warn(input: &str, reason: &'static str) -> Option<u64> {
+        // Skip the noisy expected case — `"-- / --"` is podman's
+        // "container is mid-transition" placeholder, not skew.
+        if input.trim() != "-- / --" {
+            tracing::debug!(
+                target: "forge_oci::podman",
+                input = %input,
+                reason = %reason,
+                "parse_size_first: returning None (possible podman version skew)"
+            );
+        }
+        None
+    }
+    let Some(first) = s.split('/').next().map(str::trim) else {
+        return warn(s, "no '/' separator");
+    };
+    let Some((num, unit)) = split_number_unit(first) else {
+        return warn(s, "no number+unit split");
+    };
+    let Ok(value): std::result::Result<f64, _> = num.parse() else {
+        return warn(s, "number parse failed");
+    };
     let multiplier: f64 = match unit.to_ascii_uppercase().as_str() {
         "" | "B" => 1.0,
         "KB" | "K" => 1_000.0,
@@ -445,7 +572,7 @@ fn parse_size_first(s: &str) -> Option<u64> {
         "MIB" => 1_024.0 * 1_024.0,
         "GIB" => 1_024.0 * 1_024.0 * 1_024.0,
         "TIB" => 1_024.0 * 1_024.0 * 1_024.0 * 1_024.0,
-        _ => return None,
+        _ => return warn(s, "unknown size unit"),
     };
     Some((value * multiplier) as u64)
 }
