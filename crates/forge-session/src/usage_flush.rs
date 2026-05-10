@@ -75,18 +75,16 @@ pub async fn flush_session_usage(
     let mut per_month: BTreeMap<String, MonthlyAggregate> = BTreeMap::new();
     let mut ticks = 0usize;
 
-    // Use the *current* moment as a placeholder for ticks whose ordering we
-    // can't recover (all ticks today). We instead bucket by the calendar day
-    // of `now` for simplicity — the daemon emits UsageTicks during the
-    // session and `flush_session_usage` runs immediately on session end, so
-    // every tick falls in the same month as `now` in practice. A
-    // session-spans-midnight edge is acceptable to round to "month of flush"
-    // since the divergence is at most one day at a month boundary.
+    // F-593-followup (issue #646): bucket each tick by its own emission
+    // timestamp so a session crossing a month boundary records each tick
+    // into the correct calendar month. Legacy ticks emitted before the
+    // `at` field landed deserialize as `None` and fall back to flush time —
+    // identical to pre-fix behavior, no historical aggregate is rewritten.
     let now = Utc::now();
-    let bucket_key = month_key(now);
 
     for (_seq, event) in events {
         if let Event::UsageTick {
+            at,
             provider,
             model,
             tokens_in,
@@ -96,6 +94,8 @@ pub async fn flush_session_usage(
         } = event
         {
             ticks += 1;
+            let tick_at = at.unwrap_or(now);
+            let bucket_key = month_key(tick_at);
             let cost = table.compute_cost(
                 provider.to_string().as_str(),
                 model.as_str(),
@@ -117,7 +117,7 @@ pub async fn flush_session_usage(
                 tokens_in,
                 tokens_out,
                 cost,
-                now,
+                tick_at,
             );
         }
     }
@@ -206,6 +206,7 @@ pub async fn live_session_totals(log_path: &Path, session_id: &SessionId) -> Res
     let mut totals = SessionUsage::zero();
     for (_seq, event) in events {
         if let Event::UsageTick {
+            at: _,
             session_id: tick_session,
             provider,
             model,
@@ -313,6 +314,7 @@ mod tests {
         write_events(
             &log,
             &[Event::UsageTick {
+                at: None,
                 session_id: Some(fixture_session()),
                 provider: provider("anthropic"),
                 model: "claude-3-5-sonnet-20241022".into(),
@@ -352,6 +354,7 @@ mod tests {
         write_events(
             &log,
             &[Event::UsageTick {
+                at: None,
                 session_id: Some(fixture_session()),
                 provider: provider("anthropic"),
                 model: "claude-imaginary-99".into(),
@@ -381,6 +384,7 @@ mod tests {
         let log2 = tmp.path().join("session2.jsonl");
 
         let tick = Event::UsageTick {
+            at: None,
             session_id: Some(fixture_session()),
             provider: provider("anthropic"),
             model: "claude-3-5-sonnet-20241022".into(),
@@ -418,6 +422,7 @@ mod tests {
         write_events(
             &log,
             &[Event::UsageTick {
+                at: None,
                 session_id: Some(fixture_session()),
                 provider: provider("anthropic"),
                 model: "claude-3-5-sonnet-20241022".into(),
@@ -464,6 +469,7 @@ mod tests {
             &log,
             &[
                 Event::UsageTick {
+                    at: None,
                     session_id: Some(fixture_session()),
                     provider: provider("anthropic"),
                     model: "claude-3-5-sonnet-20241022".into(),
@@ -497,6 +503,7 @@ mod tests {
         write_events(
             &log,
             &[Event::UsageTick {
+                at: None,
                 session_id: Some(fixture_session()),
                 provider: provider("anthropic"),
                 model: "claude-3-5-sonnet-20241022".into(),
@@ -544,6 +551,7 @@ mod tests {
         write_events(
             &log,
             &[Event::UsageTick {
+                at: None,
                 session_id: Some(fixture_session()),
                 provider: provider("anthropic"),
                 model: "claude-3-5-sonnet-20241022".into(),
@@ -590,6 +598,7 @@ mod tests {
             &log,
             &[
                 Event::UsageTick {
+                    at: None,
                     session_id: Some(sid.clone()),
                     provider: provider("anthropic"),
                     model: "claude-3-5-sonnet-20241022".into(),
@@ -599,6 +608,7 @@ mod tests {
                     scope: RosterScope::SessionWide,
                 },
                 Event::UsageTick {
+                    at: None,
                     session_id: Some(sid.clone()),
                     provider: provider("anthropic"),
                     model: "claude-3-5-sonnet-20241022".into(),
@@ -632,6 +642,7 @@ mod tests {
         write_events(
             &log,
             &[Event::UsageTick {
+                at: None,
                 session_id: Some(sid.clone()),
                 provider: provider("anthropic"),
                 model: "claude-3-5-sonnet-20241022".into(),
@@ -660,6 +671,7 @@ mod tests {
             &log,
             &[
                 Event::UsageTick {
+                    at: None,
                     session_id: Some(sid.clone()),
                     provider: provider("anthropic"),
                     model: "claude-3-5-sonnet-20241022".into(),
@@ -669,6 +681,7 @@ mod tests {
                     scope: RosterScope::SessionWide,
                 },
                 Event::UsageTick {
+                    at: None,
                     session_id: Some(sid.clone()),
                     provider: provider("anthropic"),
                     model: "claude-imaginary-99".into(),
@@ -705,6 +718,7 @@ mod tests {
             &log,
             &[
                 Event::UsageTick {
+                    at: None,
                     session_id: Some(sid.clone()),
                     provider: provider("anthropic"),
                     model: "claude-3-5-sonnet-20241022".into(),
@@ -714,6 +728,7 @@ mod tests {
                     scope: RosterScope::SessionWide,
                 },
                 Event::UsageTick {
+                    at: None,
                     session_id: Some(other),
                     provider: provider("anthropic"),
                     model: "claude-3-5-sonnet-20241022".into(),
@@ -742,6 +757,7 @@ mod tests {
         write_events(
             &log,
             &[Event::UsageTick {
+                at: None,
                 session_id: None,
                 provider: provider("anthropic"),
                 model: "claude-3-5-sonnet-20241022".into(),
@@ -769,6 +785,7 @@ mod tests {
         write_events(
             &log,
             &[Event::UsageTick {
+                at: None,
                 session_id: Some(sid.clone()),
                 provider: provider("anthropic"),
                 model: "claude-3-5-sonnet-20241022".into(),
@@ -789,11 +806,152 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn live_totals_count_ticks_with_event_timestamp() {
+        // Regression: `live_session_totals` must count ticks regardless of
+        // whether `at` is `Some` or `None`. A literal `at: None` pattern
+        // would silently zero-out totals once real emitters populate `at`.
+        use chrono::TimeZone;
+        let tmp = TempDir::new().unwrap();
+        let log = tmp.path().join("events.jsonl");
+        let sid = fixture_session();
+        let now = Utc.with_ymd_and_hms(2026, 5, 1, 12, 0, 0).unwrap();
+        write_events(
+            &log,
+            &[Event::UsageTick {
+                at: Some(now),
+                session_id: Some(sid.clone()),
+                provider: provider("anthropic"),
+                model: "claude-3-5-sonnet-20241022".into(),
+                tokens_in: 100,
+                tokens_out: 50,
+                cost_usd: 0.0,
+                scope: RosterScope::SessionWide,
+            }],
+        )
+        .await;
+
+        let totals = live_session_totals(&log, &sid).await.unwrap();
+        assert_eq!(totals.tokens_in, 100);
+        assert_eq!(totals.tokens_out, 50);
+    }
+
+    #[tokio::test]
     async fn live_totals_empty_log_returns_zero() {
         let tmp = TempDir::new().unwrap();
         let log = tmp.path().join("events.jsonl");
         write_events(&log, &[]).await;
         let totals = live_session_totals(&log, &fixture_session()).await.unwrap();
         assert_eq!(totals, SessionUsage::zero());
+    }
+
+    // ---------------------------------------------------------------------
+    // F-593-followup: bucket-by-event-timestamp
+    // ---------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn flush_buckets_each_tick_by_its_own_timestamp() {
+        // Issue #646 / F-593-followup: a session that crosses a month
+        // boundary must record each tick into the calendar month of its
+        // emission `at`, not the month of flush time. Two ticks straddling
+        // April→May land in two distinct monthly aggregate files.
+        use chrono::TimeZone;
+
+        let tmp = TempDir::new().unwrap();
+        let log = tmp.path().join("events.jsonl");
+        let april_tick = Utc.with_ymd_and_hms(2026, 4, 30, 23, 30, 0).unwrap();
+        let may_tick = Utc.with_ymd_and_hms(2026, 5, 1, 0, 30, 0).unwrap();
+        write_events(
+            &log,
+            &[
+                Event::UsageTick {
+                    at: Some(april_tick),
+                    session_id: Some(fixture_session()),
+                    provider: provider("anthropic"),
+                    model: "claude-3-5-sonnet-20241022".into(),
+                    tokens_in: 100,
+                    tokens_out: 50,
+                    cost_usd: 0.0,
+                    scope: RosterScope::SessionWide,
+                },
+                Event::UsageTick {
+                    at: Some(may_tick),
+                    session_id: Some(fixture_session()),
+                    provider: provider("anthropic"),
+                    model: "claude-3-5-sonnet-20241022".into(),
+                    tokens_in: 700,
+                    tokens_out: 300,
+                    cost_usd: 0.0,
+                    scope: RosterScope::SessionWide,
+                },
+            ],
+        )
+        .await;
+
+        let usage_dir = tmp.path().join("usage");
+        let n = flush_session_usage(&log, &ws("w1"), &usage_dir)
+            .await
+            .unwrap();
+        assert_eq!(n, 2);
+
+        let april_path = monthly_path_in(&usage_dir, april_tick);
+        let may_path = monthly_path_in(&usage_dir, may_tick);
+        assert!(
+            april_path.exists(),
+            "April tick must materialize an April monthly file"
+        );
+        assert!(
+            may_path.exists(),
+            "May tick must materialize a May monthly file"
+        );
+        assert_ne!(
+            april_path, may_path,
+            "cross-month ticks must not collapse into one bucket"
+        );
+
+        let april = MonthlyAggregate::load_or_default(&april_path).await;
+        assert_eq!(april.month, "2026-04");
+        assert_eq!(april.buckets.len(), 1);
+        assert_eq!(april.buckets[0].tokens_in, 100);
+        assert_eq!(april.buckets[0].tokens_out, 50);
+
+        let may = MonthlyAggregate::load_or_default(&may_path).await;
+        assert_eq!(may.month, "2026-05");
+        assert_eq!(may.buckets.len(), 1);
+        assert_eq!(may.buckets[0].tokens_in, 700);
+        assert_eq!(may.buckets[0].tokens_out, 300);
+    }
+
+    #[tokio::test]
+    async fn flush_legacy_tick_without_at_falls_back_to_flush_time() {
+        // Backward-compat: ticks written before F-593-followup deserialize
+        // as `at: None`. The aggregator must still flush them — bucketing
+        // by `now` matches the pre-fix behavior so historical logs replay
+        // identically to how they did before this change.
+        let tmp = TempDir::new().unwrap();
+        let log = tmp.path().join("events.jsonl");
+        write_events(
+            &log,
+            &[Event::UsageTick {
+                at: None,
+                session_id: Some(fixture_session()),
+                provider: provider("anthropic"),
+                model: "claude-3-5-sonnet-20241022".into(),
+                tokens_in: 42,
+                tokens_out: 21,
+                cost_usd: 0.0,
+                scope: RosterScope::SessionWide,
+            }],
+        )
+        .await;
+
+        let usage_dir = tmp.path().join("usage");
+        let n = flush_session_usage(&log, &ws("w1"), &usage_dir)
+            .await
+            .unwrap();
+        assert_eq!(n, 1, "legacy tick still flushes");
+
+        let path = monthly_path_in(&usage_dir, Utc::now());
+        let loaded = MonthlyAggregate::load_or_default(&path).await;
+        assert_eq!(loaded.buckets[0].tokens_in, 42);
     }
 }
