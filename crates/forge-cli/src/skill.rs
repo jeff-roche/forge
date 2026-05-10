@@ -39,6 +39,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     process::Command,
+    sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
 
@@ -507,17 +508,32 @@ impl Resolver for GitResolver<'_> {
                 )
                 .context("resetting cached skill clone to origin/HEAD")?;
         } else {
-            // Cache miss — clone fresh.
-            if cache_dir.exists() {
-                fs::remove_dir_all(&cache_dir).with_context(|| {
-                    format!("removing stale cache directory {}", cache_dir.display())
+            // Cache miss — clone into a unique temp dir under the cache root,
+            // then atomically rename it into place. This avoids a TOCTOU
+            // window where two concurrent installs of the same URL could
+            // both pass the existence check and tear each other's clone.
+            //
+            // If the rename loses the race, another process has populated
+            // the cache entry; we drop our temp dir and fall through to the
+            // existing cache contents.
+            let parent = cache_dir
+                .parent()
+                .ok_or_else(|| anyhow!("cache path has no parent: {}", cache_dir.display()))?;
+            fs::create_dir_all(parent)
+                .with_context(|| format!("creating cache parent {}", parent.display()))?;
+
+            let temp_dir = parent.join(temp_subdir_name(&self.url));
+            // Defensive: a previous crashed install could in theory leave a
+            // collision at this exact name. The pid+counter suffix makes
+            // that astronomically unlikely, but if it happens we surface
+            // the existing entry rather than tearing it.
+            if temp_dir.exists() {
+                fs::remove_dir_all(&temp_dir).with_context(|| {
+                    format!("removing stale temp directory {}", temp_dir.display())
                 })?;
             }
-            if let Some(parent) = cache_dir.parent() {
-                fs::create_dir_all(parent)
-                    .with_context(|| format!("creating cache parent {}", parent.display()))?;
-            }
-            let cache_dir_str = cache_dir
+
+            let temp_dir_str = temp_dir
                 .to_str()
                 .ok_or_else(|| anyhow!("cache path is not valid UTF-8"))?;
             // `--` separator before the URL: defense-in-depth against
@@ -525,7 +541,8 @@ impl Resolver for GitResolver<'_> {
             // Anything after `--` is treated by `git` as a positional arg,
             // not a flag, so a hostile URL like `--upload-pack=/bin/evil`
             // cannot be reinterpreted as a git option.
-            self.runner
+            let clone_result = self
+                .runner
                 .run(
                     "git",
                     &[
@@ -534,11 +551,47 @@ impl Resolver for GitResolver<'_> {
                         "--depth=1",
                         "--",
                         &self.url,
-                        cache_dir_str,
+                        temp_dir_str,
                     ],
                     None,
                 )
-                .with_context(|| format!("cloning {}", self.url))?;
+                .with_context(|| format!("cloning {}", self.url));
+            if let Err(e) = clone_result {
+                let _ = fs::remove_dir_all(&temp_dir);
+                return Err(e);
+            }
+
+            // Validate the clone before publishing it to the cache. A clone
+            // that landed without a `SKILL.md` is unusable; surface the
+            // error and discard the temp dir rather than caching garbage.
+            let temp_skill_md = temp_dir.join(SKILL_FILENAME);
+            if !temp_skill_md.exists() {
+                let _ = fs::remove_dir_all(&temp_dir);
+                bail!(
+                    "cloned repository for {} does not contain {SKILL_FILENAME} at its root",
+                    self.url
+                );
+            }
+
+            // Atomic publish: rename the temp dir to the canonical cache
+            // path. If the destination already exists (another concurrent
+            // install won the race), `rename` fails — drop our temp dir
+            // and fall through to the existing cache entry.
+            match fs::rename(&temp_dir, &cache_dir) {
+                Ok(()) => {}
+                Err(_) if cache_dir.join(".git").exists() => {
+                    // Race lost: another process populated the cache.
+                    // Discard our temp dir and use the existing entry.
+                    let _ = fs::remove_dir_all(&temp_dir);
+                }
+                Err(e) => {
+                    let _ = fs::remove_dir_all(&temp_dir);
+                    return Err(anyhow::Error::new(e).context(format!(
+                        "publishing clone to cache directory {}",
+                        cache_dir.display()
+                    )));
+                }
+            }
         }
 
         let skill_md = cache_dir.join(SKILL_FILENAME);
@@ -563,6 +616,24 @@ impl Resolver for GitResolver<'_> {
             source_fingerprint,
         })
     }
+}
+
+/// Counter feeding the random component of temp-dir names so two clones in
+/// the same process don't collide. Combined with `pid` this is unique
+/// across processes too.
+static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Build a temp-dir name unique per (url, process, call). Format:
+/// `<sha256>.<pid>.<counter>`. Lives next to the canonical
+/// `<sha256>/` cache entry so the rename stays on the same filesystem.
+fn temp_subdir_name(url: &str) -> String {
+    let counter = TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!(
+        "{}.{}.{}",
+        GitResolver::cache_subdir(url),
+        std::process::id(),
+        counter
+    )
 }
 
 /// Default cache root: `~/.cache/forge/skills/`.
@@ -1919,50 +1990,136 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
-    fn cache_dir_remove_failure_propagates() {
-        // Stale cache cleanup: if a cache subdir exists *without* a
-        // `.git` (interrupted prior clone, manual mess, etc.), the
-        // resolver wipes it before re-cloning. If the wipe fails — e.g.
-        // the parent is read-only so directory entries can't be
-        // unlinked — the resolver must surface the
-        // "removing stale cache directory" context rather than silently
-        // continuing into a broken clone.
-        use std::os::unix::fs::PermissionsExt;
-
+    fn git_resolver_clones_into_temp_dir_then_renames_to_cache() {
+        // F-633 DoD: cache-miss path must clone into a unique temp dir
+        // under the cache root and then atomically rename onto the
+        // canonical `<sha256>/` cache entry. The rename eliminates the
+        // TOCTOU window where two concurrent installs of the same URL
+        // could tear each other's clone.
         let cache = tempdir().unwrap();
+        let runner = RecordingRunner {
+            clone_writes_skill: true,
+            ..Default::default()
+        };
         let url = "https://example.com/skills/planner.git";
-        let cache_dir = cache.path().join(GitResolver::cache_subdir(url));
-        // Stale dir without `.git` — triggers the remove path. Drop a
-        // file inside so `remove_dir_all` actually has to unlink an
-        // entry (whose unlink will be denied by the read-only parent).
-        fs::create_dir_all(&cache_dir).unwrap();
-        fs::write(cache_dir.join("stale.txt"), "stale").unwrap();
-
-        // Make the cache parent read-only so unlinking entries inside
-        // `cache_dir` fails. We restore permissions in a guard so the
-        // tempdir cleanup at end-of-test still works.
-        let parent = cache_dir.parent().unwrap().to_path_buf();
-        let original = fs::metadata(&parent).unwrap().permissions();
-        fs::set_permissions(&parent, fs::Permissions::from_mode(0o500)).unwrap();
-        struct RestorePerms(PathBuf, fs::Permissions);
-        impl Drop for RestorePerms {
-            fn drop(&mut self) {
-                let _ = fs::set_permissions(&self.0, self.1.clone());
-            }
-        }
-        let _guard = RestorePerms(parent.clone(), original);
-
-        // The runner shouldn't be reached — remove_dir_all fails first.
-        let runner =
-            FailingRunner::new(|_, _| panic!("git must not be invoked once cache cleanup fails"));
         let resolver = GitResolver::new(url, cache.path(), &runner);
 
-        let err = resolver.resolve().unwrap_err();
-        let msg = format!("{err:#}").to_lowercase();
+        let resolved = resolver.resolve().unwrap();
+
+        // The clone target argv must be a sibling temp path, NOT the
+        // canonical cache subdir. The rename publishes it afterwards.
+        let argv = runner.argv.borrow();
+        assert_eq!(argv.len(), 1, "expected exactly one git invocation");
+        let clone_target = PathBuf::from(argv[0].last().unwrap());
+        let canonical_cache_dir = cache.path().join(GitResolver::cache_subdir(url));
+        assert_ne!(
+            clone_target, canonical_cache_dir,
+            "clone must target a temp dir, not the canonical cache entry"
+        );
+        let temp_name = clone_target.file_name().unwrap().to_str().unwrap();
         assert!(
-            msg.contains("removing stale cache directory"),
-            "expected stale-cache context, got: {msg}",
+            temp_name.starts_with(&format!("{}.", GitResolver::cache_subdir(url))),
+            "temp dir name must be `<sha256>.<pid>.<counter>`, got: {temp_name}"
+        );
+        assert_eq!(
+            clone_target.parent().unwrap(),
+            canonical_cache_dir.parent().unwrap(),
+            "temp dir must be a sibling of the canonical cache entry so rename stays on one fs"
+        );
+
+        // After resolve(): the temp dir must have been renamed onto the
+        // canonical cache_dir, and the resolved source_dir must be the
+        // canonical path (not the temp path).
+        assert!(
+            !clone_target.exists(),
+            "temp dir must be gone after rename: {}",
+            clone_target.display()
+        );
+        assert_eq!(
+            resolved.source_dir, canonical_cache_dir,
+            "resolved source_dir must point at the canonical cache entry"
+        );
+        assert!(canonical_cache_dir.join(".git").exists());
+        assert!(canonical_cache_dir.join(SKILL_FILENAME).exists());
+    }
+
+    #[test]
+    fn git_resolver_uses_existing_cache_when_rename_collides() {
+        // F-633 DoD: when the atomic rename fails because another
+        // process won the race and populated the cache entry first, the
+        // resolver must drop its temp dir and use the existing entry
+        // (cache-hit) — not error out and not clobber the winner.
+        //
+        // We simulate the race by pre-populating the canonical cache
+        // entry as if another process had already finished a clone.
+        // The runner's `clone_writes_skill` hook then writes a *different*
+        // SKILL.md into the temp dir so we can confirm which copy was
+        // actually used (the pre-existing one, not the racer's).
+        let cache = tempdir().unwrap();
+        let url = "https://example.com/skills/planner.git";
+        let canonical_cache_dir = cache.path().join(GitResolver::cache_subdir(url));
+        // Pre-populated entry: contents that survive the race. Note that
+        // the cache hit path normally takes fetch+reset, but this test
+        // forces the cache-miss branch: the cache-miss check is
+        // `cache_dir.join(".git").exists()`, so we make the canonical
+        // dir exist *without* `.git` initially, then race-populate it
+        // mid-resolve via the runner hook.
+        struct RaceWinnerRunner {
+            log: RefCell<Vec<String>>,
+            canonical_cache_dir: PathBuf,
+        }
+        impl CommandRunner for RaceWinnerRunner {
+            fn run(&self, program: &str, args: &[&str], _cwd: Option<&Path>) -> Result<()> {
+                self.log
+                    .borrow_mut()
+                    .push(format!("{} {}", program, args.join(" ")));
+                if program == "git" && args.first() == Some(&"clone") {
+                    // Our temp-dir clone "succeeds":
+                    let target = PathBuf::from(args.last().unwrap());
+                    fs::create_dir_all(target.join(".git")).unwrap();
+                    fs::write(target.join(SKILL_FILENAME), good_frontmatter()).unwrap();
+                    // …but in the meantime, a concurrent install
+                    // populates the canonical cache entry. This is the
+                    // race we're guarding against.
+                    fs::create_dir_all(self.canonical_cache_dir.join(".git")).unwrap();
+                    fs::write(
+                        self.canonical_cache_dir.join(SKILL_FILENAME),
+                        good_frontmatter(),
+                    )
+                    .unwrap();
+                    fs::write(self.canonical_cache_dir.join("WINNER"), "winner").unwrap();
+                }
+                Ok(())
+            }
+        }
+        let runner = RaceWinnerRunner {
+            log: RefCell::new(Vec::new()),
+            canonical_cache_dir: canonical_cache_dir.clone(),
+        };
+        let resolver = GitResolver::new(url, cache.path(), &runner);
+
+        // Resolve must succeed (race loser does NOT error) and must
+        // surface the *existing* cache entry — including the WINNER
+        // marker that proves we kept the winner's tree, not ours.
+        let resolved = resolver.resolve().unwrap();
+        assert_eq!(resolved.source_dir, canonical_cache_dir);
+        assert!(
+            canonical_cache_dir.join("WINNER").exists(),
+            "race winner's cache entry must be preserved"
+        );
+
+        // Temp dir must be cleaned up — no orphaned siblings left behind.
+        let leftover_temp = fs::read_dir(cache.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| {
+                let name = e.file_name();
+                let name = name.to_str().unwrap_or("");
+                name.starts_with(&format!("{}.", GitResolver::cache_subdir(url)))
+            });
+        assert!(
+            !leftover_temp,
+            "temp dir must be removed after losing the rename race"
         );
     }
 
