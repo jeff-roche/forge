@@ -104,15 +104,19 @@ async fn dispatcher_short_circuits_after_budget_exhaustion() {
     let mut d = ToolDispatcher::new();
     d.register(Box::new(FsReadTool)).unwrap();
 
-    // Budget too small to cover even one full read — first call exhausts it.
-    let budget = Arc::new(ByteBudget::new(1));
+    // Budget sized so the first 100 KiB read completes (its result_byte_cost
+    // plus the per-tool-call envelope overhead lands at the limit) but the
+    // pre-check on the second call sees `consumed + overhead >= limit` and
+    // short-circuits. Picks the file size as the budget so the first
+    // charge clearly exhausts the headroom.
+    let budget = Arc::new(ByteBudget::new(100 * 1024));
     let ctx = ToolCtx {
         allowed_paths: vec![allowed],
         byte_budget: Some(budget.clone()),
         ..ToolCtx::default()
     };
 
-    // First call: tool may execute (post-decrement model) and return content.
+    // First call: tool runs and consumes the budget.
     let _ = d
         .dispatch("fs.read", &json!({ "path": &path }), &ctx)
         .await

@@ -200,9 +200,34 @@ pub const BASE_ENV_WHITELIST: &[&str] = &["PATH", "HOME", "LANG", "LC_ALL"];
 /// Shared registry of live sandboxed children scoped to a session. On session
 /// shutdown, [`ChildRegistry::kill_all`] sends `SIGKILL` to every tracked
 /// process group so that stray descendants do not survive the daemon.
+///
+/// On Linux, each entry pairs the pgid with the leader pid's
+/// `/proc/<pid>/stat` field-22 start-time, captured at insert time.
+/// [`ChildRegistry::kill_all`] re-reads the start-time before issuing
+/// `killpg` and skips any entry whose leader has been reaped and the pgid
+/// recycled — otherwise the `killpg` would target an unrelated process
+/// group. Mirrors the F-655 / F-656 `(dev, ino)` pattern used for daemon
+/// socket identity. Non-Linux builds do not sandbox; the registry stores
+/// the bare pgid and `kill_all` is a no-op.
 #[derive(Default, Clone)]
 pub struct ChildRegistry {
+    #[cfg(target_os = "linux")]
+    entries: Arc<Mutex<Vec<RegisteredPgid>>>,
+    #[cfg(not(target_os = "linux"))]
     pgids: Arc<Mutex<Vec<i32>>>,
+}
+
+/// Linux entry: pgid paired with the leader pid's recorded start-time so
+/// [`ChildRegistry::kill_all`] can refuse a `killpg` after pgid recycling.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy)]
+struct RegisteredPgid {
+    pgid: i32,
+    /// Leader pid's `/proc/<pid>/stat` field 22 at insertion time. `None`
+    /// when the probe failed (e.g. leader exited between spawn and
+    /// insert): treat as "unknown identity" and skip the kill rather
+    /// than risk hitting a recycled pgid.
+    starttime: Option<u64>,
 }
 
 impl ChildRegistry {
@@ -212,26 +237,84 @@ impl ChildRegistry {
 
     /// Register a pgid. The caller is expected to deregister it via
     /// [`ChildRegistry::remove`] once the child exits cleanly.
+    ///
+    /// On Linux this also probes `/proc/<pgid>/stat` to record the leader
+    /// pid's start-time so [`Self::kill_all`] can detect pgid recycling.
+    /// A probe failure is non-fatal — the entry is still recorded with a
+    /// `None` start-time, and [`Self::kill_all`] will skip it rather than
+    /// risk killing a recycled pgid.
     pub fn insert(&self, pgid: i32) {
-        self.pgids.lock().unwrap().push(pgid);
+        #[cfg(target_os = "linux")]
+        {
+            let starttime = crate::starttime::read_process_starttime(pgid).ok();
+            self.entries
+                .lock()
+                .unwrap()
+                .push(RegisteredPgid { pgid, starttime });
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.pgids.lock().unwrap().push(pgid);
+        }
+    }
+
+    /// Linux-only test seam: register a pgid with an explicit recorded
+    /// start-time, bypassing the `/proc/<pgid>/stat` probe. Exists so
+    /// `kill_all` can be exercised against a known-good or known-stale
+    /// identity without racing the kernel.
+    #[cfg(all(target_os = "linux", test))]
+    pub(crate) fn insert_with_starttime(&self, pgid: i32, starttime: Option<u64>) {
+        self.entries
+            .lock()
+            .unwrap()
+            .push(RegisteredPgid { pgid, starttime });
     }
 
     /// Deregister a pgid.
     pub fn remove(&self, pgid: i32) {
-        let mut guard = self.pgids.lock().unwrap();
-        if let Some(idx) = guard.iter().position(|p| *p == pgid) {
-            guard.swap_remove(idx);
+        #[cfg(target_os = "linux")]
+        {
+            let mut guard = self.entries.lock().unwrap();
+            if let Some(idx) = guard.iter().position(|e| e.pgid == pgid) {
+                guard.swap_remove(idx);
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let mut guard = self.pgids.lock().unwrap();
+            if let Some(idx) = guard.iter().position(|p| *p == pgid) {
+                guard.swap_remove(idx);
+            }
         }
     }
 
-    /// Send `SIGKILL` to every tracked process group and clear the registry.
+    /// Send `SIGKILL` to every tracked process group and clear the
+    /// registry.
+    ///
+    /// Each entry is verified against `/proc/<pgid>/stat` field 22
+    /// immediately before the `killpg`: a mismatch (or a missing
+    /// `/proc` entry) means the leader pid has been reaped and the
+    /// kernel may have recycled the pgid for an unrelated process.
+    /// In that case the `killpg` is suppressed and the entry is
+    /// dropped — the alternative would be sending `SIGKILL` to a
+    /// stranger.
     #[cfg(target_os = "linux")]
     pub fn kill_all(&self) {
-        let mut guard = self.pgids.lock().unwrap();
-        for pgid in guard.drain(..) {
+        let mut guard = self.entries.lock().unwrap();
+        for entry in guard.drain(..) {
+            if !leader_identity_matches(entry.pgid, entry.starttime) {
+                tracing::warn!(
+                    target: "forge_session::sandbox",
+                    pgid = entry.pgid,
+                    recorded_starttime = ?entry.starttime,
+                    "skipping killpg: leader pid has been reaped \
+                     and pgid may be recycled",
+                );
+                continue;
+            }
             // SAFETY: killpg is async-signal-safe and takes no Rust references.
             unsafe {
-                libc::killpg(pgid, libc::SIGKILL);
+                libc::killpg(entry.pgid, libc::SIGKILL);
             }
         }
     }
@@ -244,12 +327,41 @@ impl ChildRegistry {
 
     #[cfg(test)]
     pub fn len(&self) -> usize {
-        self.pgids.lock().unwrap().len()
+        #[cfg(target_os = "linux")]
+        {
+            self.entries.lock().unwrap().len()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.pgids.lock().unwrap().len()
+        }
     }
 
     #[cfg(test)]
     pub fn is_empty(&self) -> bool {
-        self.pgids.lock().unwrap().is_empty()
+        #[cfg(target_os = "linux")]
+        {
+            self.entries.lock().unwrap().is_empty()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.pgids.lock().unwrap().is_empty()
+        }
+    }
+}
+
+/// Linux: confirm `/proc/<pgid>/stat` field 22 still matches
+/// `recorded`. `recorded == None` means the insert-time probe failed,
+/// which we treat as "identity unknown — refuse to kill" (the
+/// conservative bias for a security-hygiene gate).
+#[cfg(target_os = "linux")]
+fn leader_identity_matches(pgid: i32, recorded: Option<u64>) -> bool {
+    let Some(recorded) = recorded else {
+        return false;
+    };
+    match crate::starttime::read_process_starttime(pgid) {
+        Ok(current) => current == recorded,
+        Err(_) => false,
     }
 }
 
@@ -1150,6 +1262,105 @@ mod tests {
             "expected SIGKILL, got {status:?}"
         );
         assert!(!process_alive(pgid));
+    }
+
+    #[tokio::test]
+    async fn registry_kill_all_skips_pgid_with_mismatched_starttime() {
+        // Simulates the pgid-recycle case: an entry recorded with a
+        // start-time that does not match the live `/proc/<pid>/stat`.
+        // `kill_all` must skip the killpg rather than send SIGKILL to
+        // a stranger that happens to hold the same pgid now.
+        let tmp = tempfile::tempdir().unwrap();
+        let registry = ChildRegistry::new();
+
+        let mut sb = SandboxedCommand::new("/bin/sh", tmp.path());
+        sb.command_mut()
+            .arg("-c")
+            .arg("sleep 30")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+
+        // Spawn WITHOUT the registry so the real insert path doesn't
+        // capture an accurate start-time; we then manually register
+        // the pgid with a deliberately-wrong recorded start-time.
+        let sandboxed = sb.spawn().unwrap();
+        let pgid = sandboxed.pgid();
+        registry.insert_with_starttime(pgid, Some(u64::MAX));
+        assert!(process_alive(pgid), "child {pgid} should be alive");
+
+        registry.kill_all();
+        assert!(registry.is_empty(), "entries are drained even when skipped");
+        // Mismatched start-time means killpg was suppressed: the child
+        // must still be alive a moment later.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            process_alive(pgid),
+            "child {pgid} must survive a starttime-mismatched kill_all",
+        );
+
+        // Clean up: cancel the sleep child explicitly so the test exits.
+        unsafe {
+            libc::killpg(pgid, libc::SIGKILL);
+        }
+        let mut child = sandboxed.into_child();
+        let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+    }
+
+    #[tokio::test]
+    async fn registry_kill_all_kills_when_starttime_matches() {
+        // The matching-identity path: a normally-registered child has
+        // its real start-time captured at insert time, so `kill_all`
+        // sees a match and proceeds with `killpg`. This is the
+        // existing F-055 / F-149 contract — the recycle gate must not
+        // regress it.
+        let tmp = tempfile::tempdir().unwrap();
+        let registry = ChildRegistry::new();
+
+        let mut sb = SandboxedCommand::new("/bin/sh", tmp.path());
+        sb.command_mut()
+            .arg("-c")
+            .arg("sleep 30")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        sb.with_registry(registry.clone());
+
+        let sandboxed = sb.spawn().unwrap();
+        let _pgid = sandboxed.pgid();
+        assert_eq!(registry.len(), 1);
+
+        registry.kill_all();
+
+        let mut child = sandboxed.into_child();
+        let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .expect("child did not exit after registry.kill_all()")
+            .unwrap();
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(
+            status.signal(),
+            Some(libc::SIGKILL),
+            "matching-identity entry must still get SIGKILL: {status:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn registry_kill_all_skips_entry_with_no_recorded_starttime() {
+        // An entry whose insert-time probe failed (recorded `None`)
+        // is treated as "identity unknown — refuse to kill" so we
+        // never SIGKILL a possibly-recycled pgid on the basis of
+        // missing evidence.
+        let registry = ChildRegistry::new();
+        // pgid 1 (init) is always alive, so a kill would actually
+        // hit something if the gate let it through. The `None`
+        // start-time must suppress that.
+        registry.insert_with_starttime(1, None);
+        registry.kill_all();
+        assert!(registry.is_empty());
+        // pid 1 is owned by root in any sane environment; this
+        // assertion exists to document intent rather than catch
+        // a fault (we expect EPERM on the suppressed code path
+        // anyway).
+        assert!(process_alive(1));
     }
 
     #[tokio::test]

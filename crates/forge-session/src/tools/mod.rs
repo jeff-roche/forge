@@ -299,7 +299,7 @@ pub(crate) async fn invoke_with_budget(
     ctx: &ToolCtx,
 ) -> serde_json::Value {
     if let Some(budget) = ctx.byte_budget.as_ref() {
-        if budget.is_exhausted() {
+        if budget.is_exhausted_with_overhead(1) {
             return serde_json::json!({
                 "error": format!(
                     "session byte budget exceeded: {}/{} bytes",
@@ -313,7 +313,7 @@ pub(crate) async fn invoke_with_budget(
     let result = tool.invoke(args, ctx).await;
 
     if let Some(budget) = ctx.byte_budget.as_ref() {
-        budget.charge(result_byte_cost(&result));
+        budget.charge(result_byte_cost(&result) + crate::byte_budget::PER_TOOL_CALL_OVERHEAD_BYTES);
     }
 
     result

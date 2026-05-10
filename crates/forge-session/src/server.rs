@@ -1640,23 +1640,24 @@ async fn handle_connection<P: Provider + 'static>(
                     }
 
                     Some(IpcMessage::PauseSession(_)) => {
-                        // F-603: pause request. `Session::try_pause` flips
-                        // the in-memory `Paused` flag and returns whether
-                        // it performed the `Running → Paused` transition.
-                        // Only emit `Event::SessionPaused` on a real
-                        // transition — pause-while-paused is idempotent
-                        // and falls through to a `debug!` log per the DoD
-                        // (NOT an error). Effect on the orchestrator: the
-                        // next iteration of `run_request_loop` parks at
-                        // `Session::wait_if_paused`; any in-flight step
-                        // (model stream, tool call) finishes first.
-                        if session.try_pause() {
-                            if let Err(e) = session
-                                .emit(forge_core::Event::SessionPaused {
-                                    at: chrono::Utc::now(),
-                                })
-                                .await
-                            {
+                        // F-603 / F-666: pause request. The state-flip
+                        // and the `Event::SessionPaused` emission run
+                        // under a single lock inside the session so a
+                        // concurrent resume cannot interleave their
+                        // events out-of-order relative to the actual
+                        // state transitions. Idempotency contract is
+                        // unchanged: pause-while-paused returns `false`
+                        // and emits no event.
+                        match session.pause_and_emit_if_transitioned().await {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                tracing::debug!(
+                                    target: "forge_session::server",
+                                    session_id = %session_id,
+                                    "PauseSession: already paused (no-op)",
+                                );
+                            }
+                            Err(e) => {
                                 tracing::warn!(
                                     target: "forge_session::server",
                                     session_id = %session_id,
@@ -1664,30 +1665,26 @@ async fn handle_connection<P: Provider + 'static>(
                                     "failed to emit SessionPaused",
                                 );
                             }
-                        } else {
-                            tracing::debug!(
-                                target: "forge_session::server",
-                                session_id = %session_id,
-                                "PauseSession: already paused (no-op)",
-                            );
                         }
                     }
 
                     Some(IpcMessage::ResumeSession(_)) => {
-                        // F-603: resume request. `Session::try_resume`
-                        // clears the `Paused` flag and (on a real
-                        // transition) wakes any orchestrator parked at
-                        // the pause checkpoint via
-                        // `Notify::notify_waiters`. Idempotency mirrors
-                        // pause: redundant resume falls through to a
-                        // `debug!` log and emits no event.
-                        if session.try_resume() {
-                            if let Err(e) = session
-                                .emit(forge_core::Event::SessionResumed {
-                                    at: chrono::Utc::now(),
-                                })
-                                .await
-                            {
+                        // F-603 / F-666: resume request. Companion to
+                        // the pause path above — the state-flip,
+                        // `notify_waiters`, and `Event::SessionResumed`
+                        // emission run under the same lock so consumer
+                        // ordering matches transition ordering even
+                        // under concurrent pause/resume traffic.
+                        match session.resume_and_emit_if_transitioned().await {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                tracing::debug!(
+                                    target: "forge_session::server",
+                                    session_id = %session_id,
+                                    "ResumeSession: not paused (no-op)",
+                                );
+                            }
+                            Err(e) => {
                                 tracing::warn!(
                                     target: "forge_session::server",
                                     session_id = %session_id,
@@ -1695,12 +1692,6 @@ async fn handle_connection<P: Provider + 'static>(
                                     "failed to emit SessionResumed",
                                 );
                             }
-                        } else {
-                            tracing::debug!(
-                                target: "forge_session::server",
-                                session_id = %session_id,
-                                "ResumeSession: not paused (no-op)",
-                            );
                         }
                     }
 

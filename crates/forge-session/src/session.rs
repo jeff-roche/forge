@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use forge_core::{Event, EventLog, EventSink};
 use tokio::sync::{broadcast, Mutex, Notify};
 
@@ -71,6 +72,17 @@ pub struct Session {
     /// checkpoint would not park, and a tool effect could fire after
     /// `SessionPaused` was acknowledged on the wire.
     pause_epoch: Arc<AtomicU64>,
+    /// F-666 hygiene: serialises the state-flip and the event emission for
+    /// pause/resume. Without this lock, two concurrent pause/resume
+    /// callers could win the atomic CAS in one order but reach
+    /// `Session::emit` (which awaits the underlying log mutex) in the
+    /// opposite order — consumers replaying the event stream would see
+    /// `Paused`/`Resumed` events out of sequence with the actual state
+    /// transitions. `pause_and_emit_if_transitioned` /
+    /// `resume_and_emit_if_transitioned` hold this lock across both
+    /// steps so the observable order is "transition → event"
+    /// monotonically.
+    pause_emit_lock: Arc<Mutex<()>>,
     /// F-603: paired with `paused`. The orchestrator's pause checkpoint
     /// awaits this `Notify` while the flag is set; `try_resume` calls
     /// `notify_one` to wake it. F-653: switched from `notify_waiters` to
@@ -124,6 +136,7 @@ impl Session {
             parallel_group_seq: Arc::new(AtomicU32::new(1)),
             paused: Arc::new(AtomicBool::new(false)),
             pause_epoch: Arc::new(AtomicU64::new(0)),
+            pause_emit_lock: Arc::new(Mutex::new(())),
             resume_notify: Arc::new(Notify::new()),
             interrupt_requested: Arc::new(AtomicBool::new(false)),
             interrupt_capture: Arc::new(Mutex::new(None)),
@@ -185,6 +198,59 @@ impl Session {
     /// arrived.
     pub fn pause_epoch(&self) -> u64 {
         self.pause_epoch.load(Ordering::SeqCst)
+    }
+
+    /// F-666 hygiene: atomically perform the `Running → Paused`
+    /// transition **and** emit `Event::SessionPaused` under a single
+    /// lock. Replaces the previous "call `try_pause` then conditionally
+    /// `emit` from the caller" pattern — that pattern let two callers'
+    /// events appear in the event log out of order relative to their
+    /// state transitions (the CAS winner could lose the race to the
+    /// log mutex). Returns `true` when this call performed the
+    /// transition and emitted the event; `false` when the session was
+    /// already paused (idempotent no-op; no event emitted).
+    ///
+    /// F-653: also bumps `pause_epoch` on transition so the
+    /// orchestrator's pause checkpoint catches a quick pause/resume
+    /// cycle that completed before the next step boundary.
+    pub async fn pause_and_emit_if_transitioned(&self) -> Result<bool, SessionError> {
+        let _guard = self.pause_emit_lock.lock().await;
+        if self
+            .paused
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Ok(false);
+        }
+        self.pause_epoch.fetch_add(1, Ordering::SeqCst);
+        self.emit(Event::SessionPaused { at: Utc::now() }).await?;
+        Ok(true)
+    }
+
+    /// F-666 hygiene: companion to [`Self::pause_and_emit_if_transitioned`]
+    /// for the `Paused → Running` transition. Holds the same lock so
+    /// pause/resume events appear in the event log in the same order
+    /// as the corresponding state transitions. Wakes any orchestrator
+    /// parked on `wait_if_paused` only on a real transition.
+    ///
+    /// F-653: uses `notify_one` (not `notify_waiters`) so a resume that
+    /// lands *before* the orchestrator reaches the checkpoint retains
+    /// a permit — the next `notified()` consumes it without parking,
+    /// avoiding the dropped-permit deadlock that
+    /// `pause_resume_burst_before_turn_does_not_deadlock_or_leak_step`
+    /// pins.
+    pub async fn resume_and_emit_if_transitioned(&self) -> Result<bool, SessionError> {
+        let _guard = self.pause_emit_lock.lock().await;
+        if self
+            .paused
+            .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Ok(false);
+        }
+        self.resume_notify.notify_one();
+        self.emit(Event::SessionResumed { at: Utc::now() }).await?;
+        Ok(true)
     }
 
     /// F-603: observe the pause flag without mutating it. Used in tests
@@ -697,6 +763,111 @@ mod tests {
             result.is_none(),
             "await must yield None on deadline expiry (no orchestrator publish)",
         );
+    }
+
+    // ---------- F-666 hygiene: pause/resume event ordering under lock ----------
+
+    #[tokio::test]
+    async fn pause_and_emit_if_transitioned_emits_event_under_lock() {
+        let (_dir, session) = fresh_session().await;
+        let mut rx = session.event_tx.subscribe();
+
+        assert!(session.pause_and_emit_if_transitioned().await.unwrap());
+        let (_, ev) = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+            .await
+            .expect("event arrives")
+            .expect("subscriber alive");
+        assert!(
+            matches!(ev, Event::SessionPaused { .. }),
+            "expected SessionPaused, got {ev:?}",
+        );
+
+        // Idempotent: redundant pause must not emit a second event.
+        assert!(!session.pause_and_emit_if_transitioned().await.unwrap());
+        assert!(rx.try_recv().is_err(), "no second event on no-op pause");
+
+        assert!(session.resume_and_emit_if_transitioned().await.unwrap());
+        let (_, ev) = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+            .await
+            .expect("event arrives")
+            .expect("subscriber alive");
+        assert!(
+            matches!(ev, Event::SessionResumed { .. }),
+            "expected SessionResumed, got {ev:?}",
+        );
+    }
+
+    /// F-666: hammer pause/resume from many tasks at once and assert
+    /// the event stream alternates `Paused, Resumed, Paused, Resumed,
+    /// …` strictly. Pre-fix, the state-flip CAS and the `emit` log-
+    /// mutex acquisition were separable, so two callers could see
+    /// their events arrive in the opposite order from their
+    /// transitions.
+    #[tokio::test]
+    async fn concurrent_pause_resume_events_match_transition_order() {
+        let (_dir, session) = fresh_session().await;
+        let mut rx = session.event_tx.subscribe();
+
+        // 50 cycles of pause/resume issued from independent tasks.
+        // We serialize each cycle (resume must observe a prior pause)
+        // but the *emission* path is contended across tasks.
+        let cycles = 50;
+        let mut tasks = Vec::new();
+        for _ in 0..cycles {
+            let s = Arc::clone(&session);
+            tasks.push(tokio::spawn(async move {
+                // Spin until the pause transition lands (a concurrent
+                // resumer may have flipped us back to Running already).
+                while !s.pause_and_emit_if_transitioned().await.unwrap() {
+                    tokio::task::yield_now().await;
+                }
+                while !s.resume_and_emit_if_transitioned().await.unwrap() {
+                    tokio::task::yield_now().await;
+                }
+            }));
+        }
+        for t in tasks {
+            t.await.unwrap();
+        }
+
+        // Drain all 2N events; assert strict alternation.
+        let mut prev_was_paused: Option<bool> = None;
+        let mut paused = 0;
+        let mut resumed = 0;
+        for _ in 0..(cycles * 2) {
+            let (_, ev) = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+                .await
+                .expect("event arrives")
+                .expect("subscriber alive");
+            match ev {
+                Event::SessionPaused { .. } => {
+                    assert!(
+                        prev_was_paused != Some(true),
+                        "two consecutive SessionPaused events — state/emit \
+                         interleaved out of order",
+                    );
+                    prev_was_paused = Some(true);
+                    paused += 1;
+                }
+                Event::SessionResumed { .. } => {
+                    assert!(
+                        prev_was_paused != Some(false),
+                        "two consecutive SessionResumed events — state/emit \
+                         interleaved out of order",
+                    );
+                    assert!(
+                        prev_was_paused == Some(true),
+                        "SessionResumed before any SessionPaused",
+                    );
+                    prev_was_paused = Some(false);
+                    resumed += 1;
+                }
+                other => panic!("unexpected event {other:?}"),
+            }
+        }
+        assert_eq!(paused, cycles);
+        assert_eq!(resumed, cycles);
+        assert!(!session.is_paused(), "final state must be Running");
     }
 
     #[tokio::test]

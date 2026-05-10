@@ -30,6 +30,27 @@
 
 use anyhow::Result;
 
+/// Read the starttime token for an arbitrary pid on Linux.
+///
+/// Mirrors [`read_self_starttime`] but targets `/proc/<pid>/stat` instead
+/// of `/proc/self/stat` so callers can verify a recorded leader pid has
+/// not been reaped and recycled (see `sandbox::ChildRegistry::kill_all`).
+/// Linux-only because the pid-reuse mitigation it backs is itself
+/// Linux-only (cgroup-paired killpg); macOS/Windows sandboxes do not
+/// use this path.
+#[cfg(target_os = "linux")]
+pub fn read_process_starttime(pid: libc::pid_t) -> Result<u64> {
+    let path = format!("/proc/{pid}/stat");
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            anyhow::bail!("no such process {pid} (/proc/{pid}/stat missing)");
+        }
+        Err(e) => anyhow::bail!("failed to read /proc/{pid}/stat: {e}"),
+    };
+    linux::parse_proc_stat_starttime(&contents)
+}
+
 /// Return a `u64` that uniquely identifies this process across its
 /// lifetime on the current host. The shape is platform-dependent; see
 /// the module docs.
