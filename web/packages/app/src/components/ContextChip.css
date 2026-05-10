@@ -11,7 +11,7 @@
   border: 1px solid var(--color-border-2);
   border-radius: var(--r-sm);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   color: var(--color-text-primary);
   max-width: 240px;
 }
@@ -34,7 +34,7 @@
   border: none;
   color: var(--color-text-tertiary);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--type-body-sm);
   line-height: 1;
   padding: 0 2px;
   cursor: pointer;
@@ -68,7 +68,7 @@
   border-radius: var(--r-sm);
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   color: var(--color-text-primary);
   white-space: pre;
   pointer-events: none;
@@ -100,7 +100,7 @@
   border: 1px solid var(--color-ember-400);
   border-radius: var(--r-sm);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--type-mono-xxs);
   color: var(--color-ember-400);
   cursor: pointer;
   pointer-events: auto;

@@ -37,7 +37,7 @@
   background: var(--color-surface-1);
   color: var(--color-text-primary);
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: var(--type-mono-md);
   outline: none;
 }
 
@@ -61,7 +61,7 @@
 .command-palette__item {
   padding: var(--sp-2) var(--sp-4);
   font-family: var(--font-body);
-  font-size: 13px;
+  font-size: var(--type-mono-md);
   color: var(--color-text-primary);
   cursor: pointer;
   display: flex;
@@ -89,5 +89,5 @@
   padding: var(--sp-3) var(--sp-4);
   color: var(--color-text-tertiary);
   font-style: italic;
-  font-size: 13px;
+  font-size: var(--type-mono-md);
 }

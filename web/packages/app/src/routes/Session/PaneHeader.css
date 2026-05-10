@@ -11,7 +11,7 @@
 
 .pane-header__type-label {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--type-mono-xxs);
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--color-text-tertiary);
@@ -31,7 +31,7 @@
 }
 
 .pane-header__subject {
-  font-size: 13px;
+  font-size: var(--type-mono-md);
   color: var(--color-text-primary);
 }
 
@@ -41,7 +41,7 @@
   gap: var(--sp-1);
   padding: 0 var(--sp-2);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   /* F-091: per-provider accent set via inline custom property; the steel
    * `--color-provider-local` fallback is the Phase-1 default for callers
    * that haven't plumbed a providerId yet. */
@@ -54,7 +54,7 @@
 .pane-header__cost {
   margin-left: auto;
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--type-mono-xxs);
   letter-spacing: 0.04em;
   color: var(--color-text-secondary);
 }
@@ -64,7 +64,7 @@
   border: 1px solid transparent;
   padding: 0 var(--sp-2);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--type-mono-xxs);
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--color-text-secondary);

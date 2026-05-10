@@ -42,9 +42,14 @@ function hasDecl(body: string, name: string, value: string): boolean {
 describe('ApprovalPrompt — pattern-label matches mono-xs (F-090)', () => {
   const body = ruleBody('.approval-prompt__pattern-label');
 
-  it('font-size: 9px (mono-xs)', () => {
-    expect(hasDecl(body, 'font-size', '9px')).toBe(true);
+  it('font-size resolves to mono-xs (9px) via the typography token', () => {
+    // After F-823 the raw `font-size: 9px` migrated to the
+    // `--type-mono-xs` typography token. Asserting on the token name keeps
+    // the F-090 invariant — pattern-label uses the mono-xs scale, not a
+    // raw 10px — without re-encoding the px value here.
+    expect(hasDecl(body, 'font-size', 'var(--type-mono-xs)')).toBe(true);
     expect(body).not.toMatch(/font-size:\s*10px\b/);
+    expect(body).not.toMatch(/font-size:\s*9px\b/);
   });
 
   it('letter-spacing: 0.3em (mono-xs)', () => {

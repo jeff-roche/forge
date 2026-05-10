@@ -41,7 +41,7 @@ const tokensPath = resolve(
 );
 const tokensSource = readFileSync(tokensPath, 'utf-8');
 
-const CANONICAL_PREFIXES = ['--color-', '--sp-', '--r-', '--font-', '--ease'];
+const CANONICAL_PREFIXES = ['--color-', '--sp-', '--r-', '--font-', '--type-', '--ease'];
 
 interface VarCall {
   name: string;

@@ -27,7 +27,7 @@
 
 .providers__label {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--type-mono-xxs);
   letter-spacing: 0.2em;
   color: var(--color-text-tertiary);
   text-transform: uppercase;
@@ -48,7 +48,7 @@
 .providers__loading,
 .providers__empty {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   color: var(--color-text-secondary);
   letter-spacing: 0.2em;
   margin: 0;
@@ -170,7 +170,7 @@
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  font-size: 14px;
+  font-size: var(--type-body-md);
   color: var(--color-text-primary);
 }
 

@@ -30,7 +30,7 @@
   color: var(--color-text-tertiary);
   border-bottom: 1px solid var(--color-border-1);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   letter-spacing: 0.08em;
   flex: 0 0 auto;
 }
@@ -41,7 +41,7 @@
   color: var(--color-accent-danger);
   border-bottom: 1px solid var(--color-border-1);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   flex: 0 0 auto;
 }
 

@@ -21,7 +21,7 @@
 
 .memory-section__label {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--type-mono-xxs);
   letter-spacing: 0.2em;
   color: var(--color-text-tertiary);
   text-transform: uppercase;

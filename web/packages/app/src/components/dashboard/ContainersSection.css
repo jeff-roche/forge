@@ -21,7 +21,7 @@
 
 .containers-section__label {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--type-mono-xxs);
   letter-spacing: 0.2em;
   color: var(--color-text-tertiary);
   text-transform: uppercase;
@@ -44,7 +44,7 @@
 .containers-section__empty {
   margin: 0;
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   color: var(--color-text-tertiary);
   letter-spacing: 0.05em;
 }
@@ -52,7 +52,7 @@
 .containers-section__empty-hint {
   margin: 0;
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   color: var(--color-text-tertiary);
   opacity: 0.7;
 }
@@ -112,7 +112,7 @@
 
 .containers-section__pip {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--type-mono-xxs);
   letter-spacing: 0.15em;
   text-transform: uppercase;
   padding: 2px var(--sp-2);
@@ -186,7 +186,7 @@
 
 .containers-section__modal-body {
   margin: 0;
-  font-size: 14px;
+  font-size: var(--type-body-md);
   color: var(--color-text-secondary);
   line-height: 1.5;
 }
@@ -296,7 +296,7 @@
 
 .containers-banner__icon {
   font-family: var(--font-mono);
-  font-size: 16px;
+  font-size: var(--type-body-lg);
   color: var(--color-warning);
   flex-shrink: 0;
 }
