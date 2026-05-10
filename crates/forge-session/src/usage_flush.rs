@@ -206,7 +206,7 @@ pub async fn live_session_totals(log_path: &Path, session_id: &SessionId) -> Res
     let mut totals = SessionUsage::zero();
     for (_seq, event) in events {
         if let Event::UsageTick {
-            at: None,
+            at: _,
             session_id: tick_session,
             provider,
             model,
@@ -803,6 +803,36 @@ mod tests {
             !sentinel.exists(),
             "live totals must not write the flush sentinel",
         );
+    }
+
+    #[tokio::test]
+    async fn live_totals_count_ticks_with_event_timestamp() {
+        // Regression: `live_session_totals` must count ticks regardless of
+        // whether `at` is `Some` or `None`. A literal `at: None` pattern
+        // would silently zero-out totals once real emitters populate `at`.
+        use chrono::TimeZone;
+        let tmp = TempDir::new().unwrap();
+        let log = tmp.path().join("events.jsonl");
+        let sid = fixture_session();
+        let now = Utc.with_ymd_and_hms(2026, 5, 1, 12, 0, 0).unwrap();
+        write_events(
+            &log,
+            &[Event::UsageTick {
+                at: Some(now),
+                session_id: Some(sid.clone()),
+                provider: provider("anthropic"),
+                model: "claude-3-5-sonnet-20241022".into(),
+                tokens_in: 100,
+                tokens_out: 50,
+                cost_usd: 0.0,
+                scope: RosterScope::SessionWide,
+            }],
+        )
+        .await;
+
+        let totals = live_session_totals(&log, &sid).await.unwrap();
+        assert_eq!(totals.tokens_in, 100);
+        assert_eq!(totals.tokens_out, 50);
     }
 
     #[tokio::test]
