@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Forge pre-commit hook (F-699 follow-up #820, item 3).
+#
+# Runs the design-token gate when the commit touches CSS or TSX files
+# under `web/`. Skip-if-nothing-relevant means commits that don't touch
+# styles run instantly. Activate locally with:
+#   git config core.hooksPath .githooks
+#
+# CI runs the same gate via `just check-web`, so the hook is purely a
+# developer-ergonomics shortcut. Disable temporarily with `git commit
+# --no-verify` if you need to land a WIP commit.
+
+set -euo pipefail
+
+# Files staged for commit, filtered to the surfaces check-tokens covers.
+# Diff is empty on initial commit; in that case skip the hook.
+mapfile -t staged < <(git diff --cached --name-only --diff-filter=ACMR \
+  | grep -E '^(web/.*\.(css|tsx)|docs/design/token-reference\.md)$' \
+  || true)
+
+if [ "${#staged[@]}" -eq 0 ]; then
+  exit 0
+fi
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "pre-commit: node not on PATH; skipping check-tokens (CI will catch drift)." >&2
+  exit 0
+fi
+
+# Repo-relative; works the same whether the user is at the repo root or
+# inside a worktree because git already constrained CWD.
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+node "${REPO_ROOT}/scripts/check-tokens.mjs"

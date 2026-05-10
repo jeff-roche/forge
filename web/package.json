@@ -11,7 +11,9 @@
     "build": "pnpm -r build",
     "test": "pnpm -r test",
     "typecheck": "pnpm -r typecheck",
-    "check-tokens": "node ../scripts/check-tokens.mjs"
+    "check-tokens": "node ../scripts/check-tokens.mjs",
+    "check-raw-buttons": "node ../scripts/check-raw-buttons.mjs",
+    "check-voice": "node ../scripts/check-voice.mjs"
   },
   "pnpm": {
     "overrides": {

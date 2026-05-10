@@ -79,4 +79,55 @@ describe('scripts/check-tokens.mjs', () => {
       unlinkSync(fixture);
     }
   });
+
+  // F-699 followup (#820, item 1): the CSS-side scan must flag bare
+  // `font-size: <N>px` and `line-height: <N>px` declarations. Component
+  // CSS should reach for the typography tokens (or `rem`) instead of
+  // hardcoded pixel sizes — those are the two declarations where px
+  // most often drifts, while `border-width: 1px` etc. are intentional.
+  it('exits non-zero when a non-allowlisted .css contains a raw font-size px', () => {
+    const fixture = resolve(
+      repoRoot,
+      'web/packages/app/src/__f699_rawfontsize_fixture__.css',
+    );
+    writeFileSync(fixture, '.x { font-size: 13px; }\n');
+    try {
+      const result = spawnSync('node', [script], { cwd: repoRoot, encoding: 'utf-8' });
+      expect(result.status).not.toBe(0);
+      expect(result.stderr + result.stdout).toMatch(/__f699_rawfontsize_fixture__\.css/);
+      expect(result.stderr + result.stdout).toMatch(/13px/);
+    } finally {
+      unlinkSync(fixture);
+    }
+  });
+
+  it('exits non-zero when a non-allowlisted .css contains a raw line-height px', () => {
+    const fixture = resolve(
+      repoRoot,
+      'web/packages/app/src/__f699_rawlineheight_fixture__.css',
+    );
+    writeFileSync(fixture, '.y { line-height: 20px; }\n');
+    try {
+      const result = spawnSync('node', [script], { cwd: repoRoot, encoding: 'utf-8' });
+      expect(result.status).not.toBe(0);
+      expect(result.stderr + result.stdout).toMatch(/__f699_rawlineheight_fixture__\.css/);
+      expect(result.stderr + result.stdout).toMatch(/20px/);
+    } finally {
+      unlinkSync(fixture);
+    }
+  });
+
+  it('does not flag border-width or margin px in CSS — only font-size / line-height', () => {
+    const fixture = resolve(
+      repoRoot,
+      'web/packages/app/src/__f699_borderpx_fixture__.css',
+    );
+    writeFileSync(fixture, '.z { border-width: 1px; margin-bottom: 4px; padding: 8px; }\n');
+    try {
+      const result = spawnSync('node', [script], { cwd: repoRoot, encoding: 'utf-8' });
+      expect(result.status).toBe(0);
+    } finally {
+      unlinkSync(fixture);
+    }
+  });
 });

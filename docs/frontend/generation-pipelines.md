@@ -47,16 +47,40 @@ updating both simultaneously.
 
 ---
 
-### Drafted sibling — raw-`<button>` check (F-398, disabled)
+### Sibling gates wired into `just check-web`
 
-`scripts/check-raw-buttons.mjs` mirrors the token-check pattern for raw
-`<button>` JSX under `web/packages/app/src/`. It is **not wired into
-`just check-web`** today because the primitives it steers toward
-(`Button` / `IconButton` / `Tab+Tabs` / `MenuItem` in `@forge/design`)
-ship in Phase 3. Activate it in the final migration PR per
-[`button-primitives-migration.md`](button-primitives-migration.md) §"Migration
-PRs — PR 4". Unit tests live at `scripts/check-raw-buttons.test.mjs` and run
-via `node scripts/check-raw-buttons.test.mjs`.
+Two more node-script gates run alongside `check-tokens.mjs`:
+
+- **`scripts/check-raw-buttons.mjs`** — forbids raw `<button>` JSX
+  outside `web/packages/design/`. Steers consumers to the design
+  primitives (`Button` / `IconButton` / `Tab+Tabs` / `MenuItem`).
+  Allowlist of row/card/popover sites lives in the script itself; new
+  sites should adopt a primitive instead of growing the list. Run
+  locally via `pnpm check-raw-buttons`. Unit tests:
+  `scripts/check-raw-buttons.test.mjs` (`node scripts/check-raw-buttons.test.mjs`).
+
+- **`scripts/check-voice.mjs`** (informational) — greps `.tsx` / `.md`
+  surfaces for vocabulary that conflicts with
+  [voice-terminology.md](../design/voice-terminology.md). Always exits
+  0 today — findings print to stdout for human triage. CI surfaces
+  them via a `continue-on-error` step. Promote to gating once the
+  corpus is clean. Run locally via `pnpm check-voice` or
+  `just check-voice`. Unit tests: `scripts/check-voice.test.mjs`
+  (`node scripts/check-voice.test.mjs`).
+
+### Local pre-commit hook (optional)
+
+A pre-commit hook at `.githooks/pre-commit` runs `check-tokens.mjs`
+when staged files include CSS or TSX under `web/`. Activate locally
+with:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+The hook is a developer-ergonomics shortcut — CI runs the same gate
+via `just check-web`, so opting out costs you a CI round-trip but
+nothing more.
 
 ---
 

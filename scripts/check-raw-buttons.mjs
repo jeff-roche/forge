@@ -1,21 +1,22 @@
 #!/usr/bin/env node
-// Raw-`<button>` drift check — DRAFTED, DISABLED (F-398).
+// Raw-`<button>` drift check — ACTIVE (F-699 follow-up #820, item 4).
 //
-// Purpose: once `@forge/design` ships `Button` / `IconButton` / `Tab+Tabs` /
-// `MenuItem` primitives (Phase 3), forbid raw `<button>` inside
-// `web/packages/app/src/` outside the allowlisted row/card-as-button sites.
+// Forbids raw `<button>` JSX inside `web/packages/app/src/` outside the
+// allowlisted row/card/popover sites where the content shape isn't cleanly
+// expressible through a `@forge/design` primitive (Button / IconButton /
+// Tab / MenuItem).
 //
-// State today: DRAFTED and NOT WIRED into CI. The primitives don't exist yet,
-// so activating this rule would fail the build against the existing 44 raw
-// sites. This file exists so the lint is committed and reviewable alongside
-// the migration plan; Phase-3 migration PR 4 (cleanup) flips the switch.
+// History: drafted disabled in F-398 alongside the migration plan; flipped
+// active in #820 once the Phase 3 primitives shipped. The allowlist tracks
+// the residual sites where a primitive doesn't fit yet — those are tracked
+// for migration in a sibling cleanup issue, not blocked by this rule.
 //
-// To activate in Phase 3:
-//   1. Delete or shrink the `ALLOWLIST` below to only true row/card-as-button
-//      files (rows 1, 14, 18, 19, 27 from the F-398 catalog).
-//   2. Add `node scripts/check-raw-buttons.mjs` to `justfile`'s `check-web`
-//      recipe, after `pnpm check-tokens`.
-//   3. Add a `pnpm check-raw-buttons` script to `web/package.json`.
+// Skips:
+//   - `.test.tsx` and `*.test.ts` files (tests legitimately reference
+//     raw `<button>` strings, e.g. asserting "this used to be a raw
+//     button and now isn't").
+//   - Files whose path matches an entry in `ALLOWLIST` (relative to
+//     `web/packages/app/src/`).
 //
 // Migration plan: `docs/frontend/button-primitives-migration.md`.
 // Tests:         `scripts/check-raw-buttons.test.mjs` (unit-tested on fixtures).
@@ -24,18 +25,25 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { relative, resolve } from 'node:path';
 
 // Allowlist of files that legitimately render a raw `<button>` because the
-// content shape (row, card, tree item) isn't cleanly expressible through a
-// primitive. Sourced from the F-398 catalog's row/card-as-button callout.
+// content shape (row, card, tree item, popover-internal action) isn't
+// cleanly expressible through a primitive yet. Migration to design
+// primitives is tracked in a sibling cleanup issue.
 //
 // Paths are relative to the repo root, using forward slashes.
 export const ALLOWLIST = [
-  'web/packages/app/src/shell/StatusBar.tsx',               // row 1 — bg-agent badge
-  'web/packages/app/src/components/BranchMetadataPopover.tsx', // row 14 — variant rows
-  'web/packages/app/src/routes/AgentMonitor.tsx',           // rows 18, 19 — agent row, trace step
-  'web/packages/app/src/routes/Dashboard/SessionsPanel.tsx', // row 27 — session card
+  'web/packages/app/src/shell/StatusBar.tsx',                  // bg-agent badge row
+  'web/packages/app/src/components/BranchMetadataPopover.tsx', // variant rows
+  'web/packages/app/src/routes/AgentMonitor.tsx',              // agent row + trace step
+  'web/packages/app/src/routes/Dashboard/SessionsPanel.tsx',   // session card
+  // F-699 follow-up #820 baseline — row/card/popover sites still
+  // pending design-primitive migration:
+  'web/packages/app/src/components/ContextChip.tsx',           // chip-internal retry
+  'web/packages/app/src/components/SubAgentBanner.tsx',        // state chip
+  'web/packages/app/src/components/SubAgentDetailsPopover.tsx',// popover footer action
+  'web/packages/app/src/routes/Session/ChatPane.tsx',          // tool-call card "show more"
 ];
 
-/** Recursively yield absolute paths of `.tsx` files under `dir`. */
+/** Recursively yield absolute paths of non-test `.tsx` files under `dir`. */
 function* walkTsx(dir) {
   let entries;
   try {
@@ -48,7 +56,11 @@ function* walkTsx(dir) {
     const full = resolve(dir, entry.name);
     if (entry.isDirectory()) {
       yield* walkTsx(full);
-    } else if (entry.isFile() && entry.name.endsWith('.tsx')) {
+    } else if (
+      entry.isFile() &&
+      entry.name.endsWith('.tsx') &&
+      !entry.name.endsWith('.test.tsx')
+    ) {
       yield full;
     }
   }
@@ -79,10 +91,16 @@ export function scanTsxSources({ root, allowlist = [] }) {
     const rel = relative(root, file).split('\\').join('/');
     if (suppressed.has(rel)) continue;
     const source = readFileSync(file, 'utf-8');
+    // Strip `//` line comments before scanning so prose mentions of
+    // `<button>` in comments aren't flagged. Block comments and string
+    // literals are out of scope for now — JSX `<button` inside a string
+    // literal is implausible and the rule has explicit unit-test
+    // coverage for the cases we care about.
+    const scanSource = source.replace(/^\s*\/\/.*$/gm, '');
     rawButton.lastIndex = 0;
     let m;
-    while ((m = rawButton.exec(source)) !== null) {
-      const upto = source.slice(0, m.index);
+    while ((m = rawButton.exec(scanSource)) !== null) {
+      const upto = scanSource.slice(0, m.index);
       const line = upto.split('\n').length;
       findings.push({ file: rel, line });
     }
