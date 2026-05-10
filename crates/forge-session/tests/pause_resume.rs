@@ -33,8 +33,12 @@ use tokio::time::{timeout, Duration};
 // continuation also emits one delta + Done. The pause checkpoint sits
 // between provider passes, so wedging a pause between the two passes is
 // the cleanest way to exercise the between-step contract.
+//
+// The tool call is `fs.write` (non-read-only) so the approval gate
+// actually fires when `auto_approve` is off — `fs.read` auto-approves
+// since issue #647 and would skip the gate the test depends on.
 const SCRIPT_FIRST: &str = r#"{"delta":"step one"}
-{"tool_call":{"name":"fs.read","args":{"path":"a.txt"}}}
+{"tool_call":{"name":"fs.write","args":{"path":"a.txt","content":"x"}}}
 {"done":"tool_use"}
 "#;
 
