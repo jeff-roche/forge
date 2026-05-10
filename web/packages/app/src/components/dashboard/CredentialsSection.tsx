@@ -316,6 +316,7 @@ const RotationConfirm: Component<RotationConfirmProps> = (props) => {
         role="dialog"
         aria-modal="true"
         aria-labelledby="credential-rotation-title"
+        aria-label="Replace stored credential"
       >
         <header class="credentials-section__modal-head">
           <h3 id="credential-rotation-title" class="credentials-section__modal-title">

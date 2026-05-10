@@ -62,6 +62,9 @@ export const ProvidersSection: Component = () => {
       .finally(() => setPendingId(null));
   };
 
+  // F-699: the error-detail line MUST carry the verbatim IPC error message
+  // so the user can match it against backend logs. Preserve `err.message`
+  // unmodified; only the literal `Error: ` prefix is added as a label.
   const errorDetail = () => {
     const err = snapshot.error;
     if (!err) return null;
@@ -69,6 +72,10 @@ export const ProvidersSection: Component = () => {
   };
 
   const [gridRef, setGridRef] = createSignal<HTMLDivElement | undefined>();
+  // F-699 verification: the `@forge/design` Tab primitive forwards the
+  // caller-supplied `class` onto the rendered <button>, so each card carries
+  // `forge-tab forge-tab--radio … provider-card` and the `.provider-card`
+  // selector below resolves cleanly. No wrapper class needed.
   useRovingTabindex(gridRef, '.provider-card');
 
   return (
@@ -152,9 +159,9 @@ const ProviderCard: Component<ProviderCardProps> = (props) => {
   const credentialNeeded = () => props.entry.credential_required && !props.entry.has_credential;
   const ariaLabel = () => {
     const parts = [`Select ${props.entry.display_name}`];
-    if (credentialNeeded()) parts.push('credential missing');
-    if (!props.entry.model_available) parts.push('unconfigured');
-    if (props.pending) parts.push('switching');
+    if (credentialNeeded()) parts.push('CREDENTIAL MISSING');
+    if (!props.entry.model_available) parts.push('UNCONFIGURED');
+    if (props.pending) parts.push('SWITCHING');
     return parts.join(', ');
   };
 

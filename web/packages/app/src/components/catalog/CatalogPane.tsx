@@ -363,7 +363,13 @@ export const CatalogPane: Component<CatalogPaneProps> = (props) => {
                     <Show
                       when={filteredRows().length > 0}
                       fallback={
-                        <div class="catalog__empty" data-empty-kind={kind.id} data-empty-reason="search">
+                        <div
+                          class="catalog__empty"
+                          data-empty-kind={kind.id}
+                          data-empty-reason="search"
+                          role="status"
+                          aria-live="polite"
+                        >
                           <p class="catalog__empty-title">No matches</p>
                           <p class="catalog__empty-hint">
                             Nothing in {kind.label} matches “{search()}”.

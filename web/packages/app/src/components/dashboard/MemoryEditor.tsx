@@ -93,6 +93,16 @@ export const MemoryEditor: Component<MemoryEditorProps> = (props) => {
 
   const useTextarea = () => props.useTextareaForTest === true;
 
+  // F-699: silent-fail on origin resolution failure is INTENTIONAL.
+  // Two scenarios reach the no-op branches below:
+  //   1. Test seams that pass `about:blank` or no src — the textarea path
+  //      drives saves, so the iframe channel is dormant and dropping the
+  //      message is correct.
+  //   2. Production with a malformed src — refusing to send is strictly
+  //      safer than falling back to a wildcard origin, which would defeat
+  //      the cross-origin contract Monaco's host page relies on.
+  // Do not surface a UI error here; failures in #1 are expected and #2 is
+  // a deploy-time misconfiguration, not a user-actionable runtime error.
   const postToIframe = (msg: unknown): void => {
     const win = iframeRef?.contentWindow;
     if (!win) return;
@@ -266,7 +276,7 @@ export const MemoryEditor: Component<MemoryEditorProps> = (props) => {
             role="status"
             data-testid="memory-editor-readonly"
           >
-            Memory is disabled for this agent — editor is read-only.
+            // memory disabled — read-only
           </div>
         </Show>
 

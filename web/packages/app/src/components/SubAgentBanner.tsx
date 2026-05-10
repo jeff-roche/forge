@@ -173,6 +173,7 @@ export const SubAgentBanner: Component<SubAgentBannerProps> = (props) => {
             data-state={props.turn.status}
             aria-haspopup="menu"
             aria-expanded={popoverOpen() ? 'true' : 'false'}
+            aria-label={`Sub-agent status: ${statusLabel(props.turn.status)} — open details`}
             onClick={onStateChipClick}
           >
             {statusLabel(props.turn.status)}

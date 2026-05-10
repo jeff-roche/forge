@@ -214,6 +214,10 @@ export const UsagePane: Component<UsagePaneProps> = (props) => {
             fallback={
               <section class="usage-pane__section" aria-label="Usage chart">
                 <p class="usage-pane__section-label">USAGE</p>
+                {/* F-699: the `//` prefix is intentional — Forge's terse
+                    "code-comment" voice for empty/transitional states (see
+                    `SubAgentBanner.tsx`'s "// no steps yet"). It carries the
+                    same low-key signal in a non-mono context. */}
                 <p class="usage-pane__empty">// no usage recorded for this range</p>
               </section>
             }

@@ -622,19 +622,19 @@ export function bannerDetail(status: RuntimeStatus): string {
     case 'available':
       return '';
     case 'missing':
-      return `Forge sessions will fall back to Level-1 isolation (cgroup + seccomp).`;
+      return `Sessions fall back to Level-1 isolation (cgroup + seccomp).`;
     case 'broken':
-      return `Sessions fall back to Level-1; the underlying error was: ${truncate(
+      return `Sessions fall back to Level-1; underlying error: ${truncate(
         status.reason,
         160,
       )}.`;
     case 'rootless_unavailable':
-      return `Rootless was probed and reported unavailable: ${truncate(
+      return `Probe reported rootless mode disabled: ${truncate(
         status.reason,
         160,
       )}.`;
     case 'unknown':
-      return `An unexpected error during probe: ${truncate(status.reason, 160)}.`;
+      return `Probe failed with an unexpected error: ${truncate(status.reason, 160)}.`;
   }
 }
 
