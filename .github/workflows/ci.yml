@@ -119,6 +119,12 @@ jobs:
           command: check
           arguments: --all-features
 
+      # Issue #624: ts-rs `#[ts(export)]` only fires during `cargo test`,
+      # so generated `web/packages/ipc/src/generated/*.ts` files can drift
+      # silently from Rust types. `just ts-check` regenerates the bindings
+      # (via the auto-generated `export_bindings_*` test cases) and then
+      # `git diff --exit-code` fails the job if the committed TS files
+      # don't match what ts-rs would emit from the current Rust sources.
       - name: Check TS bindings are up to date
         run: just ts-check
 

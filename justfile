@@ -119,10 +119,18 @@ test-web:
 # Both lanes.
 test: test-rust test-rust-serial test-rust-webview test-web
 
-# Verify generated TS bindings are in sync with Rust types. ts-rs emits the
-# TS files as a side effect of `cargo build` (see forge-core/src/ids.rs `ts`
-# attribute), so run `just build` first.
-ts-check:
+# Regenerate the TypeScript bindings from Rust types. ts-rs emits each
+# `#[ts(export)]` type to `web/packages/ipc/src/generated/` as a side effect
+# of the auto-generated `export_bindings_*` test cases — `cargo build` does
+# NOT trigger export, only `cargo test`. Run this after editing any Rust
+# type that derives `TS`, then commit the regenerated files.
+generate-ts:
+    cargo test --workspace --quiet --tests export_bindings_
+
+# Verify committed TS bindings match what ts-rs would regenerate from the
+# current Rust sources. Self-contained: regenerates first, then diffs. CI
+# wires this in as a drift gate — see .github/workflows/ci.yml.
+ts-check: generate-ts
     git diff --exit-code web/packages/ipc/src/generated/
 
 # Supply-chain audits. Local use only; CI uses dedicated actions for caching
