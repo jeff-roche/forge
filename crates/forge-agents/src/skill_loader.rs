@@ -24,13 +24,19 @@ use std::{collections::BTreeMap, fs, path::Path};
 use anyhow::Context;
 use forge_core::{Skill, SkillId, SkillIdError};
 use gray_matter::{engine::YAML, Matter, ParsedEntity};
-use serde::Deserialize;
+use serde::{de::IgnoredAny, Deserialize};
 
 use crate::error::{Error, Result};
 
 /// Filename Forge expects inside each `.skills/<name>/` folder.
 pub const SKILL_FILENAME: &str = "SKILL.md";
 
+/// YAML frontmatter shape for an agentskills.io `SKILL.md`.
+///
+/// `extra` collects every key not matched by the declared fields. Unknown
+/// fields are preserved (forward-compat with future agentskills.io revisions)
+/// but surfaced via `tracing::warn!` at load time so a typo like
+/// `vesion: 1.0` cannot silently take effect.
 #[derive(Deserialize, Default)]
 struct Frontmatter {
     name: Option<String>,
@@ -38,6 +44,8 @@ struct Frontmatter {
     description: Option<String>,
     #[serde(default)]
     tools: Vec<String>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, IgnoredAny>,
 }
 
 /// Parse one `SKILL.md` file into a [`Skill`].
@@ -125,6 +133,18 @@ pub fn parse_skill_file(path: &Path) -> Result<Skill> {
             )));
         }
     };
+    // Forward-compat: accept unknown fields silently from the loader's
+    // perspective, but emit a warn per key so a YAML typo (e.g.
+    // `desciption:` instead of `description:`) is observable in operator
+    // logs rather than silently swallowed.
+    for unknown in fm.extra.keys() {
+        tracing::warn!(
+            target: "forge_agents::skill_loader",
+            path = %path.display(),
+            unknown_field = %unknown,
+            "unknown frontmatter field; ignored (forward-compat) — verify it is not a typo",
+        );
+    }
     let name = fm.name.unwrap_or_else(|| id.as_str().to_string());
 
     Ok(Skill {

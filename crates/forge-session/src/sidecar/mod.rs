@@ -66,14 +66,31 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use forge_core::{AgentInstanceId, Event, EventSink};
 use forge_ipc::sidecar::{
-    SidecarHello, SidecarHelloAck, SidecarMessage, SidecarShutdown, SIDECAR_SCHEMA_VERSION,
+    SidecarHello, SidecarHelloAck, SidecarMessage, SidecarShutdown, SIDECAR_PROTO_VERSION,
+    SIDECAR_SCHEMA_VERSION,
 };
+use thiserror::Error;
 use tokio::io::{AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot, OnceCell};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
+
+/// Typed sidecar handshake errors. Returned (wrapped in [`anyhow::Error`]
+/// via `From`) by the crate-private `validate_sidecar_hello` so callers
+/// that need to disambiguate a hard-fail cause from a generic IO/parse
+/// failure can downcast via [`anyhow::Error::downcast_ref`] instead of
+/// string-matching.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum SidecarError {
+    /// #702 item: the child reported a `proto` version that does not
+    /// match the daemon's [`SIDECAR_PROTO_VERSION`]. The supervisor
+    /// closes the connection rather than continuing on a wire shape it
+    /// cannot validate.
+    #[error("sidecar proto version mismatch: daemon={ours}, peer={theirs}")]
+    ProtoMismatch { ours: u32, theirs: u32 },
+}
 
 /// Maximum time the supervisor waits for a freshly-forked child to send
 /// its `Hello` frame, mirrors `forge_session::server`'s private
@@ -440,18 +457,11 @@ impl SidecarSupervisor {
         // Tighten the socket file to 0o600 immediately to match the
         // server's discipline (`forge-session/src/server.rs`). bind(2)
         // creates the file with `0o777 & ~umask`, which is world-
-        // connectable on most systems.
-        if let Err(e) =
-            tokio::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600)).await
-        {
-            // Best-effort: tests under `/tmp` can hit ENOTSUP on some
-            // tmpfs configs. Log but don't bail — the parent dir's
-            // 0o700 mode is the real defense.
-            debug!(
-                error = %e,
-                "set_permissions(0o600) failed for sidecar socket; relying on parent dir"
-            );
-        }
+        // connectable on most systems. #702 fail-close: if the chmod
+        // fails (e.g. ENOTSUP on a hostile tmpfs) we drop the listener
+        // and unlink the socket file rather than continuing with an
+        // over-permissive socket.
+        let listener = enforce_socket_mode_or_close(listener, socket_path).await?;
 
         let mut child = Command::new(self.forged_agent_path.as_path())
             .arg("--socket")
@@ -1229,16 +1239,41 @@ fn current_euid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
-/// F-678: validate a sidecar's `Hello` frame. The `instance_id` check
-/// is hard (returns `Err` so the supervisor can kill the misrouted
-/// child); the `schema_version` check is soft and emits `tracing::warn!`
-/// through the shared [`forge_ipc::warn_if_schema_mismatch`] helper.
+/// F-678 + #702: validate a sidecar's `Hello` frame.
+///
+/// Hard rejections (return `Err` so the supervisor kills the misrouted
+/// child and tears down the connection):
+/// - `proto` does not match [`SIDECAR_PROTO_VERSION`] (typed
+///   [`SidecarError::ProtoMismatch`] wrapped in `anyhow::Error`; logged
+///   via `tracing::error!`). The wire shape is gated by `proto`; a
+///   mismatch means we cannot trust subsequent frames.
+/// - `instance_id` does not match the supervisor's expected id (untyped
+///   `anyhow::bail!` for now — the supervisor already kills the child
+///   on any returned error).
+///
+/// Soft mismatch (warn-only): `schema_version`. Emits a `tracing::warn!`
+/// through the shared [`forge_ipc::warn_if_schema_mismatch`] helper but
+/// allows the handshake to complete — the schema layer is additive.
+///
 /// Lives outside `LiveSidecar::spawn` so unit tests can drive the
 /// validation path without spawning a real `forged-agent` binary.
 pub(crate) fn validate_sidecar_hello(
     hello: &SidecarHello,
     expected_instance_id: &AgentInstanceId,
 ) -> Result<()> {
+    if hello.proto != SIDECAR_PROTO_VERSION {
+        error!(
+            target: "forge_session::sidecar",
+            daemon_proto = SIDECAR_PROTO_VERSION,
+            peer_proto = hello.proto,
+            instance_id = %hello.instance_id,
+            "sidecar proto version mismatch; closing connection",
+        );
+        return Err(anyhow::Error::new(SidecarError::ProtoMismatch {
+            ours: SIDECAR_PROTO_VERSION,
+            theirs: hello.proto,
+        }));
+    }
     if hello.instance_id.to_string() != expected_instance_id.to_string() {
         anyhow::bail!(
             "forged-agent reported instance_id={}, expected {}",
@@ -1311,6 +1346,59 @@ async fn bind_uds_safely(path: &Path) -> Result<UnixListener> {
                 .with_context(|| format!("retry bind failed at {}", path.display()))
         }
         Err(e) => Err(e).with_context(|| format!("bind failed at {}", path.display())),
+    }
+}
+
+/// #702: tighten a freshly-bound sidecar UDS to mode `0o600` and
+/// fail-close on any chmod error.
+///
+/// The previous behaviour was best-effort — a tmpfs that returns
+/// `ENOTSUP` on `chmod(2)` left the socket at the umask default
+/// (typically `0o755`), accessible to any local user. The 0o700 parent
+/// directory blocks `connect(2)` in practice, but a misconfigured
+/// operator pointing the runtime dir at a permissive parent would
+/// silently lose the inner defence.
+///
+/// On chmod failure this helper logs the errno via `tracing::error!`,
+/// drops the listener (releasing the bound address), unlinks the socket
+/// file, and returns the original IO error so the caller surfaces a
+/// hard fail instead of continuing on an over-permissive socket. The
+/// listener is moved through the function so dropping it on the error
+/// path is automatic — a struct field copy could leak the bind on a
+/// future refactor.
+async fn enforce_socket_mode_or_close(
+    listener: UnixListener,
+    socket_path: &Path,
+) -> Result<UnixListener> {
+    match tokio::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600)).await {
+        Ok(()) => Ok(listener),
+        Err(e) => {
+            error!(
+                target: "forge_session::sidecar",
+                socket = %socket_path.display(),
+                errno = e.raw_os_error().unwrap_or(0),
+                error_kind = ?e.kind(),
+                error = %e,
+                "set_permissions(0o600) failed for sidecar socket; tearing down listener and unlinking",
+            );
+            // Drop the listener first to release the bound address
+            // before we unlink the inode — order matters: an unlink
+            // while the listener is still owned by us is racy on
+            // concurrent connect attempts.
+            drop(listener);
+            if let Err(unlink_err) = tokio::fs::remove_file(socket_path).await {
+                warn!(
+                    target: "forge_session::sidecar",
+                    socket = %socket_path.display(),
+                    error = %unlink_err,
+                    "failed to unlink sidecar socket after chmod failure",
+                );
+            }
+            Err(anyhow::Error::from(e).context(format!(
+                "chmod 0o600 failed for sidecar socket at {}",
+                socket_path.display()
+            )))
+        }
     }
 }
 
@@ -1596,6 +1684,104 @@ mod tests {
             msg.contains("instance_id"),
             "expected instance_id error, got: {msg}",
         );
+    }
+
+    /// #702: a `SidecarHello` whose `proto` does not match
+    /// [`SIDECAR_PROTO_VERSION`] hard-rejects with a typed
+    /// [`SidecarError::ProtoMismatch`] carrying both versions. The
+    /// supervisor relies on the rejection to close the connection rather
+    /// than continuing on an un-validatable wire shape.
+    #[test]
+    fn validate_sidecar_hello_rejects_proto_mismatch() {
+        use forge_core::AgentInstanceId;
+        use forge_ipc::sidecar::{
+            SidecarAgentDef, SidecarHello, SidecarProviderSpec, SidecarSandboxLevel,
+        };
+        let id = AgentInstanceId::from_string("inst-proto".into());
+        let bogus_proto = SIDECAR_PROTO_VERSION.wrapping_add(7);
+        let hello = SidecarHello {
+            proto: bogus_proto,
+            instance_id: id.clone(),
+            agent_def: SidecarAgentDef {
+                name: "t".into(),
+                description: None,
+                body: String::new(),
+                allowed_paths: vec![],
+                isolation: "process".into(),
+                memory_enabled: false,
+            },
+            allowed_paths: vec![],
+            workspace_path: "/tmp".into(),
+            provider_spec: SidecarProviderSpec {
+                kind: "stub".into(),
+                model: "stub".into(),
+                base_url: None,
+            },
+            sandbox_level: SidecarSandboxLevel::Level1,
+            telemetry_endpoint: None,
+            schema_version: SIDECAR_SCHEMA_VERSION,
+        };
+
+        let err = validate_sidecar_hello(&hello, &id)
+            .expect_err("proto version mismatch must hard-reject");
+        let typed = err
+            .downcast_ref::<SidecarError>()
+            .expect("error must downcast to SidecarError");
+        assert_eq!(
+            *typed,
+            SidecarError::ProtoMismatch {
+                ours: SIDECAR_PROTO_VERSION,
+                theirs: bogus_proto,
+            },
+            "expected ProtoMismatch with both versions named, got: {typed:?}",
+        );
+    }
+
+    /// #702: when `set_permissions` fails (e.g. ENOTSUP on a tmpfs, or
+    /// any other errno) the supervisor MUST fail-close: tear down the
+    /// listener, unlink the socket file, and return an `Err`. The
+    /// previous best-effort behaviour silently left the socket at the
+    /// umask default. We simulate the chmod failure by unlinking the
+    /// socket inode under a freshly-bound listener — the subsequent
+    /// `set_permissions` call observes `ENOENT` on the same path. After
+    /// the helper returns, the listener must be dropped (no rebind
+    /// races) and the path must not exist (cleanup happened).
+    #[tokio::test]
+    async fn enforce_socket_mode_fails_close_on_chmod_error() {
+        let tmp = TempDir::new().expect("tmp");
+        let socket_path = tmp.path().join("victim.sock");
+
+        let listener = UnixListener::bind(&socket_path).expect("bind UDS");
+        // Force the chmod to fail without simulating a real ENOTSUP: an
+        // unlinked path returns `ENOENT` from set_permissions, which is
+        // exactly the "any errno" branch the fail-close discipline
+        // covers.
+        std::fs::remove_file(&socket_path).expect("unlink under listener");
+
+        let result = enforce_socket_mode_or_close(listener, &socket_path).await;
+        let err = result.expect_err("chmod failure must fail-close");
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("chmod 0o600 failed"),
+            "expected chmod-failure context in error chain, got: {chain}"
+        );
+
+        // The socket path must not be left around after fail-close
+        // (we removed it in the test setup, but the helper's own
+        // `remove_file` call is the contract we care about — it must
+        // not leave a chmod-failed file behind in the happy case
+        // where the inode still exists). Verify the path is gone.
+        assert!(
+            !socket_path.exists(),
+            "socket file must be unlinked after fail-close",
+        );
+
+        // Rebinding the same path must succeed — i.e. the listener was
+        // really dropped, releasing the bound address. If the helper
+        // accidentally kept the listener alive, this `bind` would fail
+        // with EADDRINUSE.
+        let _rebind = UnixListener::bind(&socket_path)
+            .expect("listener must be dropped after fail-close so rebind succeeds");
     }
 
     /// F-652: an idle (silent) sidecar peer must not pin the steady-

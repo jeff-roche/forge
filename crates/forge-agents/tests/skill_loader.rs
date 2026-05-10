@@ -2,6 +2,8 @@ use forge_agents::{load_skills, load_user_skills, load_workspace_skills, parse_s
 use std::fs;
 use tempfile::tempdir;
 
+mod common;
+
 fn write_skill(scope_root: &std::path::Path, id: &str, body: &str) {
     let dir = scope_root.join(".skills").join(id);
     fs::create_dir_all(&dir).unwrap();
@@ -250,6 +252,42 @@ fn body_only_skill_still_loads() {
     assert_eq!(skills[0].id.as_str(), "body-only");
     assert_eq!(skills[0].name, "body-only");
     assert!(skills[0].prompt.contains("Just a body"));
+}
+
+#[test]
+fn unknown_frontmatter_field_loads_and_emits_warn() {
+    // #702: forward-compat preserves silent acceptance — a YAML typo like
+    // `unkown_field: foo` MUST NOT fail the load (future agentskills.io
+    // revisions may add fields we don't recognize yet) — but the loader
+    // MUST emit a `tracing::warn!` naming the unknown key so an operator
+    // can spot the typo in logs.
+    let _guard = common::capture_test_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    common::install_capture_subscriber();
+    let _ = common::drain_capture();
+
+    let workspace = tempdir().unwrap();
+    write_skill(
+        workspace.path(),
+        "future",
+        "---\nname: Future\nunkown_field: foo\n---\n\nBody.",
+    );
+
+    let skills = load_workspace_skills(workspace.path())
+        .expect("unknown fields must not break the load (forward-compat)");
+    assert_eq!(skills.len(), 1, "load must succeed despite unknown field");
+    assert_eq!(skills[0].name, "Future");
+
+    let logs = common::drain_capture();
+    assert!(
+        logs.contains("WARN") && logs.contains("forge_agents::skill_loader"),
+        "unknown-field warn must surface under forge_agents::skill_loader, got: {logs}"
+    );
+    assert!(
+        logs.contains("unkown_field"),
+        "warn must name the unknown key (got: {logs})"
+    );
 }
 
 #[test]
