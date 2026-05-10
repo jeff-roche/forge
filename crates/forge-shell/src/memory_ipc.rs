@@ -18,6 +18,21 @@
 //! The same store the F-601 `memory.write` tool uses, so an agent and a
 //! human editing the same file see consistent results.
 //!
+//! # Workspace-root validation invariant (F-349)
+//!
+//! Every command body that accepts a webview-supplied `workspace_root`
+//! parameter MUST call `crate::ipc::resolve_workspace_root_for_command`
+//! **before** any filesystem operation that uses the path. The resolver
+//! ignores the webview-supplied value for `session-*` callers (consults
+//! the server-side cache populated at `session_hello` time) and validates
+//! the value against the workspaces registry for `dashboard` callers.
+//! Skipping the call — or running an `fs::read` / `fs::write` against
+//! the raw `workspace_root` before the resolver returns — re-opens the
+//! F-122 trust hole: a compromised `session-*` webview could supply any
+//! writable path and the command would happily honour it. The resolver
+//! is the only sanctioned trust boundary; everything downstream must use
+//! its returned `PathBuf`.
+//!
 //! # Authorization
 //!
 //! Every command requires the dashboard window label. A session window

@@ -12,6 +12,20 @@
 //! `session-{id}` window. Other session windows are rejected — a
 //! session-A webview has no business reading session-B's transcript.
 //!
+//! # Workspace-root validation invariant (F-349)
+//!
+//! `export_transcript` accepts a webview-supplied `workspace_root` and
+//! MUST call `crate::ipc::resolve_workspace_root_for_command` before
+//! any filesystem operation that uses the path. The resolver ignores
+//! the supplied value for `session-*` callers (consulting the
+//! server-side cache populated at `session_hello`) and validates it
+//! against the workspaces registry for `dashboard` callers. Reading
+//! the raw `workspace_root` before the resolver returns re-opens the
+//! F-122 trust hole — a compromised webview could exfiltrate any
+//! `events.jsonl` it could path-construct. Every downstream `events.jsonl`
+//! lookup must use the resolver's returned `PathBuf`, never the
+//! webview value directly.
+//!
 //! # Path safety
 //!
 //! `session_id` is validated against the canonical
