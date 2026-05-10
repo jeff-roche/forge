@@ -982,12 +982,29 @@ impl SupervisorTask {
                 }
                 None
             }
-            SidecarMessage::Heartbeat(_) => {
+            SidecarMessage::Heartbeat(hb) => {
                 // F-608 step 4: heartbeat-watchdog deferred — the
                 // EOF-on-read path catches an unresponsive child via
                 // its TCP-style RST. A 5-second silence watchdog lands
                 // when we wire ResourceMonitor to surface stuck
                 // sidecars in step 9.
+                //
+                // F-682: surface `pending_turns > 0` at trace level so
+                // a stuck-mid-turn sidecar is visible in triage. Trace
+                // (not warn or debug) because heartbeats fire at 1 Hz
+                // and `pending_turns > 0` is the *normal* state for
+                // the entire duration of every turn — anything louder
+                // would drown the log. Operators who suspect a stuck
+                // child enable `RUST_LOG=forge_session::sidecar=trace`
+                // and read the per-second cadence to confirm.
+                if hb.pending_turns > 0 {
+                    tracing::trace!(
+                        target: "forge_session::sidecar",
+                        instance_id = %self.instance_id,
+                        pending_turns = hb.pending_turns,
+                        "sidecar heartbeat: turn in flight"
+                    );
+                }
                 None
             }
             SidecarMessage::ToolCallApprovalRequest(_) => {
