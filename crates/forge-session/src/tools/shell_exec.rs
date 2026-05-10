@@ -188,10 +188,12 @@ async fn run_linux(args: &serde_json::Value, ctx: &ToolCtx) -> serde_json::Value
     sb.command_mut().stdin(std::process::Stdio::null());
 
     if let Some(env_obj) = args.get("env").and_then(|v| v.as_object()) {
-        for (k, v) in env_obj {
-            if let Some(val) = v.as_str() {
-                sb.allow_env(k, val);
-            }
+        let pairs = match validate_env(env_obj) {
+            Ok(pairs) => pairs,
+            Err(e) => return serde_json::json!({ "error": e }),
+        };
+        for (k, v) in pairs {
+            sb.allow_env(k, v);
         }
     }
 
@@ -269,4 +271,83 @@ async fn run_linux(args: &serde_json::Value, ctx: &ToolCtx) -> serde_json::Value
     // killpg on an already-reaped pgid returns ESRCH) and on timeout
     // (drop sends SIGKILL to the pgid and removes it from the registry).
     result
+}
+
+/// Reject any env key or value containing an embedded NUL byte (`\0`).
+///
+/// POSIX `execve` terminates `argv` / `envp` entries at the first NUL, so a
+/// caller-supplied env value carrying an embedded `\0` would silently truncate
+/// the child's view of that variable — a confused-deputy primitive against
+/// downstream tools that read process env. Fail loud with the offending
+/// variable name; do not silently strip.
+///
+/// Returns the validated `(key, value)` pairs in the input's iteration order
+/// so the caller can forward them to `allow_env` without re-parsing.
+pub(crate) fn validate_env(
+    env_obj: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Vec<(&str, &str)>, String> {
+    let mut pairs = Vec::with_capacity(env_obj.len());
+    for (k, v) in env_obj {
+        if k.contains('\0') {
+            return Err(format!("shell.exec: env key contains NUL byte: {k:?}"));
+        }
+        let Some(val) = v.as_str() else { continue };
+        if val.contains('\0') {
+            return Err(format!("shell.exec: env value for '{k}' contains NUL byte"));
+        }
+        pairs.push((k.as_str(), val));
+    }
+    Ok(pairs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_env;
+    use serde_json::json;
+
+    fn env_map(v: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+        v.as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn rejects_nul_in_env_value() {
+        let env = env_map(json!({ "FOO": "ba\0r" }));
+        let err = validate_env(&env).unwrap_err();
+        assert!(
+            err.contains("NUL") && err.contains("FOO"),
+            "error must name the offending variable: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_nul_in_env_key() {
+        let mut env = serde_json::Map::new();
+        env.insert("BA\0D".to_string(), json!("ok"));
+        let err = validate_env(&env).unwrap_err();
+        assert!(err.contains("NUL"), "error must mention NUL: {err}");
+        assert!(err.contains("key"), "error must say the key is bad: {err}");
+    }
+
+    #[test]
+    fn accepts_clean_env() {
+        let env = env_map(json!({ "FOO": "bar", "BAZ": "qux" }));
+        let pairs = validate_env(&env).expect("clean env must pass");
+        assert_eq!(pairs.len(), 2);
+        for (k, v) in pairs {
+            assert!(matches!(k, "FOO" | "BAZ"));
+            assert!(matches!(v, "bar" | "qux"));
+        }
+    }
+
+    #[test]
+    fn skips_non_string_values_without_failing() {
+        // Pre-existing contract: non-string values are silently ignored (the
+        // old loop did `if let Some(val) = v.as_str()`). Preserve that —
+        // NUL validation only applies to the values we would actually
+        // forward.
+        let env = env_map(json!({ "FOO": "bar", "N": 42 }));
+        let pairs = validate_env(&env).expect("non-string values must be skipped");
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0], ("FOO", "bar"));
+    }
 }

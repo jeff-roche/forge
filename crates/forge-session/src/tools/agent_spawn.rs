@@ -31,7 +31,7 @@
 use std::sync::Arc;
 
 use super::{get_required_str, Tool, ToolCtx};
-use forge_agents::{AgentDef, AgentScope, SpawnContext};
+use forge_agents::{validate_agent_name, AgentDef, AgentScope, SpawnContext};
 use forge_core::{ApprovalPreview, Event};
 
 pub struct AgentSpawnTool;
@@ -58,6 +58,19 @@ impl Tool for AgentSpawnTool {
             Ok(s) => s.to_owned(),
             Err(e) => return serde_json::json!({ "error": e.to_string() }),
         };
+        // Length cap + charset gate. `forge_agents::validate_agent_name` is
+        // the canonical rule used at parse time for `.agents/*.md` stems —
+        // reusing it here keeps the IPC entry point and the on-disk loader
+        // in lockstep (64-byte cap, ASCII alphanumeric + `_`/`-`, no path
+        // separators, no leading `.`, no whitespace). A name that the
+        // loader would reject must also be rejected at spawn time so a
+        // forged provider call cannot drive a hostile resolve against
+        // `resolve_def`.
+        if let Err(e) = validate_agent_name(&agent_name) {
+            return serde_json::json!({
+                "error": format!("tool.{}: invalid agent_name: {}", Self::NAME, e),
+            });
+        }
         // F-137 follow-up to F-134: forward `prompt` through `SpawnContext`
         // onto the registered child instance so a step-executor can seed the
         // child's first user turn with the parent's input. Pre-F-137 the arg
@@ -565,5 +578,115 @@ mod tests {
             err,
             crate::tools::ToolError::DuplicateName(ref n) if n == "agent.spawn"
         ));
+    }
+
+    #[tokio::test]
+    async fn rejects_oversized_agent_name() {
+        // `validate_agent_name` caps at 64 bytes. 65 should fail loud rather
+        // than reach `resolve_def` and silently miss.
+        let oversized = "a".repeat(forge_agents::MAX_AGENT_NAME_BYTES + 1);
+
+        let mut d = ToolDispatcher::new();
+        d.register(Box::new(AgentSpawnTool)).unwrap();
+
+        let result = d
+            .dispatch(
+                "agent.spawn",
+                &json!({ "agent_name": oversized, "prompt": "hi" }),
+                &ToolCtx::default(),
+            )
+            .await
+            .unwrap();
+
+        let err = result["error"].as_str().unwrap_or_default();
+        assert!(
+            err.contains("invalid agent_name") && err.contains("too large"),
+            "expected size-cap rejection, got: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_agent_name_with_forbidden_chars() {
+        // Path separators, '..', leading '.', and arbitrary punctuation must
+        // all be rejected at the tool entry point, mirroring the parse-time
+        // rule for `.agents/*.md` stems.
+        let bad_names = [
+            "../escape",
+            "child/sub",
+            "child\\sub",
+            ".hidden",
+            "name!",
+            "naïve", // non-ASCII
+        ];
+
+        let mut d = ToolDispatcher::new();
+        d.register(Box::new(AgentSpawnTool)).unwrap();
+
+        for bad in bad_names {
+            let result = d
+                .dispatch(
+                    "agent.spawn",
+                    &json!({ "agent_name": bad, "prompt": "hi" }),
+                    &ToolCtx::default(),
+                )
+                .await
+                .unwrap();
+            let err = result["error"].as_str().unwrap_or_default();
+            assert!(
+                err.contains("invalid agent_name"),
+                "must reject {bad:?}, got: {result}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_agent_name_with_whitespace() {
+        let bad_names = [" leading", "trailing ", "mid space", "tab\tname"];
+
+        let mut d = ToolDispatcher::new();
+        d.register(Box::new(AgentSpawnTool)).unwrap();
+
+        for bad in bad_names {
+            let result = d
+                .dispatch(
+                    "agent.spawn",
+                    &json!({ "agent_name": bad, "prompt": "hi" }),
+                    &ToolCtx::default(),
+                )
+                .await
+                .unwrap();
+            let err = result["error"].as_str().unwrap_or_default();
+            assert!(
+                err.contains("invalid agent_name") && err.contains("whitespace"),
+                "must reject whitespace in {bad:?}, got: {result}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn accepts_valid_agent_name() {
+        // A well-formed name must pass the validator and fall through to the
+        // "agent runtime not configured" branch (since no ctx is wired in).
+        // Asserting that branch fires proves the validator didn't misfire.
+        let mut d = ToolDispatcher::new();
+        d.register(Box::new(AgentSpawnTool)).unwrap();
+
+        for ok in ["child", "code-reviewer", "agent_42", "Aa-Bb_99"] {
+            let result = d
+                .dispatch(
+                    "agent.spawn",
+                    &json!({ "agent_name": ok, "prompt": "hi" }),
+                    &ToolCtx::default(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                result["error"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("agent runtime not configured"),
+                "valid agent_name {ok:?} must not trip the validator; got: {result}"
+            );
+        }
     }
 }
