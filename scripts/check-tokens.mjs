@@ -40,7 +40,6 @@ const cssScanRoots = [
 // ship the gate without an unrelated style migration. Do NOT add new
 // entries — fix the violation instead, or use a typography token.
 const cssTypographyAllowlist = new Set([
-  'web/packages/app/src/commands/CommandPalette.css',
   'web/packages/app/src/components/ApprovalPrompt/ApprovalPrompt.css',
   'web/packages/app/src/components/ApprovalPrompt/WhitelistedPill.css',
   'web/packages/app/src/components/BranchMetadataPopover.css',
@@ -66,9 +65,6 @@ const cssTypographyAllowlist = new Set([
   'web/packages/app/src/routes/Session/CompactButton.css',
   'web/packages/app/src/routes/Session/PaneHeader.css',
   'web/packages/app/src/routes/Session/SessionWindow.css',
-  'web/packages/app/src/shell/FilesSidebar.css',
-  'web/packages/app/src/shell/StatusBar.css',
-  'web/packages/design/src/components/forge-button.css',
 ]);
 
 /**

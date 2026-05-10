@@ -29,7 +29,7 @@
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.1em;
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   line-height: 1;
   cursor: pointer;
   transition: var(--ease);
@@ -53,12 +53,12 @@
 
 .forge-button--sm {
   padding: 0 var(--sp-2);
-  font-size: 10px;
+  font-size: var(--type-mono-xxs);
 }
 
 .forge-button--md {
   padding: var(--sp-1) var(--sp-3);
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
 }
 
 /* Primary — the most important action; one per view. */
@@ -128,7 +128,7 @@
   border: 1px solid currentColor;
   border-radius: 2px;
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: var(--type-mono-xs);
   opacity: 0.6;
   line-height: 1.4;
 }
@@ -218,7 +218,7 @@
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.1em;
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   line-height: 1;
   color: var(--color-text-secondary);
   cursor: pointer;
@@ -251,7 +251,7 @@
   display: inline-block;
   padding: 0 var(--sp-1);
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: var(--type-mono-xs);
   color: var(--color-text-tertiary);
 }
 
@@ -278,7 +278,7 @@
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.1em;
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   color: var(--color-text-primary);
   cursor: pointer;
   text-align: left;
@@ -313,7 +313,7 @@
 
 .forge-menu-item__leading {
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: var(--type-mono-xs);
   color: var(--color-text-tertiary);
   margin-right: var(--sp-2);
 }
@@ -324,7 +324,7 @@
   border: 1px solid currentColor;
   border-radius: 2px;
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: var(--type-mono-xs);
   opacity: 0.6;
   line-height: 1.4;
   margin-left: var(--sp-2);
