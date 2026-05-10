@@ -8,10 +8,11 @@
  *   .forge-tab           — tab inside a tablist (or radio inside a radiogroup)
  *   .forge-menu-item     — row inside a role="menu" container
  *
- * Spec: docs/design/component-principles.md §Buttons. All primitives are
- * Barlow Condensed 700, uppercase, letter-spacing 0.1em; the active state
- * always includes `transform: translateY(1px)`. Disabled buttons render with
- * the iron-600 background — never opacity.
+ * Spec: DESIGN.md §Components / docs/design/component-principles.md §Buttons.
+ * All primitives are Barlow Condensed 700, uppercase, letter-spacing 0.1em;
+ * the active state always includes `transform: translateY(1px)`. Disabled
+ * buttons render with iron-700 background and text-secondary foreground —
+ * muted but readable, never via opacity.
  * ------------------------------------------------------------------------- */
 
 /* =============================================================================
@@ -46,9 +47,9 @@
 .forge-button:disabled,
 .forge-button[aria-disabled='true'] {
   cursor: default;
-  background: var(--color-border-2);
-  border-color: var(--color-border-2);
-  color: var(--color-text-disabled);
+  background: var(--color-border-1);
+  border-color: var(--color-border-1);
+  color: var(--color-text-secondary);
 }
 
 .forge-button--sm {
@@ -61,21 +62,24 @@
   font-size: var(--type-mono-sm);
 }
 
-/* Primary — the most important action; one per view. */
+/* Primary — the most important action; one per view.
+ * Text locked to text-inverted (#fff) across default/hover/active. On
+ * Ember 400 this lands at 3.37:1 — same brand-exception ratio as the
+ * status bar. See DESIGN.md §Components for rationale. */
 .forge-button--primary {
   background: var(--color-ember-400);
   border-color: var(--color-ember-400);
-  color: var(--color-text-primary);
+  color: var(--color-text-inverted);
 }
 
 .forge-button--primary:hover:not(:disabled):not([aria-disabled='true']) {
-  background: var(--color-ember-300);
-  border-color: var(--color-ember-300);
+  background: var(--color-ember-500);
+  border-color: var(--color-ember-500);
 }
 
 .forge-button--primary:active:not(:disabled):not([aria-disabled='true']) {
-  background: var(--color-ember-500);
-  border-color: var(--color-ember-500);
+  background: var(--color-ember-600);
+  border-color: var(--color-ember-600);
   transform: translateY(1px);
 }
 
