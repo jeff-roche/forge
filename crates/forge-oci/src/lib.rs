@@ -9,6 +9,22 @@
 //! agent execution model — including the supply-chain story (digest pinning
 //! and signature verification) that [`ImageRef`] and
 //! [`signature::SignatureVerifier`] enforce.
+//!
+//! ## Cargo features
+//!
+//! - `test-support` *(off by default)* — re-exports the `RecordingRunner`
+//!   mock-runner toolkit (`RecordingRunner`, `StubResponse`, `RecordedCalls`,
+//!   `RecordedCall`) so downstream crates can drive
+//!   [`PodmanRuntime::with_runner`] from their own tests without spawning a
+//!   real `podman`. Production builds leave this off so the published API
+//!   surface stays focused on the runtime types.
+//!
+//!   Enable from a downstream crate's `Cargo.toml`:
+//!
+//!   ```toml
+//!   [dev-dependencies]
+//!   forge-oci = { path = "../forge-oci", features = ["test-support"] }
+//!   ```
 
 #![deny(missing_docs)]
 
@@ -17,10 +33,9 @@ mod runner;
 pub mod signature;
 
 pub use podman::PodmanRuntime;
-pub use runner::{
-    CommandOutcome, CommandRunner, RecordedCall, RecordedCalls, RecordingRunner, StubResponse,
-    TokioCommandRunner,
-};
+pub use runner::{CommandOutcome, CommandRunner, TokioCommandRunner};
+#[cfg(any(test, feature = "test-support"))]
+pub use runner::{RecordedCall, RecordedCalls, RecordingRunner, StubResponse};
 pub use signature::{
     CosignVerifier, NoopVerifier, SignaturePolicy, SignatureVerifier, VerificationError,
 };

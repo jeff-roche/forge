@@ -2,12 +2,15 @@
 //! can be unit-tested without an actual `podman` binary on the host.
 //!
 //! Production wiring uses [`TokioCommandRunner`]; tests use
-//! [`RecordingRunner`] (or any custom `CommandRunner`) to capture argv arrays
-//! and stub responses.
+//! `RecordingRunner` (or any custom `CommandRunner`) to capture argv arrays
+//! and stub responses. The mock toolkit (`RecordingRunner`, `StubResponse`,
+//! `RecordedCalls`, `RecordedCall`) is gated behind the `test-support`
+//! feature flag so downstream crates only see it in their dev builds.
 //!
 //! [`PodmanRuntime`]: crate::PodmanRuntime
 
 use async_trait::async_trait;
+#[cfg(any(test, feature = "test-support"))]
 use std::sync::{Arc, Mutex};
 use tokio::process::Command;
 
@@ -55,7 +58,16 @@ impl CommandRunner for TokioCommandRunner {
     }
 }
 
+// ── Test-only mock toolkit ─────────────────────────────────────────────
+//
+// Gated on `cfg(any(test, feature = "test-support"))` so the published
+// API surface of `forge-oci` (default features) carries only the
+// production runner. Downstream crates that drive
+// `PodmanRuntime::with_runner` from their own tests opt in via
+// `forge-oci = { ..., features = ["test-support"] }`.
+
 /// One pre-canned response for a [`RecordingRunner`].
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Clone)]
 pub struct StubResponse {
     /// Optional argv-prefix the call must match. `None` matches anything.
@@ -64,6 +76,7 @@ pub struct StubResponse {
     pub outcome: CommandOutcome,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl StubResponse {
     /// Always-successful stdout response, regardless of argv.
     pub fn ok_stdout(stdout: impl Into<Vec<u8>>) -> Self {
@@ -91,9 +104,11 @@ impl StubResponse {
 }
 
 /// One recorded invocation: the program name and the argv it was called with.
+#[cfg(any(test, feature = "test-support"))]
 pub type RecordedCall = (String, Vec<String>);
 
 /// Shared, mutex-guarded log of every call a [`RecordingRunner`] has seen.
+#[cfg(any(test, feature = "test-support"))]
 pub type RecordedCalls = Arc<Mutex<Vec<RecordedCall>>>;
 
 /// Test-only runner that records every invocation and returns canned
@@ -103,6 +118,7 @@ pub type RecordedCalls = Arc<Mutex<Vec<RecordedCall>>>;
 /// - Each `run` call pops the front of the configured response queue.
 /// - If the queue is empty, returns a successful empty outcome.
 /// - Every call (program, argv) is recorded for later assertion.
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Default, Clone)]
 pub struct RecordingRunner {
     responses: Arc<Mutex<std::collections::VecDeque<StubResponse>>>,
@@ -111,6 +127,7 @@ pub struct RecordingRunner {
     pub calls: RecordedCalls,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl RecordingRunner {
     /// Empty runner — every call returns an empty success outcome.
     pub fn new() -> Self {
@@ -128,6 +145,7 @@ impl RecordingRunner {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 #[async_trait]
 impl CommandRunner for RecordingRunner {
     async fn run(&self, program: &str, args: &[&str]) -> std::io::Result<CommandOutcome> {

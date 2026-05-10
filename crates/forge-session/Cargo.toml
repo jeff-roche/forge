@@ -75,6 +75,11 @@ async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support", "async_tokio"] }
 forge-cli = { path = "../forge-cli" }
+# F-626: the level2 sandbox tests drive `PodmanRuntime::with_runner`
+# through forge-oci's mock-runner toolkit. Cargo unifies dev-dep
+# features additively into test/bench builds only, so the production
+# library build still sees the lean default-features API surface.
+forge-oci = { path = "../forge-oci", features = ["test-support"] }
 # F-586: enable the `RuntimeProvider::Mock` variant for the
 # `provider_swap` integration test. Production binaries leave this off.
 forge-providers = { path = "../forge-providers", features = ["testing"] }
