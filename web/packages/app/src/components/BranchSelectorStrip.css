@@ -15,7 +15,7 @@
   background: var(--color-surface-2, #13161d);
   color: var(--color-text-secondary, #6a7e98);
   border-radius: 2px;
-  font-size: 11px;
+  font-size: var(--type-mono-sm);
   line-height: 1;
   gap: 4px;
   /* Focus outline uses the brand ember on keyboard focus only; matches the
@@ -34,7 +34,7 @@
   color: inherit;
   cursor: pointer;
   padding: 2px 4px;
-  font-size: 10px;
+  font-size: var(--type-mono-xxs);
   line-height: 1;
   border-radius: 2px;
 }

@@ -42,17 +42,8 @@ const cssScanRoots = [
 const cssTypographyAllowlist = new Set([
   'web/packages/app/src/components/ApprovalPrompt/ApprovalPrompt.css',
   'web/packages/app/src/components/ApprovalPrompt/WhitelistedPill.css',
-  'web/packages/app/src/components/BranchMetadataPopover.css',
-  'web/packages/app/src/components/BranchSelectorStrip.css',
-  'web/packages/app/src/components/catalog/CatalogPane.css',
-  'web/packages/app/src/components/ContextChip.css',
-  'web/packages/app/src/components/ContextPicker.css',
-  'web/packages/app/src/components/RerunPopover.css',
-  'web/packages/app/src/components/SubAgentBanner.css',
-  'web/packages/app/src/components/SubAgentDetailsPopover.css',
   'web/packages/app/src/components/usage/UsagePane.css',
   'web/packages/app/src/routes/AgentMonitor.css',
-  'web/packages/app/src/routes/Catalog.css',
   'web/packages/app/src/routes/Dashboard/ProviderPanel.css',
   'web/packages/app/src/routes/Dashboard/SessionsPanel.css',
 ]);

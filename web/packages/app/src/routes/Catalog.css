@@ -29,13 +29,13 @@
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.1em;
-  font-size: 18px;
+  font-size: var(--type-body-lg);
 }
 
 .catalog-route__hint {
   margin: 0;
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--type-body-sm);
   color: var(--color-text-secondary);
 }
 
