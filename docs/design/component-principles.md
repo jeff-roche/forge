@@ -49,3 +49,15 @@ The ember-400 × white pairing computes to ~3.35:1 contrast — below WCAG AA 4.
 ### Code blocks
 
 Code blocks use `#050709` background (slightly darker than `iron-900`) to create depth. The header bar shows language and copy/insert actions. Highlighted lines use a left border of `ember-400` with `rgba(255,74,18,0.07)` background.
+
+### Layout primitives
+
+V1 dashboard primitives are specified in [DESIGN.md §Layout primitives](../../DESIGN.md#layout-primitives). Each primitive binds to tokens in [Token Reference](token-reference.md); component CSS resolves to those tokens via `var(--token)`.
+
+- **Layout grid** — 12-column track, `var(--sp-4)` gap, `var(--sp-6) var(--sp-8)` outer padding. Spans: `col-4`, `col-6`, `col-8`, `col-12`.
+- **Hero block** — headline + status sentence + dual CTAs. Ghost secondary leads, ember primary trails.
+- **KPI tile** — `surface-2` card with a 2px top-left accent rail. Variants bind to `ember-400` / `success` / `warning` / `info`.
+- **Spark chart** — 60px micro-trend on `ember-400` line + alpha-gradient fill. Latest day-dot is haloed `1px` white.
+- **Toggle switch** — 28×16 track on `border-1` / `ember-900`, 12px thumb on `text-tertiary` / `ember-400`.
+- **Status pill** — `mono-xxs` label + 6px pulse dot. Variants: `streaming` (ember-200), `awaiting approval` (warning), `done` (success), `idle` (text-secondary), `ready` (success + glow), `auth` (error + glow).
+- **Status bar** — 22px Ember 400 strip with left/right slots, mono-xxs text, `·` separators. The brand-exception surface — never re-colored.

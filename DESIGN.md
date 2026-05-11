@@ -396,3 +396,88 @@ All component values resolve to the tokens declared in the YAML frontmatter and 
 - **Don't** reduce opacity to indicate disabled state on interactive elements, and don't use the same color for text and background.
 - **Do** maintain WCAG AA contrast (4.5:1) for body text.
 - **Don't** drop below AA for any surface other than the status bar (the documented exception).
+
+## Layout primitives
+
+V1 dashboard primitives. Each primitive resolves to the tokens in `web/packages/design/src/tokens.css`; component CSS references them via `var(--token)`, never raw values.
+
+### Layout grid
+
+A 12-column grid drives the dashboard body. Columns are equal fractions of the container; gutters and side padding are token-driven so card edges align with hero padding above.
+
+- **Track:** `grid-template-columns: repeat(12, 1fr)`
+- **Gap:** `var(--sp-4)` between cells, `var(--sp-6)` between row stacks
+- **Outer padding:** `var(--sp-6) var(--sp-8)` (vertical / horizontal)
+- **Span helpers:** `col-4`, `col-6`, `col-8`, `col-12` map to `grid-column: span N`
+
+V1 card layouts use `col-8 / col-4` for the primary row (Sessions / Providers), `col-6 / col-6` for the secondary row (Usage / Workspace toggles), and `col-12` for full-bleed rows (Containers). Sub-12 widths require an ADR.
+
+### Hero block
+
+The dashboard header. A two-column grid: headline + status sentence on the left, dual CTAs on the right, aligned to the baseline.
+
+- **Container:** `padding: var(--sp-8)`, bottom border `1px solid var(--color-border-1)`
+- **Track:** `grid-template-columns: 1fr auto`, `gap: var(--sp-6)`, `align-items: end`
+- **Headline:** `font-family: var(--font-display)`, weight 800, uppercase, `letter-spacing: 0.02em`, `line-height: 0.95`. Inline `<em>` keeps the brand word in `var(--color-ember-400)` with `font-style: normal`. <!-- TODO: add token --type-display-hero (40px) -->
+- **Status sentence:** `font-family: var(--font-body)`, `color: var(--color-text-secondary)`, `max-width: 560px`, `margin-top: var(--sp-3)` <!-- TODO: add token --type-body-hero (15px) -->
+- **CTA cluster:** `display: flex`, `gap: var(--sp-2)`. Exactly two actions — a ghost secondary (e.g. "Attach to session") and an ember primary (e.g. "New session"). Primary always trails so it lands at the right edge.
+
+### KPI tile
+
+A metric card: label, large value with optional unit, and a delta line. Used in the Usage card on the dashboard and in the Usage view header row.
+
+- **Container:** `background: var(--color-surface-2)`, `border: 1px solid var(--color-border-1)`, `border-radius: var(--r-lg)`, `padding: var(--sp-5)`, `position: relative`
+- **Accent rail:** a `48px × 2px` strip pinned to the top-left corner via `::before`, colored by variant:
+  - default → `var(--color-ember-400)`
+  - `ok` → `var(--color-success)`
+  - `warn` → `var(--color-warning)`
+  - `info` → `var(--color-info)`
+- **Label:** `font-family: var(--font-mono)`, `font-size: var(--type-mono-xs)`, `color: var(--color-text-secondary)`, uppercase, `letter-spacing: 0.22em`
+- **Value:** `font-family: var(--font-display)`, weight 800, `letter-spacing: 0.02em`, `margin-top: var(--sp-2)`. Inline `<small>` unit reverts to `var(--font-mono)`, `var(--color-text-secondary)`. <!-- TODO: add token --type-display-kpi (34px) and --type-display-kpi-unit (16px) -->
+- **Delta:** `font-family: var(--font-mono)`, `font-size: var(--type-mono-sm)`, `margin-top: var(--sp-2)`. Direction colors the row — `delta.up` (more spend/tokens) → `var(--color-warning)`; `delta.dn` (less spend, more output) → `var(--color-success)`.
+
+### Spark chart
+
+A 7-day micro-trend rendered inline in the Usage card. Inline SVG, no axes, no labels — context comes from the surrounding KPI numbers.
+
+- **Container:** `height: 60px`, `padding: 0 var(--sp-4) var(--sp-4)`; SVG fills the box with `preserveAspectRatio="none"`
+- **viewBox:** `0 0 320 60`
+- **Line:** `stroke: var(--color-ember-400)`, `stroke-width: 1.5`, `fill: none`
+- **Area fill:** vertical `linearGradient` from `var(--color-ember-400)` at 35% alpha to 0% alpha — declared as a stop with `stop-color="#ff4a12"` because SVG `stop-color` does not accept CSS custom properties in V1 <!-- TODO: add token --color-ember-400-rgb so the gradient can be expressed as rgba(var(--color-ember-400-rgb), 0.35) -->
+- **Day dots:** `circle r="2"` filled with `var(--color-ember-400)`, one per data point. The latest point uses `r="2.5"` and a `1px` white stroke to read as the current day.
+
+### Toggle switch
+
+A binary control used in row lists (workspace toggles on Skills / MCP / Agents). On/off is the only state; in-between (loading) is communicated by the parent row's status chip, not the toggle.
+
+- **Track:** `28px × 16px`, `border-radius: 8px`, `background: var(--color-border-1)` (off) / `var(--color-ember-900)` (on) <!-- TODO: add token --sp-toggle-track-w (28px), --sp-toggle-track-h (16px) -->
+- **Thumb:** `12px × 12px` circle, `top: 2px`, `left: 2px` → `14px` when on. Background: `var(--color-text-tertiary)` (off) / `var(--color-ember-400)` (on) <!-- TODO: add token --sp-toggle-thumb (12px) -->
+- **Transition:** `transition: all var(--ease)` on both track background and thumb position
+- **Hit target:** the parent row, not the 28px track — toggle is a visual indicator of a row-level affordance
+
+### Status pill
+
+A compact state label used in session rows, provider cards, and the chat composer. Variant binds the foreground color; the background stays transparent so the pill reads as inline metadata, not as a chip.
+
+- **Typography:** `font-family: var(--font-mono)`, `font-size: var(--type-mono-xxs)`, `letter-spacing: 0.06em`, lowercase
+- **Layout:** `display: flex`, `align-items: center`, `gap: var(--sp-2)`. A leading `6px` `border-radius: 50%` pulse dot inherits color from the pill (`background: currentColor`); the dot animates with the shared `pulse` keyframes (1.6s, 1 → 0.4 → 1 opacity) when the variant is live.
+- **Variants:**
+  - `streaming` → `var(--color-ember-200)` (amber), animated dot
+  - `awaiting approval` → `var(--color-warning)`, animated dot
+  - `done` → `var(--color-success)`, static dot
+  - `idle` → `var(--color-text-secondary)`, no dot
+  - `ready` → `var(--color-success)` with the live-dot glow (`box-shadow: 0 0 6px rgba(61, 220, 132, 0.5)`)
+  - `auth` → `var(--color-error)` with the error live-dot glow (`box-shadow: 0 0 6px rgba(255, 74, 18, 0.5)`)
+
+The glow on `ready` / `auth` reuses the system's single network-connectivity glow rule — no new glow tokens.
+
+### Status bar
+
+The strip pinned to the bottom of every shell view. Always Ember 400, always 22px tall — the documented brand-exception surface.
+
+- **Container:** `height: 22px`, `flex-shrink: 0`, `display: flex`, `align-items: center`, `padding: 0 var(--sp-3)`, `gap: var(--sp-4)`, `background: var(--color-ember-400)`, `color: var(--color-text-inverted)`
+- **Typography:** `font-family: var(--font-mono)`, `font-size: var(--type-mono-xxs)`, `letter-spacing: 0.05em`
+- **Slots:** left slot owns the Forge mark, branch, session count, active provider, and streaming state; right slot is `margin-left: auto` and owns the cost meter, range, and container status
+- **Separator:** literal `·` dot at `opacity: 0.5` between adjacent groups; group-internal items use `gap: var(--sp-2)`
+- **Live dot:** `6px × 6px` circle, `background: var(--color-text-inverted)`, `opacity: 0.9`, sits next to the streaming label — never glows on this surface (glow is reserved for elevated MCP indicators)
+- **Agent badges:** when present, render on a solid `var(--color-surface-2)` chip with `border-radius: 10px` (`pill`) so they clear WCAG AA against the Ember background independently of the bar exception

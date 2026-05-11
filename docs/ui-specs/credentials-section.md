@@ -1,109 +1,95 @@
-# Credentials Section
+# Credentials IPC Reference
 
-> Dashboard section ([F-588](https://github.com/forge-ide/forge/issues/606)) — per-provider credential management with rotation confirmation and a security-conscious form contract.
+> **Note**: As of V1, credential entry happens in the full-page `/providers` route (see [`providers-page.md`](./providers-page.md)).
+> This file is retained as the authoritative IPC reference for the credential commands
+> (`login_provider`, `logout_provider`, `has_credential`). The dashboard credentials card is removed.
 
 ---
 
 ## Purpose
 
-Let the user store, rotate, and remove provider credentials without leaving the Dashboard. The section is the authoritative surface for credential state — every other view (the providers grid, the first-run banner) reflects `has_credential` as a hint and links here when remediation is needed.
+Define the wire contract every UI surface uses to read and mutate per-provider credential state. The IPC layer is the single source of truth — every consumer (the `/providers` page, the first-run banner copy, the new-session picker's `has_credential` hint) calls these commands rather than reaching into the keyring directly.
 
 ## Where
 
-`<CredentialsSection>` mounts inside the Dashboard root, anchored at id `credentials-section` so the first-run banner can deep-link to it. Component path: `web/packages/app/src/components/dashboard/CredentialsSection.tsx`.
+Lives wherever provider credentials are entered (currently [`providers-page.md`](./providers-page.md)) and wherever a "credential present?" hint is rendered (the dashboard Providers card status pill, the new-session picker). Backed by `crates/forge-shell/src/credentials_ipc.rs`.
 
-## Size
+## Commands
 
-Fills the dashboard column width. Single column of rows — one row per provider in `CREDENTIAL_PROVIDERS`. No internal scrolling; the row count is small and bounded.
+Every command in this section follows the F-673 standard: the outer error string returned to the webview begins with `<command_name>: `, where `<command_name>` matches the wire name of the Tauri command. See `crates/forge-shell/src/ipc.rs` "Error handling (F-673)" header for the canonical rationale.
 
-## Structure
+All three commands are authz-gated to the `dashboard` window label via `crate::ipc::require_window_label`. A session window invoking any of them is rejected before validation runs.
 
-```
-┌─ CREDENTIALS ──────────────────────────────────────────────┐
-│ ✓ Anthropic   ANTHROPIC_API_KEY                  [LOGOUT]  │
-│ Replace key  [••••••••••••]                      [ROTATE]  │
-│                                                            │
-│ ⚠ OpenAI      OPENAI_API_KEY                               │
-│ Add key      [           ]                       [STORE]   │
-└────────────────────────────────────────────────────────────┘
-```
-
-### Row anatomy
-
-- **Indicator + label row.** `✓` (stored) or `⚠` (missing) icon, provider display name, env-var hint (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY` …), and a `LOGOUT` button when a credential is present.
-- **Form row.** `<input type="password">` plus a primary action whose label flips between `STORE` (no credential yet) and `ROTATE` (replacing one).
-- **Error row.** A `role="alert"` line under the form when the most recent submit / logout call rejected.
-
-### Rotation confirmation
-
-Submitting the form when a credential is already stored opens a modal:
+### `login_provider` (F-587)
 
 ```
-┌────────────────────────────────────────────┐
-│ REPLACE STORED KEY?                        │
-├────────────────────────────────────────────┤
-│ A credential for <Provider> is already     │
-│ stored. Replacing it overwrites the        │
-│ keyring entry — the previous key cannot    │
-│ be recovered.                              │
-├────────────────────────────────────────────┤
-│                          [CANCEL] [REPLACE]│
-└────────────────────────────────────────────┘
+input:  { provider_id: string, key: string }
+output: ()
+error:  "login_provider: <reason>"
 ```
 
-The modal is a focus-trapped `role="dialog" aria-modal="true"` with a window-level `Escape` handler. Logout is reversible (re-enter the key) and stays single-step — no modal.
+Writes `key` to the active credential store under `provider_id`. Validation rejects empty `provider_id`, empty `key`, `provider_id` longer than `MAX_PROVIDER_ID_BYTES`, and `key` longer than `MAX_API_KEY_BYTES` (8 KiB). The inbound `key` is wrapped in `secrecy::SecretString` immediately so downstream `Debug` / `format!` calls redact it. Storage semantics are overwrite-on-write — the previous entry is replaced unconditionally; callers that need rotation confirmation gate it at the UI layer (see [`providers-page.md` §Credential entry](./providers-page.md)).
 
-## States
+### `logout_provider` (F-587)
 
-Per row, four states cleanly separated:
+```
+input:  { provider_id: string }
+output: ()
+error:  "logout_provider: <reason>"
+```
 
-- **Loading.** First read of `has_credential` — the row paints with the indicator's neutral fallback (treated as missing). Probe failure does not crash the row; it degrades to "no stored credential" so the user can still type a key and recover.
-- **Empty / no credential.** `⚠` indicator (color-warn), `Add key` form label, `STORE` action.
-- **Stored.** `✓` indicator (color-ok), `Replace key` form label, `ROTATE` action, plus the `LOGOUT` button. Replacing requires the rotation-confirm modal.
-- **Pending.** While a `loginProvider` / `logoutProvider` IPC is in flight, both buttons report `aria-busy=true`, the input is `disabled`, and the action's label stays the same — no spinner copy.
-- **Error.** `role="alert"` line under the form with the verbatim IPC rejection message. The line clears on the next user action.
+Removes the credential entry for `provider_id` from the active store. Idempotent — removing an absent entry resolves `Ok(())`. Validation rejects empty / oversized `provider_id`. The keyring write is irreversible from the IPC surface (no undo); reversibility is only via a subsequent `login_provider` with a freshly-typed key.
 
-## Copy
+### `has_credential` (F-587)
 
-- Section label: `CREDENTIALS`
-- Indicator labels (aria-label only): `Credential stored for <Provider>` / `No credential for <Provider>`
-- Form labels: `Replace key` / `Add key`
-- Buttons: `STORE`, `ROTATE`, `LOGOUT` (uppercase, mono, matches the project's destructive / write-style action discipline).
-- Rotation modal title: `REPLACE STORED KEY?` (uppercase question — same voice as `CLEAR MEMORY?` in `memory-section.md`).
-- Rotation body: verbatim — "A credential for <strong>{providerLabel}</strong> is already stored. Replacing it overwrites the keyring entry — the previous key cannot be recovered."
-- Rotation buttons: `CANCEL`, `REPLACE`.
+```
+input:  { provider_id: string }
+output: bool
+error:  "has_credential: <reason>"
+```
 
-## Color & typography
+Presence probe. Returns `true` iff the active store reports a credential entry for `provider_id`. Never returns the value — the IPC contract is strictly write-only once stored. Validation matches `logout_provider`'s. Probe failure is propagated to the caller verbatim (the renderer typically degrades to "no stored credential" so the user can still type a key and recover).
 
-- Stored indicator: `--color-ok`. Missing indicator: `--color-warn`.
-- Env-var hint: `--font-mono`, `--color-text-tertiary` — the hint is reference, not interactive.
-- Action buttons follow `@forge/design` `Button` variants: `ghost` for `LOGOUT` and `CANCEL`, `primary` (ember accent) for `STORE` / `ROTATE` / `REPLACE`.
+## Error format
+
+The F-673 contract for each command:
+
+- `login_provider: <reason>` — validation failures, keyring write failures.
+- `logout_provider: <reason>` — validation failures, keyring delete failures.
+- `has_credential: <reason>` — validation failures, keyring read failures.
+
+`<reason>` is the verbatim store-layer error string (no stripping, no rewrapping). UI surfaces echo the message into a `role="alert"` line per `docs/design/component-principles.md` four-state rule.
+
+## Keyring integration
+
+Production wiring is `LayeredStore<KeyringStore, EnvFallbackStore>` — the OS keyring is primary, the environment is read-only fallback for `get`/`has`. Tests substitute `MemoryStore`. The store boundary is `forge_core::Credentials`; the IPC layer holds an `Arc<dyn Credentials>` in `CredentialsState` and never inspects the concrete backend. See `docs/architecture/credentials.md` for the backend contract (rotation-overwrite invariant, env-fallback read semantics, platform cfg-gating of `KeyringStore`).
 
 ## Security contract
 
-The section is the canonical implementation of Forge's credential UX rules. Reviewers should treat any drift as a security issue:
+The IPC layer is the canonical enforcement point for Forge's credential rules. Reviewers should treat any drift as a security issue:
 
-- The typed value lives only in the row's local `draft()` signal and the `<input type="password">`'s browser-DOM state.
-- The signal is cleared the moment the IPC call resolves — success or rejection — and on rotation cancel. No ambient terminal state can hold the secret.
-- No `aria-label`, log line, or rendered DOM string ever echoes the key.
-- The DOM never contains a rendered key — only the password input ever holds the typed value.
+- The inbound `key` is wrapped in `SecretString` before any downstream call. No long-lived `String` copy is taken.
+- Tracing fields never carry the value — only `provider_id` and outcome (`hit`, `miss`, `error_kind`). This holds at every level, including `trace!`.
+- No command returns the stored value. `has_credential` is the only read surface and yields a `bool`.
+- The dashboard-only authz gate ensures session windows cannot reach the credential surface.
 
-## Keyboard
+## Destructive-action contract
 
-- Tab — moves focus from indicator → input → action button → next row.
-- Enter inside the input — submits the form (same path as clicking `STORE` / `ROTATE`).
-- Escape inside the rotation modal — cancels (matches `WAI-ARIA APG Dialog` pattern; the listener is window-level so the focus trap can't swallow the keystroke).
+`logout_provider` is destructive — the keyring entry is gone after a successful call and the user must re-enter the key to restore it. Callers gate the invocation behind a user-facing confirm appropriate to their surface (the `/providers` page chains it inside the `REMOVE PROVIDER?` modal; see [`providers-page.md` §Edit/Remove](./providers-page.md)). The IPC itself does not prompt — confirmation is a UI concern.
+
+`login_provider` is single-step at the wire level but overwrites unconditionally; rotation confirmation (when an entry is already present) is gated at the UI layer per [`providers-page.md` §Credential entry](./providers-page.md).
 
 ## Cross-spec references
 
-- [`providers-section.md`](./providers-section.md) — the neighbouring section whose card "credential" hint is sourced from `has_credential`.
-- [`dashboard.md`](./dashboard.md) — first-run `<CredentialBanner>` lives at the top of the dashboard and deep-links to `#credentials-section`.
-- `docs/architecture/credentials.md` — backend keyring contract (referenced for the rotation-overwrite invariant).
-- `docs/design/component-principles.md` — four-state rule.
+- [`providers-page.md`](./providers-page.md) — primary consumer; the `/providers` page is the only UI surface that opens the credential input field. Chains `login_provider` / `logout_provider` from its Add / Edit / Remove flows.
+- [`providers-section.md`](./providers-section.md) — the dashboard Providers card; reads `has_credential` (via the higher-level `provider_status` aggregate) for the readiness pill.
+- [`dashboard.md`](./dashboard.md) — the Providers card's status sentence references credential readiness in plain prose.
+- `docs/architecture/credentials.md` — backend keyring contract (rotation-overwrite invariant, env-fallback read semantics).
+- `docs/design/component-principles.md` — four-state rule and destructive-action contract honored by UI callers.
 
 ## Doesn't do
 
-- Does not surface keyless providers (e.g. Ollama). Adding them would surface a "missing key" indicator for a provider that does not need one.
+- Does not surface keyless providers (e.g. Ollama). Callers should suppress the credential field for any provider whose `credential_required` flag is unset.
 - Does not let the user *view* a stored key. The IPC contract is one-way once stored — only `has_credential` is queryable.
 - Does not export / back up keys. The user's keyring is the system of record.
-- Does not own provider activation — that's [`providers-section.md`](./providers-section.md).
+- Does not own provider activation or configuration — that's [`providers-page.md`](./providers-page.md) and [`providers-section.md`](./providers-section.md).
