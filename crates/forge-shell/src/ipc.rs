@@ -741,6 +741,10 @@ pub fn build_invoke_handler<R: Runtime>() -> Box<dyn Fn(tauri::ipc::Invoke<R>) -
         // `require_window_label` gate inside the command rejects every
         // window label other than `dashboard`.
         crate::mcp_ipc::add_mcp_server,
+        // F-741: status-bar git branch feed. Dashboard-scoped — the
+        // `require_window_label` gate inside the command rejects every
+        // window label other than `dashboard`.
+        crate::git_ipc::git_branch,
     ])
 }
 

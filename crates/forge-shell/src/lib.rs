@@ -55,6 +55,11 @@ pub mod memory_ipc;
 // are always compiled so non-webview unit tests link without Tauri; the
 // `#[tauri::command]` wrapper is gated behind `webview`.
 pub mod mcp_ipc;
+// F-741: Dashboard status-bar git branch IPC. The pure
+// `classify_branch_output` helper is always compiled so non-webview unit
+// tests can exercise the detached-HEAD classifier without Tauri; the
+// `#[tauri::command]` wrapper is gated behind `webview`.
+pub mod git_ipc;
 // F-586: provider-selection commands (`dashboard_list_providers`,
 // `get_active_provider`, `set_active_provider`). Pure helpers
 // (`build_provider_list`, `is_known_provider_id`, `validate_provider_id`)

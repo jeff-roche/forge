@@ -503,6 +503,7 @@ const SparkChart: Component<SparkChartProps> = (props) => {
               const last = i() === points().length - 1;
               return (
                 <circle
+                  class={last ? 'usage-card__spark-live-dot' : undefined}
                   cx={pt.x.toFixed(2)}
                   cy={pt.y.toFixed(2)}
                   r={last ? 2.5 : 2}

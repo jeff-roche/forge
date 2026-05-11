@@ -16,14 +16,44 @@
     }
   },
   "bundle": {
-    "active": false,
+    "active": true,
     "targets": "all",
+    "category": "Development",
+    "shortDescription": "Forge — a desktop workshop for agentic work.",
+    "longDescription": "Forge is a native desktop workshop for agentic work. Any AI, one editor, transparent by default.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
+      "icons/256x256.png",
+      "icons/512x512.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "linux": {
+      "deb": {
+        "desktopTemplate": "forge.desktop",
+        "files": {
+          "/usr/share/pixmaps/forge.png": "icons/512x512.png",
+          "/usr/share/icons/hicolor/32x32/apps/forge.png": "icons/32x32.png",
+          "/usr/share/icons/hicolor/128x128/apps/forge.png": "icons/128x128.png",
+          "/usr/share/icons/hicolor/256x256/apps/forge.png": "icons/256x256.png",
+          "/usr/share/icons/hicolor/512x512/apps/forge.png": "icons/512x512.png"
+        }
+      },
+      "rpm": {
+        "desktopTemplate": "forge.desktop",
+        "files": {
+          "/usr/share/pixmaps/forge.png": "icons/512x512.png",
+          "/usr/share/icons/hicolor/32x32/apps/forge.png": "icons/32x32.png",
+          "/usr/share/icons/hicolor/128x128/apps/forge.png": "icons/128x128.png",
+          "/usr/share/icons/hicolor/256x256/apps/forge.png": "icons/256x256.png",
+          "/usr/share/icons/hicolor/512x512/apps/forge.png": "icons/512x512.png"
+        }
+      },
+      "appimage": {
+        "bundleMediaFramework": false
+      }
+    }
   }
 }

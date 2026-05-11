@@ -281,6 +281,136 @@ describe('Dashboard', () => {
     });
   });
 
+  // F-737: when the workspace has no sessions AND no configured providers,
+  // the first-run banner anchors above the grid with the verbatim copy and
+  // a CTA pointed at /providers.
+  it('renders the first-run banner when sessions and providers are both empty', async () => {
+    const { findByTestId } = renderDashboard();
+    const banner = await findByTestId('first-run-banner');
+    expect(banner.textContent).toContain('Welcome to Forge.');
+    expect(banner.textContent).toContain(
+      'Add your first provider to start a session.',
+    );
+    const cta = banner.querySelector('a');
+    expect(cta?.getAttribute('href')).toBe('/providers');
+  });
+
+  // F-737: as soon as a provider is configured, the first-run banner
+  // collapses — the standard hero + card grid is the dominant treatment.
+  it('hides the first-run banner once a provider exists', async () => {
+    setInvokeForTesting(
+      (async (cmd: string) => {
+        if (cmd === 'provider_status') {
+          return {
+            reachable: true,
+            base_url: 'http://127.0.0.1:11434',
+            models: [],
+            last_checked: '2026-04-18T00:00:00Z',
+          };
+        }
+        if (cmd === 'session_list') return [];
+        if (cmd === 'dashboard_list_providers') {
+          return [
+            {
+              id: 'ollama',
+              display_name: 'Ollama',
+              credential_required: false,
+              has_credential: false,
+              model_available: true,
+            },
+          ];
+        }
+        if (cmd === 'get_active_provider') return null;
+        if (cmd === 'has_credential') return true;
+        if (cmd === 'usage_summary') {
+          return {
+            range: { type: 'Last7' },
+            group_by: 'Provider',
+            total_tokens_in: 0,
+            total_tokens_out: 0,
+            total_cost: null,
+            breakdown: [],
+          };
+        }
+        if (cmd === 'detect_container_runtime') return { kind: 'available' };
+        if (cmd === 'list_active_containers') return [];
+        if (cmd === 'get_settings') {
+          return {
+            notifications: { bg_agents: 'toast' },
+            windows: { session_mode: 'single' },
+            providers: { custom_openai: {} },
+            dashboard: { container_banner_dismissed: false },
+          };
+        }
+        return undefined;
+      }) as never,
+    );
+
+    const { queryByTestId } = renderDashboard();
+    await waitFor(() => {
+      expect(queryByTestId('first-run-banner')).toBeNull();
+    });
+  });
+
+  // F-737: a session existing — even with zero providers — is enough to
+  // suppress the first-run banner. The banner is for the "nothing has
+  // happened yet" state only.
+  it('hides the first-run banner once a session exists', async () => {
+    setInvokeForTesting(
+      (async (cmd: string) => {
+        if (cmd === 'provider_status') {
+          return {
+            reachable: true,
+            base_url: 'http://127.0.0.1:11434',
+            models: [],
+            last_checked: '2026-04-18T00:00:00Z',
+          };
+        }
+        if (cmd === 'session_list') {
+          return [
+            {
+              id: 's1',
+              subject: 'refactor',
+              state: 'active',
+              persistence: 'persist',
+              createdAt: '2026-04-18T00:00:00Z',
+              lastEventAt: '2026-04-18T00:00:00Z',
+            },
+          ];
+        }
+        if (cmd === 'dashboard_list_providers') return [];
+        if (cmd === 'get_active_provider') return null;
+        if (cmd === 'has_credential') return true;
+        if (cmd === 'usage_summary') {
+          return {
+            range: { type: 'Last7' },
+            group_by: 'Provider',
+            total_tokens_in: 0,
+            total_tokens_out: 0,
+            total_cost: null,
+            breakdown: [],
+          };
+        }
+        if (cmd === 'detect_container_runtime') return { kind: 'available' };
+        if (cmd === 'list_active_containers') return [];
+        if (cmd === 'get_settings') {
+          return {
+            notifications: { bg_agents: 'toast' },
+            windows: { session_mode: 'single' },
+            providers: { custom_openai: {} },
+            dashboard: { container_banner_dismissed: false },
+          };
+        }
+        return undefined;
+      }) as never,
+    );
+
+    const { queryByTestId } = renderDashboard();
+    await waitFor(() => {
+      expect(queryByTestId('first-run-banner')).toBeNull();
+    });
+  });
+
   // F-588: a single broken probe must not silently suppress the banner
   // for the remaining providers. Anthropic throws, OpenAI is missing —
   // the banner must name OpenAI.

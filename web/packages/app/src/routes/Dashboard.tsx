@@ -1,7 +1,8 @@
-import { type Component, createResource, createSignal, onMount, Show } from 'solid-js';
+import { type Component, createMemo, createResource, createSignal, onMount, Show } from 'solid-js';
 import { AttachSessionPicker } from '../components/AttachSessionPicker';
 import { DashboardHero } from '../components/dashboard/DashboardHero';
 import { EnabledAssetsCard } from '../components/dashboard/EnabledAssetsCard';
+import { FirstRunBanner } from '../components/dashboard/FirstRunBanner';
 import { NewSessionDialog } from '../components/NewSessionDialog';
 import { ProvidersSection } from '../components/dashboard/ProvidersSection';
 import { UsageCard } from '../components/dashboard/UsageCard';
@@ -20,6 +21,7 @@ import {
   detectContainerRuntime,
   type RuntimeStatus,
 } from '../ipc/containers';
+import { listProviders, sessionList } from '../ipc/dashboard';
 import { getSettings, setSetting } from '../ipc/session';
 import './Dashboard.css';
 
@@ -86,6 +88,21 @@ async function loadBannerDismissed(): Promise<boolean> {
 export const Dashboard: Component = () => {
   const [missing] = createResource(firstMissingCredential);
   const [runtimeStatus] = createResource(probeRuntime);
+  // F-737: first-run banner gate. We probe the same wires that
+  // DashboardHero already consumes (`session_list`, `dashboard_list_providers`)
+  // and treat IPC rejections as "empty" so a broken bridge surfaces the
+  // banner rather than silently hiding it.
+  const [sessions] = createResource(async () => sessionList().catch(() => []));
+  const [providers] = createResource(async () => listProviders().catch(() => []));
+  const isFirstRun = createMemo(() => {
+    // Suppress until BOTH probes have resolved — otherwise the banner
+    // flashes during the IPC round-trip even when the workspace is
+    // actually populated.
+    const s = sessions();
+    const p = providers();
+    if (s === undefined || p === undefined) return false;
+    return s.length === 0 && p.length === 0;
+  });
   // Tri-state seed for the "Don't show again" preference: `null` while
   // the persisted load is in flight, then `true`/`false` once resolved.
   // Rendering is gated on the resolved (non-`null`) state so a user who
@@ -135,6 +152,7 @@ export const Dashboard: Component = () => {
         onAttach={() => setAttachOpen(true)}
         onNewSession={() => setNewSessionOpen(true)}
       />
+      <FirstRunBanner visible={isFirstRun()} />
       <NewSessionDialog
         open={newSessionOpen()}
         onClose={() => setNewSessionOpen(false)}

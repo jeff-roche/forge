@@ -1,0 +1,40 @@
+/* F-737 first-run banner. Tokens only.
+   Surfaces above the dashboard grid when zero sessions AND zero providers
+   exist. Token-bound surface so the empty-empty state reads as the page's
+   dominant call-to-action rather than as chrome. */
+
+.first-run-banner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-8);
+  margin: 0 var(--sp-8);
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-border-1);
+  border-radius: var(--r-lg);
+  text-align: center;
+}
+
+.first-run-banner__headline {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  line-height: 0.95;
+  color: var(--color-text-ember);
+}
+
+.first-run-banner__subtitle {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: var(--type-body-md);
+  color: var(--color-text-secondary);
+  max-width: 560px;
+}
+
+.first-run-banner__cta {
+  margin-top: var(--sp-2);
+  text-decoration: none;
+}

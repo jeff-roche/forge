@@ -251,8 +251,9 @@
 .sessions__list-error-title {
   font-family: var(--font-mono);
   font-size: var(--type-mono-xxs);
-  letter-spacing: 0.06em;
-  color: var(--color-error);
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--color-ember-300);
   margin: 0;
 }
 

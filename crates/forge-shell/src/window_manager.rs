@@ -185,6 +185,10 @@ pub fn run() -> Result<()> {
             // F-734: catalog `+ Add MCP server` modal. Writes a single
             // entry into the workspace or user-scope `.mcp.json` document.
             crate::mcp_ipc::add_mcp_server,
+            // F-741: status-bar git branch feed. Dashboard-scoped — the
+            // `require_window_label` gate inside the command rejects every
+            // window label other than `dashboard`.
+            crate::git_ipc::git_branch,
         ])
         .setup(|app| {
             crate::ipc::manage_bridge(&app.handle().clone());

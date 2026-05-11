@@ -4,6 +4,7 @@
 // change.
 
 import { invoke } from '../lib/tauri';
+import type { GitBranchOutput } from '@forge/ipc';
 
 // ---------------------------------------------------------------------------
 // Sessions
@@ -128,4 +129,22 @@ export async function getActiveProvider(): Promise<string | null> {
  */
 export async function setActiveProvider(providerId: string): Promise<void> {
   await invoke('set_active_provider', { providerId });
+}
+
+// ---------------------------------------------------------------------------
+// F-741: status-bar git branch feed
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve the active branch name for `workspaceRoot` by shelling out to
+ * `git rev-parse --abbrev-ref HEAD` inside the directory. Returns the
+ * branch name on success; `null` when the working tree has a detached
+ * HEAD. IPC rejections propagate to the caller, which paints `unknown`
+ * per the status-bar contract.
+ */
+export async function gitBranch(workspaceRoot: string): Promise<string | null> {
+  const out = await invoke<GitBranchOutput>('git_branch', {
+    input: { workspace_root: workspaceRoot },
+  });
+  return out.branch ?? null;
 }

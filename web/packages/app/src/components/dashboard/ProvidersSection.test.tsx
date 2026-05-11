@@ -10,6 +10,7 @@ import { cleanup, render, fireEvent } from '@solidjs/testing-library';
 import { MemoryRouter, Route } from '@solidjs/router';
 import { ProvidersSection, type ProviderEntry } from './ProvidersSection';
 import { setInvokeForTesting } from '../../lib/tauri';
+import { clearToastsForTesting, toasts } from '../toast';
 
 const invokeMock = vi.fn();
 
@@ -52,6 +53,8 @@ function setupInvokeMock(opts: {
   entries?: ProviderEntry[];
   active?: string | null;
   setActiveError?: string;
+  ollamaReachable?: boolean;
+  providerStatusError?: string;
 } = {}) {
   invokeMock.mockImplementation((cmd: string) => {
     switch (cmd) {
@@ -62,6 +65,14 @@ function setupInvokeMock(opts: {
       case 'set_active_provider':
         if (opts.setActiveError) return Promise.reject(new Error(opts.setActiveError));
         return Promise.resolve(undefined);
+      case 'provider_status':
+        if (opts.providerStatusError) return Promise.reject(new Error(opts.providerStatusError));
+        return Promise.resolve({
+          reachable: opts.ollamaReachable ?? true,
+          base_url: 'http://127.0.0.1:11434',
+          models: [],
+          last_checked: '2026-05-11T00:00:00Z',
+        });
       default:
         return Promise.resolve(undefined);
     }
@@ -93,11 +104,13 @@ function renderSection() {
 beforeEach(() => {
   invokeMock.mockReset();
   setInvokeForTesting(invokeMock as never);
+  clearToastsForTesting();
 });
 
 afterEach(() => {
   setInvokeForTesting(null);
   cleanup();
+  clearToastsForTesting();
 });
 
 describe('ProvidersSection (F-721)', () => {
@@ -127,6 +140,13 @@ describe('ProvidersSection (F-721)', () => {
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === 'dashboard_list_providers') return Promise.reject(new Error('keyring backend down'));
       if (cmd === 'get_active_provider') return Promise.resolve(null);
+      if (cmd === 'provider_status')
+        return Promise.resolve({
+          reachable: true,
+          base_url: 'http://127.0.0.1:11434',
+          models: [],
+          last_checked: '2026-05-11T00:00:00Z',
+        });
       return Promise.resolve(undefined);
     });
     const { findByRole } = renderSection();
@@ -332,6 +352,13 @@ describe('ProvidersSection (F-721)', () => {
         case 'set_active_provider':
           activeAfterSet = String(args?.providerId);
           return Promise.resolve(undefined);
+        case 'provider_status':
+          return Promise.resolve({
+            reachable: true,
+            base_url: 'http://127.0.0.1:11434',
+            models: [],
+            last_checked: '2026-05-11T00:00:00Z',
+          });
         default:
           return Promise.resolve(undefined);
       }
@@ -384,6 +411,13 @@ describe('ProvidersSection (F-721)', () => {
         case 'set_active_provider':
           setActiveCallCount += 1;
           return firstSet;
+        case 'provider_status':
+          return Promise.resolve({
+            reachable: true,
+            base_url: 'http://127.0.0.1:11434',
+            models: [],
+            last_checked: '2026-05-11T00:00:00Z',
+          });
         default:
           return Promise.resolve(undefined);
       }
@@ -429,6 +463,13 @@ describe('ProvidersSection (F-721)', () => {
           return Promise.resolve(null);
         case 'set_active_provider':
           return firstSet;
+        case 'provider_status':
+          return Promise.resolve({
+            reachable: true,
+            base_url: 'http://127.0.0.1:11434',
+            models: [],
+            last_checked: '2026-05-11T00:00:00Z',
+          });
         default:
           return Promise.resolve(undefined);
       }
@@ -464,5 +505,172 @@ describe('ProvidersSection (F-721)', () => {
     await waitForFetch();
 
     expect(invokeMock).toHaveBeenCalledWith('set_active_provider', { providerId: 'openai' });
+  });
+
+  // ---------------------------------------------------------------------------
+  // F-738: provider remediation CTAs
+  // ---------------------------------------------------------------------------
+
+  describe('F-738 remediation CTAs', () => {
+    it('renders `Add credential` for a provider that requires a credential but is missing one', async () => {
+      setupInvokeMock();
+      const { findByTestId } = renderSection();
+      await waitForFetch();
+
+      const cta = await findByTestId('provider-cta-add-credential-anthropic');
+      expect(cta.textContent).toMatch(/add credential/i);
+      expect(cta.getAttribute('href')).toBe('/providers#anthropic');
+    });
+
+    it('does NOT render `Add credential` when the provider has its credential', async () => {
+      setupInvokeMock();
+      const { queryByTestId } = renderSection();
+      await waitForFetch();
+
+      // OpenAI in the fixture has credential_required=true && has_credential=true.
+      expect(queryByTestId('provider-cta-add-credential-openai')).toBeNull();
+      // Ollama needs no credential.
+      expect(queryByTestId('provider-cta-add-credential-ollama')).toBeNull();
+    });
+
+    it('renders one `Add credential` CTA per credential-missing provider', async () => {
+      setupInvokeMock();
+      const { findByTestId } = renderSection();
+      await waitForFetch();
+
+      // Fixture has anthropic + custom_openai both missing credentials.
+      await findByTestId('provider-cta-add-credential-anthropic');
+      await findByTestId('provider-cta-add-credential-custom_openai');
+    });
+
+    it('`Add credential` click does not also promote its row to active', async () => {
+      setupInvokeMock();
+      const { findByTestId } = renderSection();
+      await waitForFetch();
+
+      const cta = await findByTestId('provider-cta-add-credential-anthropic');
+      fireEvent.click(cta);
+      await waitForFetch();
+
+      // No set_active_provider IPC should have fired — the link click was
+      // captured by `stopPropagation` before it reached the row handler.
+      const setActiveCalls = invokeMock.mock.calls.filter(
+        (c) => c[0] === 'set_active_provider',
+      );
+      expect(setActiveCalls.length).toBe(0);
+    });
+
+    it('renders `START OLLAMA` when the local Ollama probe reports unreachable', async () => {
+      setupInvokeMock({ ollamaReachable: false });
+      const { findByTestId } = renderSection();
+      await waitForFetch();
+
+      const cta = await findByTestId('provider-cta-start-ollama');
+      expect(cta.textContent).toMatch(/start ollama/i);
+    });
+
+    it('does NOT render `START OLLAMA` when Ollama is reachable', async () => {
+      setupInvokeMock({ ollamaReachable: true });
+      const { queryByTestId } = renderSection();
+      await waitForFetch();
+
+      expect(queryByTestId('provider-cta-start-ollama')).toBeNull();
+    });
+
+    it('does NOT render `START OLLAMA` when the provider_status probe fails', async () => {
+      setupInvokeMock({ providerStatusError: 'IPC backend unavailable' });
+      const { queryByTestId } = renderSection();
+      await waitForFetch();
+      await waitForFetch();
+
+      expect(queryByTestId('provider-cta-start-ollama')).toBeNull();
+    });
+
+    it('clicking `START OLLAMA` copies `ollama serve` to the clipboard and dispatches a toast', async () => {
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      const original = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText },
+      });
+      try {
+        setupInvokeMock({ ollamaReachable: false });
+        const { findByTestId } = renderSection();
+        await waitForFetch();
+
+        const cta = await findByTestId('provider-cta-start-ollama');
+        fireEvent.click(cta);
+        await waitForFetch();
+        await waitForFetch();
+
+        expect(writeText).toHaveBeenCalledWith('ollama serve');
+        const messages = toasts().map((t) => t.message);
+        expect(messages.some((m) => m.includes('ollama serve'))).toBe(true);
+      } finally {
+        if (original) {
+          Object.defineProperty(navigator, 'clipboard', original);
+        } else {
+          Reflect.deleteProperty(navigator, 'clipboard');
+        }
+      }
+    });
+
+    it('clicking `START OLLAMA` falls back to a toast when the clipboard is unavailable', async () => {
+      const original = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: {
+          writeText: () => Promise.reject(new Error('clipboard denied')),
+        },
+      });
+      try {
+        setupInvokeMock({ ollamaReachable: false });
+        const { findByTestId } = renderSection();
+        await waitForFetch();
+
+        const cta = await findByTestId('provider-cta-start-ollama');
+        fireEvent.click(cta);
+        await waitForFetch();
+        await waitForFetch();
+
+        const messages = toasts().map((t) => t.message);
+        expect(messages.some((m) => m.includes('ollama serve'))).toBe(true);
+      } finally {
+        if (original) {
+          Object.defineProperty(navigator, 'clipboard', original);
+        } else {
+          Reflect.deleteProperty(navigator, 'clipboard');
+        }
+      }
+    });
+
+    it('`START OLLAMA` click does not also promote the ollama row to active', async () => {
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      const original = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText },
+      });
+      try {
+        setupInvokeMock({ ollamaReachable: false });
+        const { findByTestId } = renderSection();
+        await waitForFetch();
+
+        const cta = await findByTestId('provider-cta-start-ollama');
+        fireEvent.click(cta);
+        await waitForFetch();
+
+        const setActiveCalls = invokeMock.mock.calls.filter(
+          (c) => c[0] === 'set_active_provider',
+        );
+        expect(setActiveCalls.length).toBe(0);
+      } finally {
+        if (original) {
+          Object.defineProperty(navigator, 'clipboard', original);
+        } else {
+          Reflect.deleteProperty(navigator, 'clipboard');
+        }
+      }
+    });
   });
 });

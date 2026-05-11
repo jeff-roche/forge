@@ -16,6 +16,8 @@ export type { CustomOpenAiConfig } from './generated/CustomOpenAiConfig';
 export type { DashboardSettings } from './generated/DashboardSettings';
 export type { FetchedUrl } from './generated/FetchedUrl';
 export type { FileContent } from './generated/FileContent';
+export type { GitBranchInput } from './generated/GitBranchInput';
+export type { GitBranchOutput } from './generated/GitBranchOutput';
 export type { Layout } from './generated/Layout';
 export type { Layouts } from './generated/Layouts';
 export type { LayoutTree } from './generated/LayoutTree';

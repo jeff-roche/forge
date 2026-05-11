@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Forge brand mark.
+
+  Square rounded tile in iron-900 (#2a0800), ember-400 (#ff4a12) glyph.
+  The glyph is a stylized capital F whose top arm carries an ember "spark"
+  and whose base widens into a short anvil plinth — folding workshop and
+  letterform into a single geometric mark that reads at 32x32.
+
+  Canvas: 512x512. Stroke widths and corner radii are sized so the mark
+  survives downscaling without anti-alias mush. Source of truth — PNG /
+  ICO / ICNS exports are regenerated from this SVG.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- Iron-900 tile with the `lg` radius scaled to the icon canvas. -->
+  <rect x="0" y="0" width="512" height="512" rx="72" ry="72" fill="#2a0800"/>
+
+  <!-- Stylized F: vertical stem, horizontal crossbar, flared anvil base. -->
+  <g fill="#ff4a12">
+    <!-- Vertical stem. -->
+    <rect x="144" y="96"  width="72" height="320"/>
+    <!-- Top arm. -->
+    <rect x="144" y="96"  width="240" height="72"/>
+    <!-- Middle arm (shorter, the F crossbar). -->
+    <rect x="144" y="224" width="176" height="64"/>
+    <!-- Anvil plinth — the foot widens past the stem to suggest the anvil
+         base; this is what makes the mark read as "Forge" rather than a
+         generic monogram. -->
+    <rect x="96"  y="384" width="240" height="48" rx="6" ry="6"/>
+  </g>
+
+  <!-- Ember spark above the top arm — ember-200 for warmth, sized to
+       still be visible at 32x32 (~3px square). -->
+  <circle cx="408" cy="120" r="20" fill="#ffaa33"/>
+</svg>

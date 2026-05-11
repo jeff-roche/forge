@@ -208,6 +208,21 @@
   opacity: 0.55;
 }
 
+/* F-740: latest-point indicator pulses on the shared `forge-pulse` keyframe
+ * (defined in @forge/design/components.css). Animating opacity keeps the
+ * dot's geometry stable so the chart layout never shifts. */
+.usage-card__spark-live-dot {
+  animation: forge-pulse 1.6s ease-in-out infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .usage-card__spark-live-dot {
+    animation: none;
+  }
+}
+
 /* --------------------------------------------------------------------- */
 /* Skeleton placeholders (loading state per spec D.5.1)                   */
 /* --------------------------------------------------------------------- */

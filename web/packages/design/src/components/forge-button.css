@@ -395,13 +395,40 @@
 }
 
 /* =============================================================================
+ * Pulse primitive (F-740)
+ *
+ * Shared 1.6s opacity pulse per `DESIGN.md §Status pill` ("pulse keyframes
+ * 1.6s, 1 → 0.4 → 1 opacity"). Used by the StatusPill live variants and
+ * the UsageCard spark chart's latest-point indicator. `currentColor`
+ * propagation lets each callsite bind the dot color via the parent's
+ * `color` so we don't ship a per-variant rule. The keyframe is defined
+ * once; the suppression rule below covers every `.forge-pulse-dot` site
+ * for `prefers-reduced-motion`.
+ * ============================================================================= */
+
+@keyframes forge-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.4; }
+}
+
+.forge-pulse-dot {
+  animation: forge-pulse 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .forge-pulse-dot {
+    animation: none;
+  }
+}
+
+/* =============================================================================
  * StatusPill — DESIGN.md §Status pill
  *
  * Foreground-only state label. Variants bind the foreground color; the
  * background stays transparent so the pill reads as inline metadata, not
  * as a chip. The leading dot inherits the pill color via `currentColor`.
- * Pulse animation lands in F-740 — for now every variant renders static
- * to honour `prefers-reduced-motion` and ship the visual baseline first.
+ * The `streaming` and `awaiting` variants pulse (F-740) via the shared
+ * `forge-pulse` keyframe; `prefers-reduced-motion` suppresses it.
  * ============================================================================= */
 
 .forge-status-pill {
@@ -430,6 +457,18 @@
 
 .forge-status-pill--streaming {
   color: var(--color-ember-200);
+}
+
+.forge-status-pill--streaming .forge-status-pill__dot,
+.forge-status-pill--awaiting .forge-status-pill__dot {
+  animation: forge-pulse 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .forge-status-pill--streaming .forge-status-pill__dot,
+  .forge-status-pill--awaiting .forge-status-pill__dot {
+    animation: none;
+  }
 }
 
 .forge-status-pill--awaiting {

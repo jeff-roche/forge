@@ -112,6 +112,11 @@ const ProviderRow: Component<ProviderRowProps> = (props) => {
 
   return (
     <li
+      // F-738: the dashboard's remediation CTAs route the user to
+      // `/providers#<provider-id>`. The browser scrolls the row into view
+      // when the fragment matches an element id, so each row carries one
+      // keyed off the provider's stable slug.
+      id={props.provider.id}
       class="providers-page__row"
       classList={{ 'providers-page__row--disabled': !isEnabled() }}
       data-brand={brand()}

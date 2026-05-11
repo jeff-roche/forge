@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
-import { cleanup, render, fireEvent } from '@solidjs/testing-library';
+import { cleanup, render, fireEvent, waitFor } from '@solidjs/testing-library';
 import { MemoryRouter, Route } from '@solidjs/router';
 import {
   SessionsPanel,
@@ -135,12 +135,61 @@ describe('SessionsPanel — F-720', () => {
     expect(await findByText('Archive is empty.')).toBeTruthy();
   });
 
-  it("surfaces session_list failure with verbatim error detail", async () => {
+  it('surfaces session_list failure with verbatim error detail and a RETRY button', async () => {
     invokeMock.mockRejectedValueOnce(new Error('disk exploded'));
-    const { findByText } = renderPanel();
+    const { findByText, findByRole, findByTestId } = renderPanel();
     await waitForFetch();
-    expect(await findByText("Couldn't load sessions.")).toBeTruthy();
+
+    const errorBlock = await findByTestId('sessions-error');
+    expect(errorBlock.getAttribute('role')).toBe('alert');
+    expect(await findByText('SESSIONS UNAVAILABLE')).toBeTruthy();
     expect(await findByText(/disk exploded/)).toBeTruthy();
+    expect(await findByRole('button', { name: /^retry$/i })).toBeTruthy();
+  });
+
+  // F-739: RETRY must re-invoke session_list and, on success, replace the
+  // error block with the populated row list.
+  it('RETRY re-invokes session_list and recovers to the ready state', async () => {
+    invokeMock
+      .mockRejectedValueOnce(new Error('disk exploded'))
+      .mockResolvedValueOnce([sample({ id: 'r001', subject: 'recovered one', state: 'active' })]);
+
+    const { findByRole, findByText, queryByText, queryByTestId } = renderPanel();
+    await waitForFetch();
+
+    expect(await findByText('SESSIONS UNAVAILABLE')).toBeTruthy();
+    const retry = await findByRole('button', { name: /^retry$/i });
+    fireEvent.click(retry);
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledTimes(2);
+    });
+    expect(invokeMock.mock.calls[0]?.[0]).toBe('session_list');
+    expect(invokeMock.mock.calls[1]?.[0]).toBe('session_list');
+
+    expect(await findByText('recovered one')).toBeTruthy();
+    expect(queryByText('SESSIONS UNAVAILABLE')).toBeNull();
+    expect(queryByTestId('sessions-error')).toBeNull();
+  });
+
+  // F-739: a repeated failure keeps the error block visible with the new
+  // verbatim detail; it must not collapse to the empty placeholder.
+  it('RETRY surfaces the new error verbatim when session_list rejects again', async () => {
+    invokeMock
+      .mockRejectedValueOnce(new Error('disk exploded'))
+      .mockRejectedValueOnce(new Error('still broken'));
+
+    const { findByRole, findByText, queryByText } = renderPanel();
+    await waitForFetch();
+
+    expect(await findByText('SESSIONS UNAVAILABLE')).toBeTruthy();
+    fireEvent.click(await findByRole('button', { name: /^retry$/i }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledTimes(2);
+    });
+    expect(await findByText(/still broken/)).toBeTruthy();
+    expect(queryByText('No active sessions yet.')).toBeNull();
   });
 
   // F-079: open_session was previously a fire-and-forget `void invoke(...)`.

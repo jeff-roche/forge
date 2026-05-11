@@ -1,14 +1,16 @@
 import { createResource, createSignal, For, Show, type Component } from 'solid-js';
 import { A } from '@solidjs/router';
-import { Skeleton, StatusPill, type StatusPillVariant } from '@forge/design';
+import { Button, Skeleton, StatusPill, type StatusPillVariant } from '@forge/design';
 import {
   getActiveProvider,
   isProviderEnabled,
   listProviders,
+  providerStatus,
   setActiveProvider,
   type ProviderEntry,
 } from '../../ipc/dashboard';
 import { useRovingTabindex } from '../../lib/useRovingTabindex';
+import { pushToast } from '../toast';
 import './ProvidersSection.css';
 
 export type { ProviderEntry };
@@ -16,14 +18,29 @@ export type { ProviderEntry };
 interface Snapshot {
   entries: ProviderEntry[];
   active: string | null;
+  /**
+   * F-738: Ollama reachability comes from the dedicated `provider_status` IPC
+   * (the only one that probes the running daemon). `dashboard_list_providers`
+   * carries no `reachable` field — TODO once a multi-provider reachability
+   * IPC lands, key this off the per-row payload instead of a side-channel
+   * probe. A probe failure leaves the flag undefined so the START OLLAMA CTA
+   * stays hidden rather than firing on a transient IPC error.
+   */
+  ollamaReachable: boolean | undefined;
 }
 
 async function fetchSnapshot(): Promise<Snapshot> {
-  const [entries, active] = await Promise.all([listProviders(), getActiveProvider()]);
+  const [entries, active, ollamaReachable] = await Promise.all([
+    listProviders(),
+    getActiveProvider(),
+    providerStatus()
+      .then((s) => s.reachable)
+      .catch(() => undefined),
+  ]);
   // F-733: the dashboard's active-provider selector only lists enabled rows
   // so the user cannot promote a disabled provider. Disabled rows still
   // appear on the Providers page so the user can re-enable or remove them.
-  return { entries: entries.filter(isProviderEnabled), active };
+  return { entries: entries.filter(isProviderEnabled), active, ollamaReachable };
 }
 
 /**
@@ -144,6 +161,7 @@ export const ProvidersSection: Component = () => {
                     active={data().active === entry.id}
                     pending={pendingId() === entry.id}
                     disabled={isSubmitting()}
+                    ollamaReachable={data().ollamaReachable}
                     onSelect={handleSelect}
                   />
                 )}
@@ -161,7 +179,30 @@ interface ProviderRowProps {
   active: boolean;
   pending: boolean;
   disabled: boolean;
+  /**
+   * F-738: reachability of the local Ollama daemon. Only meaningful for the
+   * `ollama` row; other rows ignore it. `undefined` when the probe hasn't
+   * resolved or rejected — in that case the START OLLAMA CTA stays hidden.
+   */
+  ollamaReachable: boolean | undefined;
   onSelect: (id: string) => void;
+}
+
+const OLLAMA_SERVE_COMMAND = 'ollama serve';
+
+/**
+ * F-738: Best-effort clipboard copy + user-visible toast. `navigator.clipboard`
+ * is unavailable in non-secure contexts and some headless test envs; in those
+ * cases the toast still carries the literal command so the user can copy it
+ * by hand.
+ */
+async function copyOllamaServeToClipboard(): Promise<void> {
+  try {
+    await navigator.clipboard?.writeText(OLLAMA_SERVE_COMMAND);
+    pushToast('info', `Copied \`${OLLAMA_SERVE_COMMAND}\` — run it in a terminal`);
+  } catch {
+    pushToast('warning', `Run \`${OLLAMA_SERVE_COMMAND}\` in a terminal`);
+  }
 }
 
 /**
@@ -195,6 +236,21 @@ function subtext(entry: ProviderEntry, variant: PillVariant): string {
   return entry.model ?? 'ready';
 }
 
+/**
+ * F-738: remediation CTA shown beside the row pill when the row's state has
+ * an actionable fix. `add-credential` routes the user to the Providers page
+ * row for that id; `start-ollama` copies `ollama serve` to the clipboard and
+ * dispatches a toast so the user can run it in their terminal. The click
+ * bubbles out of the radio row's set-active handler via `stopPropagation`.
+ */
+function needsCredential(entry: ProviderEntry): boolean {
+  return entry.credential_required && !entry.has_credential;
+}
+
+function isOllamaDown(entry: ProviderEntry, ollamaReachable: boolean | undefined): boolean {
+  return entry.id === 'ollama' && ollamaReachable === false;
+}
+
 const ProviderRow: Component<ProviderRowProps> = (props) => {
   const variant = () => pillVariant(props.entry);
   const brand = () => providerBrand(props.entry.id);
@@ -213,6 +269,11 @@ const ProviderRow: Component<ProviderRowProps> = (props) => {
     parts.push(variant() === 'ready' ? 'ready' : 'authentication required');
     if (props.pending) parts.push('SWITCHING');
     return parts.join(', ');
+  };
+  const stopRowSelect = (e: Event) => {
+    // CTA buttons live inside the radio row so the spec's compact row layout
+    // is preserved. Clicks must not also promote the row to active.
+    e.stopPropagation();
   };
 
   return (
@@ -240,6 +301,36 @@ const ProviderRow: Component<ProviderRowProps> = (props) => {
       <StatusPill class="providers__pill" data-variant={variant()} variant={variant()}>
         {variant()}
       </StatusPill>
+      <Show when={needsCredential(props.entry)}>
+        <A
+          class="providers__cta"
+          data-testid={`provider-cta-add-credential-${props.entry.id}`}
+          href={`/providers#${props.entry.id}`}
+          onClick={stopRowSelect}
+          onKeyDown={(e: KeyboardEvent) => {
+            if (e.key === ' ' || e.key === 'Enter') e.stopPropagation();
+          }}
+        >
+          Add credential
+        </A>
+      </Show>
+      <Show when={isOllamaDown(props.entry, props.ollamaReachable)}>
+        <Button
+          variant="primary"
+          size="sm"
+          class="providers__cta providers__cta--primary"
+          data-testid="provider-cta-start-ollama"
+          onClick={(e) => {
+            stopRowSelect(e);
+            void copyOllamaServeToClipboard();
+          }}
+          onKeyDown={(e) => {
+            if (e.key === ' ' || e.key === 'Enter') e.stopPropagation();
+          }}
+        >
+          START OLLAMA
+        </Button>
+      </Show>
       <Show when={props.active}>
         <span class="providers__active-pip" aria-hidden="true" />
       </Show>

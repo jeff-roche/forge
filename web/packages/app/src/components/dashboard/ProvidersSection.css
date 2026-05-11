@@ -223,6 +223,41 @@
   flex-shrink: 0;
 }
 
+/* F-738: per-row remediation CTA. Sits to the right of the pill so the
+ * row's identity stack remains the focal element. `Add credential`
+ * renders as a quiet link; `START OLLAMA` reuses the design-system
+ * primary Button so the size/typography stay tokenised. The row grid
+ * (`auto 1fr auto`) silently expands to accommodate the extra trailing
+ * cell — no template override needed.
+ */
+.providers__cta {
+  flex-shrink: 0;
+  font-family: var(--font-display);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: var(--type-mono-xxs);
+  padding: var(--sp-1) var(--sp-2);
+  border-radius: var(--r-sm);
+  background: transparent;
+  border: 1px solid var(--color-border-2);
+  color: var(--color-text-secondary);
+  text-decoration: none;
+  cursor: pointer;
+  transition: var(--ease);
+}
+
+.providers__cta:hover,
+.providers__cta:focus-visible {
+  color: var(--color-text-primary);
+  border-color: var(--color-ember-400);
+}
+
+.providers__cta:focus-visible {
+  outline: 2px solid var(--color-ember-400);
+  outline-offset: 2px;
+}
+
 /* Active-pip carry-over from the F-586 pattern — small ember glow on
  * the right edge confirming the selection. Rendered after the pill so
  * it sits flush to the row's trailing edge.

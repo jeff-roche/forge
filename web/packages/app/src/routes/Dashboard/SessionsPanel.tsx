@@ -178,13 +178,18 @@ export const SessionsPanel: Component = () => {
             role="tabpanel"
             aria-labelledby={tabId(tab())}
           >
-            <div class="sessions__list-error-body" role="alert">
-              <p class="sessions__list-error-title">Couldn't load sessions.</p>
+            <div
+              class="sessions__list-error-body"
+              role="alert"
+              data-testid="sessions-error"
+            >
+              <p class="sessions__list-error-title">SESSIONS UNAVAILABLE</p>
               <p class="sessions__list-error-detail">{detail()}</p>
               <Button
                 variant="ghost"
                 size="sm"
                 class="sessions__retry"
+                loading={sessions.loading}
                 onClick={() => void refetch()}
               >
                 RETRY

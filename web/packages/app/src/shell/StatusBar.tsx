@@ -43,9 +43,14 @@ import {
 } from '../ipc/session';
 import {
   getActiveProvider as defaultGetActiveProvider,
+  gitBranch as defaultGitBranch,
   sessionList as defaultSessionList,
 } from '../ipc/dashboard';
-import { activeSessionId } from '../stores/session';
+import {
+  detectContainerRuntime as defaultDetectContainerRuntime,
+  type RuntimeStatus,
+} from '../ipc/containers';
+import { activeSessionId, activeWorkspaceRoot } from '../stores/session';
 import { settings } from '../stores/settings';
 import { pushToast } from '../components/toast';
 import './StatusBar.css';
@@ -178,11 +183,31 @@ export interface StatusBarProps {
   subscribeProviderChanged?: ProviderChangedSubscribe;
   /**
    * F-717: connection state surfaced as the rightmost left-slot segment.
-   * `null` renders the literal `unknown` token. Sourced upstream from the
-   * session telemetry store; left as a prop for now so the chrome stays
-   * decoupled from per-route stores.
+   * `null` renders the literal `unknown` token. Explicit values override
+   * the F-741 derived streaming-state. Sourced upstream from the session
+   * telemetry store; left as a prop so test harnesses can pin the segment
+   * deterministically.
    */
   connectionState?: ConnectionState | null;
+  /**
+   * F-741: source of the `<branch>` segment in the left slot. Defaults to
+   * the typed `git_branch` IPC wrapper. The component calls it with the
+   * active workspace root; failures and detached HEAD fall back to the
+   * literal `unknown` token per the status-bar contract.
+   */
+  gitBranch?: typeof defaultGitBranch;
+  /**
+   * F-741: source of the runtime segment in the right slot. Defaults to
+   * the `detect_container_runtime` IPC wrapper. The probe returns a
+   * structured `RuntimeStatus`; failures fall back to `unknown`.
+   */
+  detectContainerRuntime?: typeof defaultDetectContainerRuntime;
+  /**
+   * F-741: override the workspace root the branch feed queries. Defaults
+   * to the global `activeWorkspaceRoot` signal. Tests inject a literal
+   * string so they don't have to seed the store from outside the shell.
+   */
+  workspaceRoot?: string | null;
 }
 
 interface BgEventStarted {
@@ -274,6 +299,17 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
   const [sessionCount, setSessionCount] = createSignal<number | null>(null);
   const [providerId, setProviderId] = createSignal<string | null>(null);
 
+  // F-741: branch, streaming-state, and runtime feeds. Each defaults to
+  // `null` (renders `unknown`) until its source yields. IPC failures are
+  // logged + leave the signal at `null` so the chrome stays decoupled
+  // from per-route error states.
+  const [branch, setBranch] = createSignal<string | null>(null);
+  const [streamingState, setStreamingState] =
+    createSignal<ConnectionState | null>(null);
+  const [runtimeStatus, setRuntimeStatus] = createSignal<RuntimeStatus | null>(
+    null,
+  );
+
   let unlisten: (() => void) | null = null;
   let unlistenProviderChanged: UnlistenFn | null = null;
   let mounted = true;
@@ -311,6 +347,28 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
 
   const handlePayload = (payload: SessionEventPayload): void => {
     if (payload.session_id !== activeSessionId()) return;
+    // F-741: derive streaming-state from the session event stream so the
+    // left-slot pill reflects live turn activity. `StreamingStarted` /
+    // `StreamingStopped` are the authoritative kinds emitted by the
+    // orchestrator; `AssistantDelta` is a defensive fallback for the same
+    // window so a missed start event still flips the pill on first delta.
+    if (
+      typeof payload.event === 'object' &&
+      payload.event !== null
+    ) {
+      const kind = (payload.event as { kind?: unknown }).kind;
+      if (kind === 'StreamingStarted' || kind === 'AssistantDelta') {
+        setStreamingState('streaming');
+      } else if (kind === 'StreamingStopped') {
+        setStreamingState('idle');
+      } else if (kind === 'AssistantMessage') {
+        // The orchestrator emits an empty `AssistantMessage` at stream start
+        // and a populated one at finalisation. Either flips us out of
+        // `streaming` — the next `AssistantDelta` (or `StreamingStarted`)
+        // brings it back if another turn begins.
+        setStreamingState('idle');
+      }
+    }
     const ev = classifyEvent(payload.event);
     if (ev === null) return;
     if (ev.type === 'background_agent_started') {
@@ -405,6 +463,42 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
         console.error('provider:changed listen failed', err);
       }
     })();
+
+    // F-741: branch feed. The active workspace root drives the query;
+    // either prop override or the global signal. `null` workspace (no
+    // session mounted yet) keeps the segment at `unknown` rather than
+    // shelling out to git in `/` and surfacing a stray fatal.
+    const getBranch = props.gitBranch ?? defaultGitBranch;
+    const root = props.workspaceRoot ?? activeWorkspaceRoot();
+    if (typeof root === 'string' && root.length > 0) {
+      void (async () => {
+        try {
+          const name = await getBranch(root);
+          if (mounted && typeof name === 'string' && name.length > 0) {
+            setBranch(name);
+          }
+        } catch (err) {
+          console.error('git_branch failed', err);
+        }
+      })();
+    }
+
+    // F-741: runtime probe. Single-shot at mount — the dashboard's
+    // ContainersSection owns the long-lived banner; the status-bar
+    // segment is a chrome-level hint, not the user's actionable banner.
+    // Probe failures or unavailable runtimes both render `unknown`.
+    const detectRuntime =
+      props.detectContainerRuntime ?? defaultDetectContainerRuntime;
+    void (async () => {
+      try {
+        const status = await detectRuntime();
+        if (mounted && status && typeof status === 'object') {
+          setRuntimeStatus(status);
+        }
+      } catch (err) {
+        console.error('detect_container_runtime failed', err);
+      }
+    })();
   });
 
   onCleanup(() => {
@@ -484,13 +578,40 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
     return n === null ? UNKNOWN_TOKEN : `${n} sessions`;
   };
   const providerLabel = (): string => providerId() ?? UNKNOWN_TOKEN;
-  const stateLabel = (): string => props.connectionState ?? UNKNOWN_TOKEN;
-  // TODO(F-741): wire git branch IPC.
-  const branchLabel = (): string => UNKNOWN_TOKEN;
-  // TODO(F-741): wire usage feed (spend + token totals from forge-usage).
+  // F-741: prop override wins so test harnesses can pin the segment; the
+  // derived streaming-state otherwise drives the pill from `session:event`.
+  const stateLabel = (): string =>
+    props.connectionState ?? streamingState() ?? UNKNOWN_TOKEN;
+  // F-741: branch comes from the workspace's git `rev-parse HEAD`. Detached
+  // HEAD (`branch: null`) and IPC failures both render the literal token.
+  const branchLabel = (): string => branch() ?? UNKNOWN_TOKEN;
+  // TODO(F-741-followup): wire usage feed (spend + token totals from
+  // forge-usage). Kept stubbed under the same F-741 umbrella — the usage
+  // store is its own follow-up because the segment depends on a daemon
+  // running, not just the dashboard probe.
   const usageLabel = (): string => UNKNOWN_TOKEN;
-  // TODO(F-741): wire runtime feed (container/runtime status).
-  const runtimeLabel = (): string => UNKNOWN_TOKEN;
+  // F-741: runtime status from the existing `detect_container_runtime`
+  // probe. `available` renders the tool name + check; every other
+  // variant carries a `tool` field (Missing / Broken / RootlessUnavailable)
+  // and surfaces it with a `down` suffix; `Unknown` and pre-probe both
+  // collapse to the literal token.
+  const runtimeLabel = (): string => {
+    const status = runtimeStatus();
+    if (status === null) return UNKNOWN_TOKEN;
+    switch (status.kind) {
+      case 'available':
+        // Phase 3 only ships the podman backend; the runtime probe does
+        // not echo the tool name on `available`. Hard-coded for the same
+        // reason `ContainersSection.tsx` does — F-595 fixed the backend.
+        return 'podman up';
+      case 'missing':
+      case 'broken':
+      case 'rootless_unavailable':
+        return `${status.tool} down`;
+      case 'unknown':
+        return UNKNOWN_TOKEN;
+    }
+  };
 
   return (
     <footer class="status-bar" aria-label="Status bar" data-testid="status-bar">

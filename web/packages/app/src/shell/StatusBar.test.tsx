@@ -32,7 +32,10 @@ import type {
   ProviderChangedSubscribe,
 } from './StatusBar';
 import type { SessionEventPayload } from '../ipc/session';
-import { setActiveSessionId } from '../stores/session';
+import {
+  setActiveSessionId,
+  setActiveWorkspaceRoot,
+} from '../stores/session';
 import { resetSettingsStore, seedSettings } from '../stores/settings';
 import { setInvokeForTesting } from '../lib/tauri';
 
@@ -881,7 +884,7 @@ describe('StatusBar — left slot (F-717)', () => {
 });
 
 describe('StatusBar — right slot (F-717)', () => {
-  it('usage badge stubbed to `unknown` (F-741)', async () => {
+  it('usage badge stubbed to `unknown` (F-741-followup)', async () => {
     const { findByTestId } = render(() => (
       <StatusBar
         listBackgroundAgents={vi.fn().mockResolvedValue([])}
@@ -891,20 +894,6 @@ describe('StatusBar — right slot (F-717)', () => {
       />
     ));
     expect(await findByTestId('status-bar-usage')).toHaveTextContent('unknown');
-  });
-
-  it('runtime badge stubbed to `unknown` (F-741)', async () => {
-    const { findByTestId } = render(() => (
-      <StatusBar
-        listBackgroundAgents={vi.fn().mockResolvedValue([])}
-        subscribe={bgBusStub().subscribe}
-        sessionList={vi.fn().mockResolvedValue([])}
-        getActiveProvider={vi.fn().mockResolvedValue(null)}
-      />
-    ));
-    expect(await findByTestId('status-bar-runtime')).toHaveTextContent(
-      'unknown',
-    );
   });
 
   it('keeps the bg-agents badge as the last right-slot element', async () => {
@@ -919,5 +908,355 @@ describe('StatusBar — right slot (F-717)', () => {
     const right = await findByTestId('status-bar-right');
     const badge = await findByTestId('bg-agents-badge');
     expect(right.contains(badge)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F-741: live feeds — branch (`git_branch`), streaming-state (`session:event`),
+// runtime (`detect_container_runtime`). Every feed is asserted across the
+// loading → ready → error transitions. Per the status-bar contract a feed
+// that has not yielded, fails, or returns an empty/detached value paints
+// the literal `unknown` token. Ready states paint the real value.
+// ---------------------------------------------------------------------------
+
+describe('StatusBar — branch feed (F-741)', () => {
+  const WS = '/home/user/acme-api';
+
+  it('renders `unknown` while the git_branch invoke is pending', async () => {
+    const d = deferred<string | null>();
+    const { findByTestId } = render(() => (
+      <StatusBar
+        listBackgroundAgents={vi.fn().mockResolvedValue([])}
+        subscribe={bgBusStub().subscribe}
+        sessionList={vi.fn().mockResolvedValue([])}
+        getActiveProvider={vi.fn().mockResolvedValue(null)}
+        workspaceRoot={WS}
+        gitBranch={(() => d.promise) as never}
+      />
+    ));
+    expect(await findByTestId('status-bar-branch')).toHaveTextContent(
+      'unknown',
+    );
+    // Resolve so the cleanup path doesn't leak the unresolved promise.
+    d.resolve(null);
+  });
+
+  it('renders the branch name once git_branch resolves', async () => {
+    const gitBranch = vi.fn().mockResolvedValue('main');
+    const { findByTestId, getByTestId } = render(() => (
+      <StatusBar
+        listBackgroundAgents={vi.fn().mockResolvedValue([])}
+        subscribe={bgBusStub().subscribe}
+        sessionList={vi.fn().mockResolvedValue([])}
+        getActiveProvider={vi.fn().mockResolvedValue(null)}
+        workspaceRoot={WS}
+        gitBranch={gitBranch}
+      />
+    ));
+    await findByTestId('status-bar-branch');
+    await waitFor(() => {
+      expect(gitBranch).toHaveBeenCalledWith(WS);
+    });
+    await waitFor(() => {
+      expect(getByTestId('status-bar-branch')).toHaveTextContent('main');
+    });
+  });
+
+  it('renders `unknown` when git_branch returns null (detached HEAD)', async () => {
+    const gitBranch = vi.fn().mockResolvedValue(null);
+    const { findByTestId } = render(() => (
+      <StatusBar
+        listBackgroundAgents={vi.fn().mockResolvedValue([])}
+        subscribe={bgBusStub().subscribe}
+        sessionList={vi.fn().mockResolvedValue([])}
+        getActiveProvider={vi.fn().mockResolvedValue(null)}
+        workspaceRoot={WS}
+        gitBranch={gitBranch}
+      />
+    ));
+    await waitFor(() => {
+      expect(gitBranch).toHaveBeenCalled();
+    });
+    expect(await findByTestId('status-bar-branch')).toHaveTextContent(
+      'unknown',
+    );
+  });
+
+  it('renders `unknown` when git_branch rejects', async () => {
+    const gitBranch = vi.fn().mockRejectedValue(new Error('boom'));
+    const { findByTestId } = render(() => (
+      <StatusBar
+        listBackgroundAgents={vi.fn().mockResolvedValue([])}
+        subscribe={bgBusStub().subscribe}
+        sessionList={vi.fn().mockResolvedValue([])}
+        getActiveProvider={vi.fn().mockResolvedValue(null)}
+        workspaceRoot={WS}
+        gitBranch={gitBranch}
+      />
+    ));
+    await waitFor(() => {
+      expect(gitBranch).toHaveBeenCalled();
+    });
+    expect(await findByTestId('status-bar-branch')).toHaveTextContent(
+      'unknown',
+    );
+  });
+
+  it('skips the invoke entirely when no workspace root is available', async () => {
+    setActiveWorkspaceRoot(null);
+    const gitBranch = vi.fn();
+    const { findByTestId } = render(() => (
+      <StatusBar
+        listBackgroundAgents={vi.fn().mockResolvedValue([])}
+        subscribe={bgBusStub().subscribe}
+        sessionList={vi.fn().mockResolvedValue([])}
+        getActiveProvider={vi.fn().mockResolvedValue(null)}
+        gitBranch={gitBranch}
+      />
+    ));
+    await findByTestId('status-bar-branch');
+    // Give pending microtasks a chance to settle.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(gitBranch).not.toHaveBeenCalled();
+  });
+
+  it('reads the workspace from `activeWorkspaceRoot` when no prop is given', async () => {
+    setActiveWorkspaceRoot(WS);
+    const gitBranch = vi.fn().mockResolvedValue('feature/x');
+    const { getByTestId } = render(() => (
+      <StatusBar
+        listBackgroundAgents={vi.fn().mockResolvedValue([])}
+        subscribe={bgBusStub().subscribe}
+        sessionList={vi.fn().mockResolvedValue([])}
+        getActiveProvider={vi.fn().mockResolvedValue(null)}
+        gitBranch={gitBranch}
+      />
+    ));
+    await waitFor(() => {
+      expect(gitBranch).toHaveBeenCalledWith(WS);
+    });
+    await waitFor(() => {
+      expect(getByTestId('status-bar-branch')).toHaveTextContent('feature/x');
+    });
+    setActiveWorkspaceRoot(null);
+  });
+});
+
+describe('StatusBar — streaming-state feed (F-741)', () => {
+  it('renders `unknown` before any session:event arrives', async () => {
+    const { findByTestId } = render(() => (
+      <StatusBar
+        listBackgroundAgents={vi.fn().mockResolvedValue([])}
+        subscribe={bgBusStub().subscribe}
+        sessionList={vi.fn().mockResolvedValue([])}
+        getActiveProvider={vi.fn().mockResolvedValue(null)}
+      />
+    ));
+    expect(await findByTestId('status-bar-state')).toHaveTextContent('unknown');
+  });
+
+  it('flips to `streaming` on StreamingStarted and `idle` on StreamingStopped', async () => {
+    const bus = fakeBus();
+    const { findByTestId, getByTestId } = render(() => (
+      <StatusBar
+        listBackgroundAgents={vi.fn().mockResolvedValue([])}
+        subscribe={bus.subscribe}
+        sessionList={vi.fn().mockResolvedValue([])}
+        getActiveProvider={vi.fn().mockResolvedValue(null)}
+      />
+    ));
+    await findByTestId('status-bar-state');
+
+    bus.emit({
+      session_id: SID,
+      seq: 1,
+      event: { kind: 'StreamingStarted' },
+    });
+    await waitFor(() => {
+      expect(getByTestId('status-bar-state')).toHaveTextContent('streaming');
+    });
+
+    bus.emit({
+      session_id: SID,
+      seq: 2,
+      event: { kind: 'StreamingStopped' },
+    });
+    await waitFor(() => {
+      expect(getByTestId('status-bar-state')).toHaveTextContent('idle');
+    });
+  });
+
+  it('flips to `streaming` on AssistantDelta as a defensive fallback', async () => {
+    const bus = fakeBus();
+    const { findByTestId, getByTestId } = render(() => (
+      <StatusBar
+        listBackgroundAgents={vi.fn().mockResolvedValue([])}
+        subscribe={bus.subscribe}
+        sessionList={vi.fn().mockResolvedValue([])}
+        getActiveProvider={vi.fn().mockResolvedValue(null)}
+      />
+    ));
+    await findByTestId('status-bar-state');
+    bus.emit({
+      session_id: SID,
+      seq: 1,
+      event: { kind: 'AssistantDelta', delta: 'hi', message_id: 'm1' },
+    });
+    await waitFor(() => {
+      expect(getByTestId('status-bar-state')).toHaveTextContent('streaming');
+    });
+  });
+
+  it('ignores streaming events for other sessions', async () => {
+    const bus = fakeBus();
+    const { findByTestId, getByTestId } = render(() => (
+      <StatusBar
+        listBackgroundAgents={vi.fn().mockResolvedValue([])}
+        subscribe={bus.subscribe}
+        sessionList={vi.fn().mockResolvedValue([])}
+        getActiveProvider={vi.fn().mockResolvedValue(null)}
+      />
+    ));
+    await findByTestId('status-bar-state');
+    bus.emit({
+      session_id: 'other-session',
+      seq: 1,
+      event: { kind: 'StreamingStarted' },
+    });
+    await Promise.resolve();
+    expect(getByTestId('status-bar-state')).toHaveTextContent('unknown');
+  });
+
+  it('explicit `connectionState` prop overrides the derived signal', async () => {
+    const bus = fakeBus();
+    const { findByTestId, getByTestId } = render(() => (
+      <StatusBar
+        listBackgroundAgents={vi.fn().mockResolvedValue([])}
+        subscribe={bus.subscribe}
+        sessionList={vi.fn().mockResolvedValue([])}
+        getActiveProvider={vi.fn().mockResolvedValue(null)}
+        connectionState={'awaiting approval' as ConnectionState}
+      />
+    ));
+    bus.emit({
+      session_id: SID,
+      seq: 1,
+      event: { kind: 'StreamingStarted' },
+    });
+    await Promise.resolve();
+    expect(await findByTestId('status-bar-state')).toHaveTextContent(
+      'awaiting approval',
+    );
+    // Verify the override survives even when the bus continues to chatter.
+    bus.emit({
+      session_id: SID,
+      seq: 2,
+      event: { kind: 'StreamingStopped' },
+    });
+    await Promise.resolve();
+    expect(getByTestId('status-bar-state')).toHaveTextContent(
+      'awaiting approval',
+    );
+  });
+});
+
+describe('StatusBar — runtime feed (F-741)', () => {
+  it('renders `unknown` while the runtime probe is pending', async () => {
+    const d = deferred<unknown>();
+    const { findByTestId } = render(() => (
+      <StatusBar
+        listBackgroundAgents={vi.fn().mockResolvedValue([])}
+        subscribe={bgBusStub().subscribe}
+        sessionList={vi.fn().mockResolvedValue([])}
+        getActiveProvider={vi.fn().mockResolvedValue(null)}
+        detectContainerRuntime={(() => d.promise) as never}
+      />
+    ));
+    expect(await findByTestId('status-bar-runtime')).toHaveTextContent(
+      'unknown',
+    );
+    d.resolve({ kind: 'unknown', reason: 'cleanup' });
+  });
+
+  it('renders `podman up` when the probe reports `available`', async () => {
+    const probe = vi.fn().mockResolvedValue({ kind: 'available' });
+    const { findByTestId, getByTestId } = render(() => (
+      <StatusBar
+        listBackgroundAgents={vi.fn().mockResolvedValue([])}
+        subscribe={bgBusStub().subscribe}
+        sessionList={vi.fn().mockResolvedValue([])}
+        getActiveProvider={vi.fn().mockResolvedValue(null)}
+        detectContainerRuntime={probe}
+      />
+    ));
+    await findByTestId('status-bar-runtime');
+    await waitFor(() => {
+      expect(probe).toHaveBeenCalled();
+    });
+    await waitFor(() => {
+      expect(getByTestId('status-bar-runtime')).toHaveTextContent('podman up');
+    });
+  });
+
+  it('renders `<tool> down` when the probe reports `missing`', async () => {
+    const probe = vi
+      .fn()
+      .mockResolvedValue({ kind: 'missing', tool: 'podman' });
+    const { findByTestId, getByTestId } = render(() => (
+      <StatusBar
+        listBackgroundAgents={vi.fn().mockResolvedValue([])}
+        subscribe={bgBusStub().subscribe}
+        sessionList={vi.fn().mockResolvedValue([])}
+        getActiveProvider={vi.fn().mockResolvedValue(null)}
+        detectContainerRuntime={probe}
+      />
+    ));
+    await findByTestId('status-bar-runtime');
+    await waitFor(() => {
+      expect(getByTestId('status-bar-runtime')).toHaveTextContent(
+        'podman down',
+      );
+    });
+  });
+
+  it('renders `unknown` when the probe rejects', async () => {
+    const probe = vi.fn().mockRejectedValue(new Error('boom'));
+    const { findByTestId } = render(() => (
+      <StatusBar
+        listBackgroundAgents={vi.fn().mockResolvedValue([])}
+        subscribe={bgBusStub().subscribe}
+        sessionList={vi.fn().mockResolvedValue([])}
+        getActiveProvider={vi.fn().mockResolvedValue(null)}
+        detectContainerRuntime={probe}
+      />
+    ));
+    await waitFor(() => {
+      expect(probe).toHaveBeenCalled();
+    });
+    expect(await findByTestId('status-bar-runtime')).toHaveTextContent(
+      'unknown',
+    );
+  });
+
+  it('renders `unknown` when the probe reports the `unknown` variant', async () => {
+    const probe = vi
+      .fn()
+      .mockResolvedValue({ kind: 'unknown', reason: 'probe drifted' });
+    const { findByTestId } = render(() => (
+      <StatusBar
+        listBackgroundAgents={vi.fn().mockResolvedValue([])}
+        subscribe={bgBusStub().subscribe}
+        sessionList={vi.fn().mockResolvedValue([])}
+        getActiveProvider={vi.fn().mockResolvedValue(null)}
+        detectContainerRuntime={probe}
+      />
+    ));
+    await waitFor(() => {
+      expect(probe).toHaveBeenCalled();
+    });
+    expect(await findByTestId('status-bar-runtime')).toHaveTextContent(
+      'unknown',
+    );
   });
 });

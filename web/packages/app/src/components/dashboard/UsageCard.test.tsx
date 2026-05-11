@@ -174,6 +174,22 @@ describe('UsageCard states', () => {
     expect(tokensOut.textContent).toContain('1.1');
     expect(await findByTestId('usage-card-spark')).toBeTruthy();
   });
+
+  it('marks the latest spark point with the live-dot class so the pulse animates (F-740)', async () => {
+    setInvokeForTesting(
+      stageInvoke({ in: 1_000, out: 1_000, cost: 1 }, ZERO) as never,
+    );
+    const { findByTestId } = render(() => <UsageCard />);
+    const spark = await findByTestId('usage-card-spark');
+    const liveDots = spark.querySelectorAll('.usage-card__spark-live-dot');
+    // Exactly one — the last point.
+    expect(liveDots.length).toBe(1);
+    // And it's the last <circle> in document order.
+    const circles = spark.querySelectorAll('circle');
+    const last = circles[circles.length - 1];
+    expect(last).toBeDefined();
+    expect(last!.classList.contains('usage-card__spark-live-dot')).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------
