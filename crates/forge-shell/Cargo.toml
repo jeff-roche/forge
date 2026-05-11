@@ -26,6 +26,12 @@ dirs = "5"
 # per-connection MCP reply-router in `bridge.rs`.
 futures = "0.3"
 forge-agents = { path = "../forge-agents" }
+# F-725: shell-side `session_start` IPC reuses the CLI's session-spawn helper
+# (`forge_cli::spawn::spawn_forged_session`) so both `forge session new` and
+# the dashboard's "+ New session" modal walk identical daemon-boot semantics.
+# Only the library half of forge-cli is pulled in; the `forge` binary is not
+# bundled into the shell.
+forge-cli = { path = "../forge-cli" }
 forge-core = { path = "../forge-core" }
 forge-fs = { path = "../forge-fs" }
 forge-ipc = { path = "../forge-ipc" }
@@ -75,6 +81,11 @@ tauri = { version = "2", optional = true , features = [] }
 # branch of `notifications.bg_agents`. Gated behind `webview` because the plugin
 # pulls the full Tauri runtime; pure-Rust unit tests build without it.
 tauri-plugin-notification = { version = "2", optional = true }
+# F-726 follow-up: native directory picker for the `+ New session` modal's
+# empty-workspace branch (docs/ui-specs/new-session-flow.md §"Empty-workspace
+# branch"). Gated behind `webview` for the same reason as notification — the
+# plugin pulls the full Tauri runtime, and pure-Rust unit tests don't need it.
+tauri-plugin-dialog = { version = "2", optional = true }
 tokio = { version = "1", features = ["fs", "net", "io-util", "sync", "time", "rt", "rt-multi-thread", "macros"] }
 # F-151: `set_setting` applies scalar updates against the raw TOML tree of
 # `settings.toml` and round-trips through the canonical serializer to land
@@ -108,7 +119,7 @@ wiremock = "0.6"
 # Disable with `--no-default-features` to run pure-Rust unit tests on a
 # host without WebKitGTK installed.
 default = ["webview"]
-webview = ["dep:tauri", "dep:tauri-build", "dep:png", "dep:tauri-plugin-notification"]
+webview = ["dep:tauri", "dep:tauri-build", "dep:png", "dep:tauri-plugin-notification", "dep:tauri-plugin-dialog"]
 # Opt-in feature that activates Tauri's `test` helpers so integration tests
 # can use `tauri::test::mock_builder`. Implies `webview`. Not on by default
 # so production builds don't pull test scaffolding.

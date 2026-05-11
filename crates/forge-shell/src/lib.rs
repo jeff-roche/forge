@@ -58,6 +58,11 @@ pub mod memory_ipc;
 // `dashboard_` prefix on `list_providers` disambiguates from F-591's
 // roster-catalog command of the same short name.
 pub mod providers_ipc;
+// F-725: dashboard `+ New session` IPC. Pure validators
+// (`validate_session_start_input`, `provider_is_known`, `agent_is_known`)
+// are always compiled so non-webview unit tests link without Tauri; the
+// `#[tauri::command]` wrapper is gated behind `webview`.
+pub mod session_spawn_ipc;
 // F-593: `usage_summary` Tauri command, plus the cross-workspace toggle and
 // monthly-file walker that backs it. Gated behind `webview` because the
 // command itself depends on Tauri types; the helpers it ships are exercised

@@ -1,6 +1,8 @@
 import { type Component, createResource, createSignal, onMount, Show } from 'solid-js';
+import { AttachSessionPicker } from '../components/AttachSessionPicker';
 import { DashboardHero } from '../components/dashboard/DashboardHero';
 import { EnabledAssetsCard } from '../components/dashboard/EnabledAssetsCard';
+import { NewSessionDialog } from '../components/NewSessionDialog';
 import { ProvidersSection } from '../components/dashboard/ProvidersSection';
 import { UsageCard } from '../components/dashboard/UsageCard';
 import { SessionsPanel } from './Dashboard/SessionsPanel';
@@ -90,6 +92,10 @@ export const Dashboard: Component = () => {
   // previously dismissed the banner never sees a flash before the IPC
   // round-trip lands.
   const [bannerDismissed, setBannerDismissed] = createSignal<boolean | null>(null);
+  // F-726: + New session dialog open state.
+  const [newSessionOpen, setNewSessionOpen] = createSignal(false);
+  // F-727: Attach to session picker open state.
+  const [attachOpen, setAttachOpen] = createSignal(false);
   onMount(() => {
     void (async () => {
       setBannerDismissed(await loadBannerDismissed());
@@ -125,7 +131,18 @@ export const Dashboard: Component = () => {
 
   return (
     <main class="dashboard">
-      <DashboardHero />
+      <DashboardHero
+        onAttach={() => setAttachOpen(true)}
+        onNewSession={() => setNewSessionOpen(true)}
+      />
+      <NewSessionDialog
+        open={newSessionOpen()}
+        onClose={() => setNewSessionOpen(false)}
+      />
+      <AttachSessionPicker
+        open={attachOpen()}
+        onClose={() => setAttachOpen(false)}
+      />
       <Show when={missing()}>
         {(m) => <CredentialBanner providerLabel={m().label} />}
       </Show>

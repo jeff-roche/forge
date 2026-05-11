@@ -28,6 +28,16 @@ export async function sessionList(): Promise<SessionSummary[]> {
 }
 
 /**
+ * F-727: Fetch the subset of sessions the hero's `Attach to session` picker
+ * can re-open — wire-state `stopped` (the daemon process is gone). The
+ * shell filters server-side; the webview consumes the result directly with
+ * no additional state pass.
+ */
+export async function listAttachableSessions(): Promise<SessionSummary[]> {
+  return invoke<SessionSummary[]>('list_sessions');
+}
+
+/**
  * Reopen the Session window for `id`. The shell brings an existing window to
  * the front or spawns a new one when the window was previously closed.
  */

@@ -150,50 +150,22 @@ async fn session_new(kind: SessionNewKind) -> Result<()> {
         }
     };
 
-    let session_id = forge_core::SessionId::new();
-    let sock = forge_cli::socket::socket_path(&session_id.to_string())?;
-    let pid_file = forge_cli::socket::pid_path(&session_id.to_string())?;
+    let (agent, provider) = match &kind {
+        SessionNewKind::Agent { name, provider, .. } => (Some(name.as_str()), provider.as_deref()),
+        // `forge session new provider` historically passed `--provider <spec>`
+        // without an `--agent`. The shared spawn helper applies a stable
+        // `orchestrator` default for the agent so the daemon's required flag
+        // is still satisfied; preserve the existing wire shape by passing it
+        // explicitly.
+        SessionNewKind::Provider { spec, .. } => (Some("orchestrator"), Some(spec.as_str())),
+    };
 
-    if let Some(parent) = sock.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-
-    let forged = find_forged_binary()?;
-    let mut cmd = std::process::Command::new(&forged);
-    // F-049: forged owns the pid-file lifecycle. The CLI tells the daemon
-    // where to write it (atomic O_EXCL, removed on clean exit); the CLI
-    // no longer touches the file itself. This eliminates the window where
-    // the CLI had recorded a pid before forged had fully started, and
-    // guarantees removal on daemon-initiated exit.
-    cmd.env("FORGE_SESSION_ID", session_id.to_string())
-        .env("FORGE_SOCKET_PATH", sock.to_str().unwrap_or(""))
-        .env("FORGE_WORKSPACE", workspace.to_str().unwrap_or(""))
-        .env("FORGE_PID_FILE", pid_file.to_str().unwrap_or(""));
-
-    match &kind {
-        SessionNewKind::Agent { name, provider, .. } => {
-            cmd.arg("--agent").arg(name);
-            if let Some(spec) = provider {
-                cmd.arg("--provider").arg(spec);
-            }
-        }
-        SessionNewKind::Provider { spec, .. } => {
-            cmd.arg("--provider").arg(spec);
-        }
-    }
-
-    // Spawn forged as a detached process. Using std::process::Command means
-    // the child is not killed when this handle is dropped; forged lives on
-    // independently and is adopted by init once `forge` exits.
-    let child = cmd.spawn()?;
-    // Explicitly leak the handle — we want forged to run independently.
-    std::mem::forget(child);
-
-    // Wait for socket to appear (which confirms forged is up and the pid
-    // file is already written — see forge-session/src/main.rs).
-    wait_for_socket(&sock).await?;
-
-    println!("session {} started at {}", session_id, sock.display());
+    let spawned = forge_cli::spawn::spawn_forged_session(&workspace, agent, provider).await?;
+    println!(
+        "session {} started at {}",
+        spawned.session_id,
+        spawned.socket_path.display()
+    );
     Ok(())
 }
 

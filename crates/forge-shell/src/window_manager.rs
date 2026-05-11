@@ -70,6 +70,11 @@ pub fn run() -> Result<()> {
         // capability file grants the browser-facing permissions; see
         // `crates/forge-shell/capabilities/default.json`.
         .plugin(tauri_plugin_notification::init())
+        // F-726 follow-up: native directory picker for the `+ New session`
+        // modal's empty-workspace branch. The webview calls `open({ directory:
+        // true, ... })` from `@tauri-apps/plugin-dialog`; the capability file
+        // grants the matching `dialog:allow-open` permission.
+        .plugin(tauri_plugin_dialog::init())
         .manage(ProviderStatusCache::new(CACHE_TTL))
         .invoke_handler(tauri::generate_handler![
             dashboard::provider_status,
@@ -152,6 +157,12 @@ pub fn run() -> Result<()> {
             crate::containers_ipc::stop_container,
             crate::containers_ipc::remove_container,
             crate::containers_ipc::container_logs,
+            // F-725: dashboard `+ New session` modal. Spawns a daemon-backed
+            // session via the same code path `forge session new` walks.
+            crate::session_spawn_ipc::session_start,
+            // F-727: dashboard `Attach to session` picker. Returns the
+            // attachable (detached) subset of `session_list`.
+            crate::session_spawn_ipc::list_sessions,
         ])
         .setup(|app| {
             crate::ipc::manage_bridge(&app.handle().clone());

@@ -2,6 +2,7 @@ pub mod display;
 pub mod mcp;
 pub mod skill;
 pub mod socket;
+pub mod spawn;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
