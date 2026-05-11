@@ -1,0 +1,203 @@
+/* F-724: Enabled · workspace card.
+ *
+ * Card chrome mirrors the sibling dashboard cards (ProvidersSection /
+ * ContainersSection). Toggle visual matches DESIGN.md §Toggle switch:
+ * 28×16 track, 12px thumb, ember-900 on / border-1 off, ember-400 thumb
+ * on / text-tertiary off, --ease transition on track + thumb.
+ */
+
+.enabled-assets {
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-border-1);
+  border-radius: var(--r-lg);
+  padding: var(--sp-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  font-family: var(--font-body);
+  color: var(--color-text-primary);
+}
+
+.enabled-assets__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+
+.enabled-assets__label {
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-xxs);
+  letter-spacing: 0.22em;
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+}
+
+.enabled-assets__workspace {
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-xxs);
+  color: var(--color-text-tertiary);
+}
+
+.enabled-assets__skeleton.forge-skeleton-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.enabled-assets__empty {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-sm);
+  color: var(--color-text-tertiary);
+  letter-spacing: 0.05em;
+}
+
+.enabled-assets__error,
+.enabled-assets__action-error {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  background: var(--color-error-bg);
+  border-left: 3px solid var(--color-error);
+  border-radius: var(--r-sm);
+  margin: 0;
+  font-family: var(--font-mono);
+  color: var(--color-text-primary);
+}
+
+.enabled-assets__error-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--color-ember-300);
+}
+
+.enabled-assets__error-detail {
+  margin: 0;
+  color: var(--color-text-secondary);
+}
+
+.enabled-assets__retry {
+  align-self: flex-start;
+}
+
+.enabled-assets__groups {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+.enabled-assets__group-title {
+  margin: 0 0 var(--sp-2) 0;
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-xxs);
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--color-text-tertiary);
+}
+
+.enabled-assets__rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.enabled-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--color-border-1);
+}
+
+.enabled-row:last-child {
+  border-bottom: none;
+}
+
+.enabled-row__name {
+  font-family: var(--font-body);
+  font-weight: 500;
+  color: var(--color-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.enabled-row__state {
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-xxs);
+  letter-spacing: 0.06em;
+  text-transform: lowercase;
+}
+
+.enabled-row__state--on {
+  color: var(--color-ember-400);
+}
+
+.enabled-row__state--off {
+  color: var(--color-text-tertiary);
+}
+
+/* DESIGN.md §Toggle switch — 28×16 track, ember-900 on / border-1 off,
+ * 12px thumb at left:2px → left:14px when on, ember-400 on /
+ * text-tertiary off, `--ease` transition on track + thumb. */
+.enabled-row__toggle {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+}
+
+.enabled-row__input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.enabled-row__track {
+  position: relative;
+  display: inline-block;
+  width: 28px;
+  height: 16px;
+  border-radius: 8px;
+  background: var(--color-border-1);
+  transition: background var(--ease);
+}
+
+.enabled-row__thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--color-text-tertiary);
+  transition: left var(--ease), background var(--ease);
+}
+
+.enabled-row__input:checked + .enabled-row__track {
+  background: var(--color-ember-900);
+}
+
+.enabled-row__input:checked + .enabled-row__track .enabled-row__thumb {
+  left: 14px;
+  background: var(--color-ember-400);
+}
+
+.enabled-row__input:focus-visible + .enabled-row__track {
+  outline: 2px solid var(--color-ember-300);
+  outline-offset: 2px;
+}

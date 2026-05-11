@@ -23,3 +23,8 @@ export {
   type SkeletonProps,
   type SkeletonVariant,
 } from './Skeleton';
+export {
+  StatusPill,
+  type StatusPillProps,
+  type StatusPillVariant,
+} from './StatusPill';

@@ -1,4 +1,4 @@
-/* F-597 Containers section — mirrors the CredentialsSection / ProvidersSection aesthetic. */
+/* F-723 Containers section — v-dash relayout per docs/ui-specs/containers-section.md. */
 
 .containers-section {
   background: var(--color-surface-1);
@@ -10,13 +10,30 @@
   gap: var(--sp-4);
   font-family: var(--font-body);
   color: var(--color-text-primary);
-  max-width: 720px;
 }
+
+/* ---- Card header ------------------------------------------------------- */
 
 .containers-section__header {
   display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+.containers-section__head-left {
+  display: flex;
   align-items: baseline;
   gap: var(--sp-3);
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.containers-section__head-right {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-left: auto;
+  flex-shrink: 0;
 }
 
 .containers-section__label {
@@ -27,34 +44,34 @@
   text-transform: uppercase;
 }
 
-.containers-section__hint {
-  margin: 0;
-  font-size: var(--type-mono-md);
-  color: var(--color-text-secondary);
-  line-height: 1.5;
+.containers-section__meta {
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-xxs);
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
+
+.containers-section__head-btn {
+  font-size: var(--type-mono-xs);
+}
+
+/* ---- States ------------------------------------------------------------ */
 
 /* F-684: row-shaped loading state. The skeleton group's gap matches the
  * gap between live `.containers-section__row` entries so the surface does
  * not re-layout when the resource resolves. */
 .containers-section__skeleton.forge-skeleton-group {
-  gap: var(--sp-4);
+  gap: var(--sp-2);
 }
 
 .containers-section__empty {
   margin: 0;
+  padding: var(--sp-3) 0;
   font-family: var(--font-mono);
   font-size: var(--type-mono-sm);
   color: var(--color-text-tertiary);
-  letter-spacing: 0.05em;
-}
-
-.containers-section__empty-hint {
-  margin: 0;
-  font-family: var(--font-mono);
-  font-size: var(--type-mono-sm);
-  color: var(--color-text-tertiary);
-  opacity: 0.7;
 }
 
 .containers-section__error {
@@ -67,195 +84,191 @@
   font-size: var(--type-mono-md);
 }
 
+/* ---- Row list ---------------------------------------------------------- */
+
 .containers-section__list {
   list-style: none;
   margin: 0;
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--sp-4);
 }
 
+/* Spec row track: `auto 1fr auto auto auto` with `gap: var(--sp-3)`,
+ * vertical padding `var(--sp-2) var(--sp-4)`, and a `1px solid
+ * var(--color-border-1)` bottom border (suppressed on `:last-child`). */
 .containers-section__row {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-  padding: var(--sp-3) 0;
-  border-top: 1px solid var(--color-border-1);
+  display: grid;
+  grid-template-columns: auto 1fr auto auto auto;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-4);
+  border-bottom: 1px solid var(--color-border-1);
 }
 
-.containers-section__row:first-child {
-  border-top: 0;
-  padding-top: 0;
+.containers-section__row:last-child {
+  border-bottom: 0;
 }
 
 .containers-section__row--stopped {
   opacity: 0.66;
 }
 
-.containers-section__row-head {
+/* Liveness dot. Pulses when running; warning hue + static when stopped. */
+.containers-section__live-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-success);
+  box-shadow: 0 0 6px rgba(61, 220, 132, 0.5);
+  animation: containers-section-pulse 1.6s ease-in-out infinite;
+  flex-shrink: 0;
+}
+
+.containers-section__live-dot--warn {
+  background: var(--color-warning);
+  box-shadow: 0 0 6px rgba(255, 170, 51, 0.5);
+  animation: none;
+}
+
+@keyframes containers-section-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+/* Identity stack: container name + sha+context line. */
+.containers-section__identity {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.containers-section__name {
+  font-family: var(--font-body);
+  font-size: var(--type-body-md);
+  font-weight: 500;
+  color: var(--color-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.containers-section__sub {
   display: flex;
   align-items: center;
-  gap: var(--sp-3);
-}
-
-.containers-section__id {
+  gap: var(--sp-2);
   font-family: var(--font-mono);
-  font-size: var(--type-mono-md);
-  color: var(--color-text-primary);
+  font-size: var(--type-mono-xs);
+  color: var(--color-text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
+.containers-section__sha,
+.containers-section__context {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.containers-section__dot {
+  flex-shrink: 0;
+}
+
+/* Image ref. */
 .containers-section__image {
-  font-size: var(--type-mono-md);
-  color: var(--color-text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-xs);
+  color: var(--color-text-primary);
+  white-space: nowrap;
 }
 
-.containers-section__pip {
+/* Resource readout (cpu · ram). */
+.containers-section__resources {
   font-family: var(--font-mono);
   font-size: var(--type-mono-xxs);
-  letter-spacing: 0.15em;
-  text-transform: uppercase;
-  padding: 2px var(--sp-2);
-  border-radius: var(--r-sm);
-  background: var(--color-warning-bg);
-  color: var(--color-warning);
-  border: 1px solid var(--color-warning-border);
+  color: var(--color-text-secondary);
+  white-space: nowrap;
 }
 
-.containers-section__row-meta {
-  display: flex;
-  gap: var(--sp-3);
-  font-family: var(--font-mono);
-  font-size: var(--type-mono-sm);
-  color: var(--color-text-tertiary);
-}
-
-.containers-section__session,
-.containers-section__when {
-  font-variant-numeric: tabular-nums;
-}
-
+/* Icon-button cluster. */
 .containers-section__row-actions {
   display: flex;
-  gap: var(--sp-2);
-  justify-content: flex-end;
-  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
 }
 
-/* ---- Remove confirmation modal ----------------------------------------- */
-
-.containers-section__modal-backdrop {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.55);
-  display: flex;
+.containers-section__icon-btn {
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  z-index: 100;
-  padding: var(--sp-5);
-}
-
-.containers-section__modal {
-  background: var(--color-surface-1);
-  border: 1px solid var(--color-border-2);
-  border-radius: var(--r-md);
-  padding: var(--sp-5);
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-4);
-  width: 100%;
-  max-width: 420px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
-}
-
-.containers-section__modal-head {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-3);
-}
-
-.containers-section__modal-title {
-  margin: 0;
-  font-family: var(--font-display);
-  font-size: 1.125rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
-  color: var(--color-ember-300);
-}
-
-.containers-section__modal-body {
-  margin: 0;
-  font-size: var(--type-body-md);
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid var(--color-border-1);
+  border-radius: var(--r-sm);
   color: var(--color-text-secondary);
-  line-height: 1.5;
+  cursor: pointer;
+  transition: var(--ease);
 }
 
-.containers-section__modal-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: var(--sp-3);
+.containers-section__icon-btn:hover:not(:disabled) {
+  color: var(--color-text-primary);
+  border-color: var(--color-border-2);
 }
 
-/* ---- Logs flyout ------------------------------------------------------- */
-
-.containers-section__flyout-backdrop {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.55);
-  display: flex;
-  align-items: stretch;
-  justify-content: flex-end;
-  z-index: 100;
+.containers-section__icon-btn:focus-visible {
+  outline: 2px solid var(--color-ember-400);
+  outline-offset: 1px;
 }
 
-.containers-section__flyout {
-  background: var(--color-surface-1);
-  border-left: 1px solid var(--color-border-2);
-  width: min(720px, 100vw);
+.containers-section__icon-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+/* ---- Inline logs panel ------------------------------------------------- */
+
+.containers-section__logs-panel {
   display: flex;
   flex-direction: column;
   gap: var(--sp-3);
-  padding: var(--sp-5);
-  box-shadow: -8px 0 32px rgba(0, 0, 0, 0.5);
+  padding: var(--sp-4);
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border-1);
+  border-radius: var(--r-sm);
 }
 
-.containers-section__flyout-head {
+.containers-section__logs-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: var(--sp-3);
 }
 
-.containers-section__flyout-title {
-  margin: 0;
-  font-family: var(--font-display);
-  font-size: 1rem;
-  font-weight: 700;
+.containers-section__logs-title {
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-xxs);
+  letter-spacing: 0.2em;
+  color: var(--color-text-tertiary);
   text-transform: uppercase;
-  letter-spacing: 0.1em;
-  color: var(--color-ember-300);
 }
 
 .containers-section__log-pane {
   margin: 0;
-  flex: 1 1 auto;
-  min-height: 0;
+  max-height: 320px;
   overflow-y: auto;
   background: var(--color-surface-1);
   border: 1px solid var(--color-border-1);
   border-radius: var(--r-sm);
   padding: var(--sp-3);
   font-family: var(--font-mono);
-  font-size: var(--type-body-sm);
-  color: var(--color-text-secondary);
+  font-size: var(--type-mono-xs);
+  color: var(--color-text-primary);
   line-height: 1.5;
   white-space: pre;
-}
-
-.containers-section__log-pane:focus-visible {
-  outline: 2px solid var(--color-ember-400);
-  outline-offset: 2px;
 }
 
 .containers-section__log-line {
@@ -265,7 +278,12 @@
 }
 
 .containers-section__log-line--err {
-  color: var(--color-error);
+  color: var(--color-warning);
+}
+
+.containers-section__log-cid {
+  color: var(--color-text-tertiary);
+  flex-shrink: 0;
 }
 
 .containers-section__log-ts {
@@ -291,7 +309,6 @@
   border-radius: var(--r-sm);
   font-family: var(--font-body);
   color: var(--color-text-primary);
-  max-width: 720px;
 }
 
 .containers-banner__icon {

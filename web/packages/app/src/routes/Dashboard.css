@@ -1,19 +1,56 @@
+/* F-719 dashboard layout. Hero spans the top; the body is the 12-column
+   grid from DESIGN.md §Layout grid. Tokens only. */
+
 .dashboard {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-6);
   min-height: 100vh;
-  padding: var(--sp-8);
   background: var(--color-bg);
   color: var(--color-text-primary);
   font-family: var(--font-body);
 }
 
-.dashboard__title {
-  font-family: var(--font-display);
-  font-size: 2rem;
-  color: var(--color-text-ember);
-  margin: 0 0 var(--sp-3) 0;
+.dashboard__grid {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: var(--sp-6);
+  padding: 0 var(--sp-8) var(--sp-8);
 }
 
-.dashboard__subtitle {
-  color: var(--color-text-secondary);
-  margin: 0;
+.dashboard__slot {
+  min-width: 0;
+}
+
+.dashboard__slot--col-4 {
+  grid-column: span 4;
+}
+
+.dashboard__slot--col-6 {
+  grid-column: span 6;
+}
+
+.dashboard__slot--col-8 {
+  grid-column: span 8;
+}
+
+.dashboard__slot--col-12 {
+  grid-column: span 12;
+}
+
+.dashboard__placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  min-height: 160px;
+  padding: var(--sp-6);
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-border-1);
+  border-radius: var(--r-lg);
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-xs);
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--color-text-tertiary);
 }

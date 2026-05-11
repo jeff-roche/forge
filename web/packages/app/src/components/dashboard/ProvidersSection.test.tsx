@@ -1,5 +1,13 @@
+// F-721: ProvidersSection (v-dash Providers card) tests.
+//
+// Compact stacked-list layout. The list root is a `radiogroup`; each row is
+// a `radio` carrying name, brand-color dot, model summary, and a trailing
+// `ready` / `auth` status pill. Radio semantics (click → set_active_provider,
+// aria-checked on the active row) are preserved from the F-586 grid layout.
+
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { cleanup, render, fireEvent } from '@solidjs/testing-library';
+import { MemoryRouter, Route } from '@solidjs/router';
 import { ProvidersSection, type ProviderEntry } from './ProvidersSection';
 import { setInvokeForTesting } from '../../lib/tauri';
 
@@ -15,7 +23,7 @@ const sample = (over: Partial<ProviderEntry> = {}): ProviderEntry => ({
 });
 
 const FOUR_BUILTINS: ProviderEntry[] = [
-  sample({ id: 'ollama', display_name: 'Ollama' }),
+  sample({ id: 'ollama', display_name: 'Ollama', model: 'llama-3.3' }),
   sample({
     id: 'anthropic',
     display_name: 'Anthropic',
@@ -28,7 +36,8 @@ const FOUR_BUILTINS: ProviderEntry[] = [
     display_name: 'OpenAI',
     credential_required: true,
     has_credential: true,
-    model_available: false,
+    model_available: true,
+    model: 'gpt-4o',
   }),
   sample({
     id: 'custom_openai',
@@ -39,12 +48,6 @@ const FOUR_BUILTINS: ProviderEntry[] = [
   }),
 ];
 
-/**
- * Default invoke shim: routes by command name.
- * - `list_providers` → resolves with whatever was stubbed last
- * - `get_active_provider` → resolves with the active id stub
- * - `set_active_provider` → resolves undefined
- */
 function setupInvokeMock(opts: {
   entries?: ProviderEntry[];
   active?: string | null;
@@ -74,6 +77,19 @@ async function waitForFetch() {
   await Promise.resolve();
 }
 
+/**
+ * Wraps the component in a MemoryRouter so the `Manage` link's `<A>`
+ * resolves a context. The router never navigates in test — we only assert
+ * link presence and `href`.
+ */
+function renderSection() {
+  return render(() => (
+    <MemoryRouter>
+      <Route path="/" component={() => <ProvidersSection />} />
+    </MemoryRouter>
+  ));
+}
+
 beforeEach(() => {
   invokeMock.mockReset();
   setInvokeForTesting(invokeMock as never);
@@ -84,89 +100,201 @@ afterEach(() => {
   cleanup();
 });
 
-describe('ProvidersSection (F-586)', () => {
-  it('renders a skeleton loading state during the IPC fetch (F-684)', async () => {
-    // Pending forever — the resource never settles, so the snapshot stays in
-    // its `loading` branch.
+describe('ProvidersSection (F-721)', () => {
+  // -------------------------------------------------------------------------
+  // Four states: loading / empty / error / ready
+  // -------------------------------------------------------------------------
+
+  it('renders a skeleton loading state during the IPC fetch', async () => {
     invokeMock.mockImplementation(() => new Promise(() => undefined));
-    const { findByTestId, queryByText } = render(() => <ProvidersSection />);
+    const { findByTestId } = renderSection();
 
     const skeleton = await findByTestId('providers-loading');
     expect(skeleton.getAttribute('role')).toBe('status');
     expect(skeleton.getAttribute('aria-busy')).toBe('true');
-    // Plain-text "providers · probing" copy must be gone — replaced by
-    // a card-shaped skeleton matching the live grid layout.
-    expect(queryByText(/providers · probing/i)).toBeFalsy();
-    // The skeleton renders one placeholder per expected card slot.
-    expect(skeleton.querySelectorAll('.forge-skeleton--card').length).toBe(4);
+    expect(skeleton.querySelectorAll('.forge-skeleton--block').length).toBe(4);
   });
 
-  it('renders a card per provider returned by list_providers', async () => {
-    setupInvokeMock();
-    const { findAllByRole } = render(() => <ProvidersSection />);
+  it('renders empty-state copy when no providers are configured', async () => {
+    setupInvokeMock({ entries: [], active: null });
+    const { findByTestId } = renderSection();
+    await waitForFetch();
+    const empty = await findByTestId('providers-empty');
+    expect(empty.textContent).toBe('// no providers configured');
+  });
+
+  it('surfaces list_providers rejection as a "providers unavailable" block', async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'dashboard_list_providers') return Promise.reject(new Error('keyring backend down'));
+      if (cmd === 'get_active_provider') return Promise.resolve(null);
+      return Promise.resolve(undefined);
+    });
+    const { findByRole } = renderSection();
+    await waitForFetch();
     await waitForFetch();
 
-    const radios = await findAllByRole('radio');
-    expect(radios.length).toBe(4);
-    const labels = radios.map((r) => r.textContent ?? '');
+    const alert = await findByRole('alert');
+    expect(alert.textContent).toMatch(/providers unavailable/i);
+    expect(alert.textContent).toMatch(/keyring backend down/i);
+  });
+
+  it('ready-state renders a radiogroup with one row per provider', async () => {
+    setupInvokeMock();
+    const { findByRole, findAllByRole } = renderSection();
+    await waitForFetch();
+
+    const group = await findByRole('radiogroup');
+    expect(group.getAttribute('aria-label')).toBe('Active provider');
+
+    const rows = await findAllByRole('radio');
+    expect(rows.length).toBe(4);
+    const labels = rows.map((r) => r.textContent ?? '');
     expect(labels.some((l) => l.includes('Ollama'))).toBe(true);
     expect(labels.some((l) => l.includes('Anthropic'))).toBe(true);
     expect(labels.some((l) => l.includes('OpenAI'))).toBe(true);
     expect(labels.some((l) => l.includes('Custom OpenAI-compat'))).toBe(true);
   });
 
-  it('marks the active provider with aria-checked=true', async () => {
-    setupInvokeMock({ active: 'anthropic' });
-    const { findAllByRole } = render(() => <ProvidersSection />);
+  // -------------------------------------------------------------------------
+  // Header — Manage link
+  // -------------------------------------------------------------------------
+
+  it('renders a Manage link to /providers in the header', async () => {
+    setupInvokeMock();
+    const { findByRole } = renderSection();
     await waitForFetch();
 
-    const radios = await findAllByRole('radio');
-    const anthropic = radios.find((r) => r.textContent?.includes('Anthropic'));
-    const ollama = radios.find((r) => r.textContent?.includes('Ollama'));
+    const link = await findByRole('link', { name: /manage/i });
+    expect(link.getAttribute('href')).toBe('/providers');
+  });
+
+  // -------------------------------------------------------------------------
+  // Row anatomy — brand dot, identity stack, pill
+  // -------------------------------------------------------------------------
+
+  it('renders a brand-color dot keyed to the provider id', async () => {
+    setupInvokeMock();
+    const { findAllByRole } = renderSection();
+    await waitForFetch();
+
+    const rows = await findAllByRole('radio');
+    const anthropic = rows.find((r) => r.textContent?.includes('Anthropic'))!;
+    const openai = rows.find((r) => r.textContent?.includes('OpenAI'))!;
+    const ollama = rows.find((r) => r.textContent?.includes('Ollama'))!;
+    const custom = rows.find((r) => r.textContent?.includes('Custom OpenAI-compat'))!;
+
+    expect(anthropic.getAttribute('data-brand')).toBe('anthropic');
+    expect(openai.getAttribute('data-brand')).toBe('openai');
+    expect(ollama.getAttribute('data-brand')).toBe('local');
+    expect(custom.getAttribute('data-brand')).toBe('custom');
+
+    // Each row carries a single brand dot.
+    for (const row of rows) {
+      expect(row.querySelector('.providers__dot')).toBeTruthy();
+    }
+  });
+
+  it('renders model subtext when a provider has a model configured', async () => {
+    setupInvokeMock();
+    const { findAllByRole } = renderSection();
+    await waitForFetch();
+
+    const rows = await findAllByRole('radio');
+    const ollama = rows.find((r) => r.textContent?.includes('Ollama'))!;
+    expect(ollama.querySelector('.providers__sub')?.textContent).toBe('llama-3.3');
+  });
+
+  // -------------------------------------------------------------------------
+  // Status pill — variant rendering
+  // -------------------------------------------------------------------------
+
+  it('renders a `ready` pill when the provider has a model available', async () => {
+    setupInvokeMock();
+    const { findAllByRole } = renderSection();
+    await waitForFetch();
+
+    const rows = await findAllByRole('radio');
+    const ollama = rows.find((r) => r.textContent?.includes('Ollama'))!;
+    const pill = ollama.querySelector('.forge-status-pill');
+    expect(pill).toBeTruthy();
+    expect(pill?.classList.contains('forge-status-pill--ready')).toBe(true);
+    expect(pill?.getAttribute('data-variant')).toBe('ready');
+    expect(pill?.textContent).toContain('ready');
+  });
+
+  it('renders an `auth` pill when a required credential is missing', async () => {
+    setupInvokeMock();
+    const { findAllByRole } = renderSection();
+    await waitForFetch();
+
+    const rows = await findAllByRole('radio');
+    const anthropic = rows.find((r) => r.textContent?.includes('Anthropic'))!;
+    const pill = anthropic.querySelector('.forge-status-pill');
+    expect(pill).toBeTruthy();
+    expect(pill?.classList.contains('forge-status-pill--auth')).toBe(true);
+    expect(pill?.getAttribute('data-variant')).toBe('auth');
+    expect(pill?.textContent).toContain('auth');
+    // Subtext reflects the underlying cause.
+    expect(anthropic.querySelector('.providers__sub')?.textContent).toBe('credentials missing');
+  });
+
+  it('renders an `auth` pill when the credential is present but no model is configured', async () => {
+    setupInvokeMock({
+      entries: [
+        sample({
+          id: 'anthropic',
+          display_name: 'Anthropic',
+          credential_required: true,
+          has_credential: true,
+          model_available: false,
+        }),
+      ],
+    });
+    const { findAllByRole } = renderSection();
+    await waitForFetch();
+
+    const rows = await findAllByRole('radio');
+    const pill = rows[0]?.querySelector('.forge-status-pill');
+    expect(pill?.classList.contains('forge-status-pill--auth')).toBe(true);
+    expect(rows[0]?.querySelector('.providers__sub')?.textContent).toBe('unconfigured');
+  });
+
+  // -------------------------------------------------------------------------
+  // Radio semantics — preserved from F-586
+  // -------------------------------------------------------------------------
+
+  it('marks the active provider with aria-checked=true', async () => {
+    setupInvokeMock({ active: 'anthropic' });
+    const { findAllByRole } = renderSection();
+    await waitForFetch();
+
+    const rows = await findAllByRole('radio');
+    const anthropic = rows.find((r) => r.textContent?.includes('Anthropic'));
+    const ollama = rows.find((r) => r.textContent?.includes('Ollama'));
     expect(anthropic?.getAttribute('aria-checked')).toBe('true');
     expect(ollama?.getAttribute('aria-checked')).toBe('false');
   });
 
-  it('renders no aria-checked card when active is null', async () => {
+  it('renders no aria-checked row when active is null', async () => {
     setupInvokeMock({ active: null });
-    const { findAllByRole } = render(() => <ProvidersSection />);
+    const { findAllByRole } = renderSection();
     await waitForFetch();
 
-    const radios = await findAllByRole('radio');
-    for (const r of radios) {
+    const rows = await findAllByRole('radio');
+    for (const r of rows) {
       expect(r.getAttribute('aria-checked')).toBe('false');
     }
   });
 
-  it('shows credential warning glyph only when required and missing', async () => {
+  it('clicking a row invokes set_active_provider with that id', async () => {
     setupInvokeMock();
-    const { findAllByRole } = render(() => <ProvidersSection />);
+    const { findAllByRole } = renderSection();
     await waitForFetch();
 
-    const radios = await findAllByRole('radio');
-    const anthropic = radios.find((r) => r.textContent?.includes('Anthropic'));
-    const openai = radios.find((r) => r.textContent?.includes('OpenAI'));
-    const ollama = radios.find((r) => r.textContent?.includes('Ollama'));
+    const rows = await findAllByRole('radio');
+    const anthropic = rows.find((r) => r.textContent?.includes('Anthropic'))!;
 
-    // Anthropic: required + absent → warning glyph
-    expect(anthropic?.querySelector('[aria-label="credential missing"]')).toBeTruthy();
-    // OpenAI in the fixture: required + present → check glyph
-    expect(openai?.querySelector('[aria-label="credential present"]')).toBeTruthy();
-    // Ollama: not required → neither glyph
-    expect(ollama?.querySelector('[aria-label="credential missing"]')).toBeFalsy();
-    expect(ollama?.querySelector('[aria-label="credential present"]')).toBeFalsy();
-  });
-
-  it('clicking a card invokes set_active_provider with that id', async () => {
-    setupInvokeMock();
-    const { findAllByRole } = render(() => <ProvidersSection />);
-    await waitForFetch();
-
-    const radios = await findAllByRole('radio');
-    const anthropic = radios.find((r) => r.textContent?.includes('Anthropic'));
-    expect(anthropic).toBeTruthy();
-
-    fireEvent.click(anthropic!);
+    fireEvent.click(anthropic);
     await waitForFetch();
 
     expect(invokeMock).toHaveBeenCalledWith('set_active_provider', { providerId: 'anthropic' });
@@ -188,65 +316,38 @@ describe('ProvidersSection (F-586)', () => {
       }
     });
 
-    const { findAllByRole } = render(() => <ProvidersSection />);
+    const { findAllByRole } = renderSection();
     await waitForFetch();
 
-    const radios = await findAllByRole('radio');
-    const openai = radios.find((r) => r.textContent?.includes('OpenAI'))!;
+    const rows = await findAllByRole('radio');
+    const openai = rows.find((r) => r.textContent?.includes('OpenAI'))!;
 
     fireEvent.click(openai);
     await waitForFetch();
     await waitForFetch();
 
-    const radiosAfter = await findAllByRole('radio');
-    const openaiAfter = radiosAfter.find((r) => r.textContent?.includes('OpenAI'));
+    const rowsAfter = await findAllByRole('radio');
+    const openaiAfter = rowsAfter.find((r) => r.textContent?.includes('OpenAI'));
     expect(openaiAfter?.getAttribute('aria-checked')).toBe('true');
   });
 
   it('surfaces set_active_provider rejection inline', async () => {
     setupInvokeMock({ setActiveError: 'unknown provider: xyz' });
-    const { findAllByRole, findByRole } = render(() => <ProvidersSection />);
+    const { findAllByRole, findAllByRole: findAllByRoleAgain } = renderSection();
     await waitForFetch();
 
-    const radios = await findAllByRole('radio');
-    expect(radios[0]).toBeTruthy();
-    fireEvent.click(radios[0]!);
-    await waitForFetch();
-    await waitForFetch();
-
-    const alert = await findByRole('alert');
-    expect(alert.textContent).toMatch(/unknown provider/i);
-  });
-
-  it('surfaces list_providers rejection as a "providers unavailable" block', async () => {
-    invokeMock.mockImplementation((cmd: string) => {
-      if (cmd === 'dashboard_list_providers') return Promise.reject(new Error('keyring backend down'));
-      if (cmd === 'get_active_provider') return Promise.resolve(null);
-      return Promise.resolve(undefined);
-    });
-
-    const { findByRole } = render(() => <ProvidersSection />);
+    const rows = await findAllByRole('radio');
+    expect(rows[0]).toBeTruthy();
+    fireEvent.click(rows[0]!);
     await waitForFetch();
     await waitForFetch();
 
-    const alert = await findByRole('alert');
-    expect(alert.textContent).toMatch(/providers unavailable/i);
-    expect(alert.textContent).toMatch(/keyring backend down/i);
-  });
-
-  it('empty-state uses canonical mono noun-phrase copy when no providers configured (F-691)', async () => {
-    setupInvokeMock({ entries: [], active: null });
-    const { findByTestId } = render(() => <ProvidersSection />);
-    await waitForFetch();
-    const empty = await findByTestId('providers-empty');
-    expect(empty.textContent).toBe('// no providers configured');
+    const alerts = await findAllByRoleAgain('alert');
+    const text = alerts.map((a) => a.textContent ?? '').join(' ');
+    expect(text).toMatch(/unknown provider/i);
   });
 
   it('drops a second click while the first switch is in flight', async () => {
-    // F-586 review: double-tap guard. The first `setActiveProvider` IPC
-    // is still pending (its promise hasn't resolved), so a second click
-    // on a different card must NOT fire another invocation. Once the
-    // first round-trip completes the UI is unlocked again.
     type Resolver = (value: unknown) => void;
     const resolverHolder: { fn: Resolver | null } = { fn: null };
     const firstSet = new Promise<unknown>((res) => {
@@ -261,81 +362,39 @@ describe('ProvidersSection (F-586)', () => {
           return Promise.resolve(null);
         case 'set_active_provider':
           setActiveCallCount += 1;
-          return firstSet; // never resolves until we say so
+          return firstSet;
         default:
           return Promise.resolve(undefined);
       }
     });
 
-    const { findAllByRole } = render(() => <ProvidersSection />);
+    const { findAllByRole } = renderSection();
     await waitForFetch();
 
-    const radios = await findAllByRole('radio');
-    const anthropic = radios.find((r) => r.textContent?.includes('Anthropic'))!;
-    const openai = radios.find((r) => r.textContent?.includes('OpenAI'))!;
+    const rows = await findAllByRole('radio');
+    const anthropic = rows.find((r) => r.textContent?.includes('Anthropic'))!;
+    const openai = rows.find((r) => r.textContent?.includes('OpenAI'))!;
 
-    // First click — fires the IPC. Pending state engages.
     fireEvent.click(anthropic);
     await waitForFetch();
     expect(setActiveCallCount).toBe(1);
 
-    // Second click on a different card while the first is still in
-    // flight — must be ignored.
     fireEvent.click(openai);
     await waitForFetch();
     expect(setActiveCallCount).toBe(1);
 
-    // Resolve the first call; UI unlocks.
     resolverHolder.fn?.(undefined);
     await waitForFetch();
     await waitForFetch();
 
-    // Subsequent click now fires.
-    const radiosAfter = await findAllByRole('radio');
-    const openaiAfter = radiosAfter.find((r) => r.textContent?.includes('OpenAI'))!;
+    const rowsAfter = await findAllByRole('radio');
+    const openaiAfter = rowsAfter.find((r) => r.textContent?.includes('OpenAI'))!;
     fireEvent.click(openaiAfter);
     await waitForFetch();
     expect(setActiveCallCount).toBe(2);
   });
 
-  describe('voice & terminology (F-690)', () => {
-    it('renders "unconfigured" not "no model" when a provider has no model_available', async () => {
-      setupInvokeMock();
-      const { findAllByRole } = render(() => <ProvidersSection />);
-      await waitForFetch();
-
-      const radios = await findAllByRole('radio');
-      const anthropic = radios.find((r) => r.textContent?.includes('Anthropic'))!;
-      expect(anthropic.textContent).toContain('unconfigured');
-      expect(anthropic.textContent).not.toMatch(/no model/i);
-    });
-
-    it('renders "ready" not "model ready" when model_available is true with no model name', async () => {
-      setupInvokeMock({
-        entries: [sample({ id: 'ollama', display_name: 'Ollama', model_available: true })],
-      });
-      const { findAllByRole } = render(() => <ProvidersSection />);
-      await waitForFetch();
-
-      const radios = await findAllByRole('radio');
-      expect(radios[0]?.textContent).toContain('ready');
-      expect(radios[0]?.textContent).not.toMatch(/model ready/i);
-    });
-
-    it('aria-label uses provider terminology, never "model"', async () => {
-      setupInvokeMock();
-      const { findAllByRole } = render(() => <ProvidersSection />);
-      await waitForFetch();
-
-      const radios = await findAllByRole('radio');
-      const anthropic = radios.find((r) => r.textContent?.includes('Anthropic'))!;
-      const label = anthropic.getAttribute('aria-label') ?? '';
-      expect(label).not.toMatch(/model/i);
-      expect(label.toLowerCase()).toContain('unconfigured');
-    });
-  });
-
-  it('marks the pending card with aria-busy while the IPC is in flight', async () => {
+  it('marks the pending row with aria-busy while the IPC is in flight', async () => {
     type Resolver = (value: unknown) => void;
     const resolverHolder: { fn: Resolver | null } = { fn: null };
     const firstSet = new Promise<unknown>((res) => {
@@ -354,23 +413,35 @@ describe('ProvidersSection (F-586)', () => {
       }
     });
 
-    const { findAllByRole } = render(() => <ProvidersSection />);
+    const { findAllByRole } = renderSection();
     await waitForFetch();
 
-    const radios = await findAllByRole('radio');
-    const anthropic = radios.find((r) => r.textContent?.includes('Anthropic'))!;
+    const rows = await findAllByRole('radio');
+    const anthropic = rows.find((r) => r.textContent?.includes('Anthropic'))!;
 
     fireEvent.click(anthropic);
     await waitForFetch();
 
-    // The clicked card carries aria-busy=true; siblings stay
-    // aria-busy=false but are disabled.
-    const radiosNow = await findAllByRole('radio');
-    const pending = radiosNow.find((r) => r.textContent?.includes('Anthropic'))!;
+    const rowsNow = await findAllByRole('radio');
+    const pending = rowsNow.find((r) => r.textContent?.includes('Anthropic'))!;
     expect(pending.getAttribute('aria-busy')).toBe('true');
 
     resolverHolder.fn?.(undefined);
     await waitForFetch();
     await waitForFetch();
+  });
+
+  it('keyboard activation (Space / Enter) on a row fires set_active_provider', async () => {
+    setupInvokeMock();
+    const { findAllByRole } = renderSection();
+    await waitForFetch();
+
+    const rows = await findAllByRole('radio');
+    const openai = rows.find((r) => r.textContent?.includes('OpenAI'))!;
+
+    fireEvent.keyDown(openai, { key: 'Enter' });
+    await waitForFetch();
+
+    expect(invokeMock).toHaveBeenCalledWith('set_active_provider', { providerId: 'openai' });
   });
 });

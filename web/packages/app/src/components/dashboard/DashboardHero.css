@@ -1,0 +1,41 @@
+/* F-719 dashboard hero. Tokens only per DESIGN.md §Hero block. */
+
+.dashboard-hero {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: var(--sp-6);
+  align-items: end;
+  padding: var(--sp-8);
+  border-bottom: 1px solid var(--color-border-1);
+}
+
+.dashboard-hero__lead {
+  min-width: 0;
+}
+
+.dashboard-hero__headline {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  line-height: 0.95;
+  color: var(--color-text-primary);
+}
+
+.dashboard-hero__headline em {
+  color: var(--color-ember-400);
+  font-style: normal;
+}
+
+.dashboard-hero__status {
+  margin: var(--sp-3) 0 0 0;
+  font-family: var(--font-body);
+  color: var(--color-text-secondary);
+  max-width: 560px;
+}
+
+.dashboard-hero__cta {
+  display: flex;
+  gap: var(--sp-2);
+}

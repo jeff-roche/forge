@@ -283,6 +283,7 @@ async fn run_linux(args: &serde_json::Value, ctx: &ToolCtx) -> serde_json::Value
 ///
 /// Returns the validated `(key, value)` pairs in the input's iteration order
 /// so the caller can forward them to `allow_env` without re-parsing.
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn validate_env(
     env_obj: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<Vec<(&str, &str)>, String> {

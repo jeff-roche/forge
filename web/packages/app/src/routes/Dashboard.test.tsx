@@ -13,9 +13,10 @@ vi.mock('@tauri-apps/api/event', () => ({
 
 describe('Dashboard', () => {
   beforeEach(() => {
-    // Dashboard mounts ProviderPanel + SessionsPanel + CredentialsSection,
-    // each of which invokes Tauri commands on mount. Route every command
-    // to a hermetic stub so tests don't attempt a real bridge call.
+    // F-719 Dashboard mounts SessionsPanel, ProvidersSection, and
+    // ContainersSection, each of which invokes Tauri commands on mount.
+    // Route every command to a hermetic stub so tests don't attempt a
+    // real bridge call.
     setInvokeForTesting(
       (async (cmd: string) => {
         if (cmd === 'provider_status') {
@@ -27,7 +28,21 @@ describe('Dashboard', () => {
           };
         }
         if (cmd === 'session_list') return [];
+        if (cmd === 'dashboard_list_providers') return [];
+        if (cmd === 'get_active_provider') return null;
         if (cmd === 'has_credential') return true;
+        // F-722: UsageCard fetches the current + prior period summaries
+        // on mount. Empty summary keeps the Dashboard suite hermetic.
+        if (cmd === 'usage_summary') {
+          return {
+            range: { type: 'Last7' },
+            group_by: 'Provider',
+            total_tokens_in: 0,
+            total_tokens_out: 0,
+            total_cost: null,
+            breakdown: [],
+          };
+        }
         // F-597: ContainersSection probes the runtime + lists containers
         // on mount. Hermetic responses keep tests deterministic and skip
         // the first-run banner (status: available).
@@ -64,10 +79,12 @@ describe('Dashboard', () => {
     ));
   }
 
-  it('renders the placeholder heading', () => {
+  // F-719: the dashboard hero owns the page heading. Verbatim per the
+  // mock — `Welcome back. Forge something.` rendered across two lines.
+  it('renders the F-719 hero headline', () => {
     const { getByRole } = renderDashboard();
     const heading = getByRole('heading', { level: 1 });
-    expect(heading.textContent).toBe('Forge — Dashboard');
+    expect(heading.textContent).toBe('Welcome back.Forge something.');
   });
 
   // F-409: spec dashboard.md §D.1 mandates a single flat surface — no tab
@@ -77,6 +94,39 @@ describe('Dashboard', () => {
   it('renders no <nav> element (spec D.1 flat surface)', () => {
     const { container } = renderDashboard();
     expect(container.querySelector('nav')).toBeNull();
+  });
+
+  // F-719: the body is the 12-column grid with five slot wrappers
+  // (Sessions col-8, Providers col-4, Usage col-6, Enabled col-6,
+  // Containers col-12). F-722 / F-724 swap the Usage / Enabled
+  // placeholders for their respective cards.
+  it('renders the 12-col grid with all five slot wrappers', () => {
+    const { container } = renderDashboard();
+    const grid = container.querySelector('.dashboard__grid');
+    expect(grid).not.toBeNull();
+    expect(grid!.querySelectorAll('.dashboard__slot').length).toBe(5);
+    expect(grid!.querySelector('.dashboard__slot--col-8')).not.toBeNull();
+    expect(grid!.querySelector('.dashboard__slot--col-4')).not.toBeNull();
+    expect(grid!.querySelectorAll('.dashboard__slot--col-6').length).toBe(2);
+    expect(grid!.querySelector('.dashboard__slot--col-12')).not.toBeNull();
+  });
+
+  // F-719: the hero anchors above the grid.
+  it('renders the hero above the grid', () => {
+    const { container } = renderDashboard();
+    const hero = container.querySelector('.dashboard-hero');
+    const grid = container.querySelector('.dashboard__grid');
+    expect(hero).not.toBeNull();
+    expect(grid).not.toBeNull();
+    expect(hero!.compareDocumentPosition(grid!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  // F-722 / F-724: both placeholders have been swapped for their real
+  // cards. The data-testids pin the grid slots.
+  it('mounts the Usage and Enabled cards', () => {
+    const { queryByTestId } = renderDashboard();
+    expect(queryByTestId('usage-card')).not.toBeNull();
+    expect(queryByTestId('enabled-assets-card')).not.toBeNull();
   });
 
   // F-588: when every credential-bearing provider has a key stored, the
@@ -103,6 +153,8 @@ describe('Dashboard', () => {
           };
         }
         if (cmd === 'session_list') return [];
+        if (cmd === 'dashboard_list_providers') return [];
+        if (cmd === 'get_active_provider') return null;
         if (cmd === 'has_credential') {
           // Anthropic missing, OpenAI present — banner should name Anthropic.
           return args?.['providerId'] === 'openai';
@@ -132,6 +184,8 @@ describe('Dashboard', () => {
           };
         }
         if (cmd === 'session_list') return [];
+        if (cmd === 'dashboard_list_providers') return [];
+        if (cmd === 'get_active_provider') return null;
         if (cmd === 'has_credential') return true;
         // Probe reports the runtime is missing — without the persisted
         // dismissal, the banner WOULD render. The test asserts the
@@ -184,6 +238,8 @@ describe('Dashboard', () => {
           };
         }
         if (cmd === 'session_list') return [];
+        if (cmd === 'dashboard_list_providers') return [];
+        if (cmd === 'get_active_provider') return null;
         if (cmd === 'has_credential') return true;
         // Probe resolves immediately with a missing runtime — the only
         // thing keeping the banner suppressed is the unresolved
@@ -240,6 +296,8 @@ describe('Dashboard', () => {
           };
         }
         if (cmd === 'session_list') return [];
+        if (cmd === 'dashboard_list_providers') return [];
+        if (cmd === 'get_active_provider') return null;
         if (cmd === 'has_credential') {
           if (args?.['providerId'] === 'anthropic') {
             throw new Error('keyring locked');

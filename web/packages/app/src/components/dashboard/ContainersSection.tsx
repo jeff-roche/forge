@@ -1,4 +1,4 @@
-// F-597: Dashboard surface for container lifecycle.
+// F-723: Dashboard surface for container lifecycle (v-dash relayout).
 //
 // Two pieces live in this file:
 //
@@ -8,21 +8,21 @@
 //     persists `dashboard.container_banner_dismissed = true` in user-tier
 //     settings (F-151) so the banner stays gone across launches.
 //
-//   - `<ContainersSection>` — the scrollable list of active Level-2
-//     sandbox containers. Each row carries Stop / Remove buttons and a
-//     "Logs" toggle that opens a flyout reading from
-//     `forge-oci`'s `podman logs --timestamps` stream (polled every 2s,
-//     bounded by MAX_LOG_TAIL on the backend so giant transcripts don't
-//     freeze the UI).
+//   - `<ContainersSection>` — the full-width row list of active Level-2
+//     sandbox containers per `docs/ui-specs/containers-section.md`. Each
+//     row carries a liveness dot, an identity stack, the image reference,
+//     a `cpu · ram` readout, and a pair of icon buttons (`term`, `stop`).
+//     The card header carries the aggregate `N running · X · podman` meta
+//     plus `Prune` + `Logs` ghost actions; the Logs action toggles an
+//     inline log strip beneath the row list.
 //
 // The list refreshes from the existing event channel: `stop_container`
-// and `remove_container` emit `containers:list_changed` app-wide and the
-// section re-fetches on receipt. Sessions also update the registry on
-// Level-2 create / teardown — those edges are wired by forge-session
-// when the session writes through `ContainerRegistryState::register`.
+// and `prune_containers` emit `containers:list_changed` app-wide and the
+// section re-fetches on receipt.
 
 import {
   type Component,
+  createMemo,
   createResource,
   createSignal,
   For,
@@ -30,25 +30,27 @@ import {
   onMount,
   Show,
 } from 'solid-js';
-import { Button, Skeleton } from '@forge/design';
+import { Button, IconButton, Skeleton } from '@forge/design';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import {
   CONTAINERS_CHANGED_EVENT,
   containerLogs,
-  detectContainerRuntime,
   listActiveContainers,
-  removeContainer,
   stopContainer,
   type ContainerInfo,
   type LogLine,
   type RuntimeStatus,
 } from '../../ipc/containers';
-import { useFocusTrap } from '../../lib/useFocusTrap';
 import { pushToast } from '../toast';
 import './ContainersSection.css';
 
 /** Anchor for cross-section links. */
 export const CONTAINERS_SECTION_ID = 'containers-section';
+
+/** Runtime label rendered in the header meta. Hard-coded until F-???
+ * (dynamic runtime probe surfacing) wires `detect_container_runtime`'s
+ * `tool` field into the meta line. */
+const RUNTIME_LABEL = 'podman';
 
 // ---------------------------------------------------------------------------
 // Containers section
@@ -62,15 +64,15 @@ export const ContainersSection: Component = () => {
       return [];
     }
   });
-  const [activeLogsId, setActiveLogsId] = createSignal<string | null>(null);
+  const [logsOpen, setLogsOpen] = createSignal(false);
   const [actionError, setActionError] = createSignal<string | null>(null);
-  // Pending REMOVE confirmation. `null` = no modal open. The id is the
-  // full container_id of the row whose REMOVE button was clicked.
-  const [pendingRemoveId, setPendingRemoveId] = createSignal<string | null>(null);
-  const [removePending, setRemovePending] = createSignal(false);
+
+  const runningCount = createMemo(
+    () => (containers() ?? []).filter((c) => !c.stopped).length,
+  );
 
   // Refresh on the existing event channel so the list stays in sync with
-  // backend mutations (stop/remove from another tab, session teardown).
+  // backend mutations (stop from another tab, session teardown).
   onMount(() => {
     let mounted = true;
     let unlisten: UnlistenFn | null = null;
@@ -104,38 +106,30 @@ export const ContainersSection: Component = () => {
     }
   };
 
-  // REMOVE is destructive (the container and any state inside it are gone)
-  // so we gate it behind an explicit confirm step per WCAG 3.3.4. The
-  // modal mirrors the credentials rotation confirm so the dashboard's
-  // destructive surfaces share one visual contract.
-  const requestRemove = (id: string) => {
+  // F-723: Prune is documented in the spec but no backend IPC ships in V1.
+  // Surface the affordance disabled with an explicit tooltip until a future
+  // task wires `prune_containers`.
+  // TODO(F-???): wire prune_containers IPC and enable this button.
+  const onPrune = () => {
+    setActionError('prune_containers: not yet implemented');
+  };
+
+  // F-723: per-row terminal goes through the same session terminal pane the
+  // spec describes. Until the dashboard→session bridge lands, the button
+  // emits a custom DOM event so an outer host can attach a handler without
+  // this component needing to know the bridge shape.
+  // TODO(F-???): wire open_terminal_for_container IPC + session-pane bridge.
+  const onTerminal = (id: string) => {
     setActionError(null);
-    setPendingRemoveId(id);
+    window.dispatchEvent(
+      new CustomEvent('forge:container-open-terminal', { detail: { containerId: id } }),
+    );
   };
 
-  const cancelRemove = () => {
-    if (removePending()) return;
-    setPendingRemoveId(null);
-  };
-
-  const confirmRemove = async () => {
-    const id = pendingRemoveId();
-    if (id === null) return;
-    setRemovePending(true);
-    try {
-      await removeContainer(id);
-      // Close the logs flyout if we just removed the container it was
-      // tracking — the container_id is gone and any logs poll would 404.
-      if (activeLogsId() === id) setActiveLogsId(null);
-      await refetch();
-      setPendingRemoveId(null);
-    } catch (err: unknown) {
-      setActionError(err instanceof Error ? err.message : String(err));
-      setPendingRemoveId(null);
-    } finally {
-      setRemovePending(false);
-    }
-  };
+  const isLoading = createMemo(() => containers.loading);
+  const isEmpty = createMemo(() => !isLoading() && (containers() ?? []).length === 0);
+  const isReady = createMemo(() => !isLoading() && (containers() ?? []).length > 0);
+  const headDisabled = createMemo(() => !isReady());
 
   return (
     <section
@@ -144,10 +138,41 @@ export const ContainersSection: Component = () => {
       aria-label="Active sandbox containers"
     >
       <header class="containers-section__header">
-        <span class="containers-section__label">CONTAINERS</span>
+        <div class="containers-section__head-left">
+          <span class="containers-section__label">CONTAINERS</span>
+          <Show when={isReady() && runningCount() > 0}>
+            <span class="containers-section__meta" data-testid="containers-meta">
+              {runningCount()} running {'·'} unknown {'·'} {RUNTIME_LABEL}
+            </span>
+          </Show>
+        </div>
+        <div class="containers-section__head-right">
+          <Button
+            variant="ghost"
+            size="sm"
+            class="containers-section__head-btn"
+            disabled={headDisabled()}
+            data-testid="containers-prune-btn"
+            onClick={onPrune}
+          >
+            Prune
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            class="containers-section__head-btn"
+            disabled={headDisabled()}
+            aria-pressed={logsOpen()}
+            aria-controls="containers-section-logs"
+            data-testid="containers-logs-btn"
+            onClick={() => setLogsOpen((v) => !v)}
+          >
+            {logsOpen() ? 'Close logs' : 'Logs'}
+          </Button>
+        </div>
       </header>
 
-      <Show when={containers.loading}>
+      <Show when={isLoading()}>
         <Skeleton
           variant="block"
           count={3}
@@ -157,60 +182,43 @@ export const ContainersSection: Component = () => {
         />
       </Show>
 
-      <Show when={!containers.loading && (containers() ?? []).length === 0}>
+      <Show when={isEmpty()}>
         <p class="containers-section__empty" data-testid="containers-empty">
-          // no active containers
-        </p>
-        <p
-          class="containers-section__empty-hint"
-          data-testid="containers-empty-hint"
-        >
-          Level-2 isolation populates this list.
+          No active sandbox containers. They appear here when a session uses Level-2 isolation.
         </p>
       </Show>
 
       <Show when={actionError()}>
         {(msg) => (
-          <p class="containers-section__error" role="alert">
+          <p
+            class="containers-section__error"
+            role="alert"
+            data-testid="containers-error"
+          >
             {msg()}
           </p>
         )}
       </Show>
 
-      <ul class="containers-section__list" role="list">
-        <For each={containers() ?? []}>
-          {(c) => (
-            <ContainerRow
-              container={c}
-              logsOpen={activeLogsId() === c.container_id}
-              onToggleLogs={() =>
-                setActiveLogsId((cur) => (cur === c.container_id ? null : c.container_id))
-              }
-              onStop={() => void onStop(c.container_id)}
-              onRemove={() => requestRemove(c.container_id)}
-            />
-          )}
-        </For>
-      </ul>
-
-      <Show when={activeLogsId()}>
-        {(id) => (
-          <LogsFlyout
-            containerId={id()}
-            onClose={() => setActiveLogsId(null)}
-          />
-        )}
+      <Show when={isReady()}>
+        <ul class="containers-section__list" role="list">
+          <For each={containers() ?? []}>
+            {(c) => (
+              <ContainerRow
+                container={c}
+                onTerminal={() => onTerminal(c.container_id)}
+                onStop={() => void onStop(c.container_id)}
+              />
+            )}
+          </For>
+        </ul>
       </Show>
 
-      <Show when={pendingRemoveId()}>
-        {(id) => (
-          <RemoveConfirm
-            containerId={id()}
-            pending={removePending()}
-            onCancel={cancelRemove}
-            onConfirm={() => void confirmRemove()}
-          />
-        )}
+      <Show when={logsOpen() && isReady()}>
+        <InlineLogsPanel
+          containers={containers() ?? []}
+          onClose={() => setLogsOpen(false)}
+        />
       </Show>
     </section>
   );
@@ -222,10 +230,8 @@ export const ContainersSection: Component = () => {
 
 interface ContainerRowProps {
   container: ContainerInfo;
-  logsOpen: boolean;
-  onToggleLogs: () => void;
+  onTerminal: () => void;
   onStop: () => void;
-  onRemove: () => void;
 }
 
 const ContainerRow: Component<ContainerRowProps> = (props) => {
@@ -237,156 +243,78 @@ const ContainerRow: Component<ContainerRowProps> = (props) => {
       classList={{ 'containers-section__row--stopped': props.container.stopped }}
       data-testid={`container-row-${props.container.container_id}`}
     >
-      <div class="containers-section__row-head">
-        <span class="containers-section__id" title={props.container.container_id}>
-          {shortId()}
-        </span>
-        <span class="containers-section__image">{props.container.image}</span>
-        <Show when={props.container.stopped}>
-          <span class="containers-section__pip" aria-label="stopped">
-            stopped
-          </span>
-        </Show>
-      </div>
-      <div class="containers-section__row-meta">
-        <span class="containers-section__session">
-          session: {props.container.session_id.slice(0, 8)}
-        </span>
-        <span class="containers-section__when">{startedAt()}</span>
-      </div>
-      <div class="containers-section__row-actions">
-        <Button
-          variant="ghost"
-          size="sm"
-          aria-pressed={props.logsOpen}
-          aria-controls={`container-logs-${props.container.container_id}`}
-          data-testid={`container-logs-btn-${props.container.container_id}`}
-          onClick={props.onToggleLogs}
+      <span
+        class="containers-section__live-dot"
+        classList={{ 'containers-section__live-dot--warn': props.container.stopped }}
+        aria-label={props.container.stopped ? 'stopped' : 'running'}
+      />
+      <div class="containers-section__identity">
+        <div class="containers-section__name">{props.container.container_id.length > 0 ? deriveName(props.container) : ''}</div>
+        <div
+          class="containers-section__sub"
+          title={props.container.container_id}
         >
-          {props.logsOpen ? 'CLOSE LOGS' : 'LOGS'}
-        </Button>
-        <Button
-          variant="ghost"
-          size="sm"
+          <span class="containers-section__sha">sha256:{shortId()}</span>
+          <span class="containers-section__dot" aria-hidden="true">{'·'}</span>
+          <span class="containers-section__context">{startedAt()}</span>
+        </div>
+      </div>
+      <div class="containers-section__image">{props.container.image}</div>
+      <div class="containers-section__resources">cpu unknown {'·'} ram unknown</div>
+      <div class="containers-section__row-actions">
+        <IconButton
+          class="containers-section__icon-btn"
+          data-testid={`container-term-${props.container.container_id}`}
+          label="Open terminal"
+          icon={<TerminalGlyph />}
+          onClick={props.onTerminal}
+        />
+        <IconButton
+          class="containers-section__icon-btn"
           disabled={props.container.stopped}
           data-testid={`container-stop-${props.container.container_id}`}
-          aria-label={`Stop container ${props.container.container_id}`}
+          label="Stop container"
+          icon={<StopGlyph />}
           onClick={props.onStop}
-        >
-          STOP
-        </Button>
-        <Button
-          variant="primary"
-          size="sm"
-          data-testid={`container-remove-${props.container.container_id}`}
-          aria-label={`Remove container ${props.container.container_id}`}
-          onClick={props.onRemove}
-        >
-          REMOVE
-        </Button>
+        />
       </div>
     </li>
   );
 };
 
-// ---------------------------------------------------------------------------
-// Remove confirmation modal
-// ---------------------------------------------------------------------------
-
-interface RemoveConfirmProps {
-  containerId: string;
-  pending: boolean;
-  onCancel: () => void;
-  onConfirm: () => void;
+// The registry exposes the container id but no separate display name.
+// Reuse the id's short form for the row name and surface the full id in
+// the second-row sha context — keeps every row uniquely identifiable
+// without a registry schema bump.
+function deriveName(c: ContainerInfo): string {
+  return c.container_id.length > 12 ? c.container_id.slice(0, 12) : c.container_id;
 }
 
-/**
- * Destructive-action confirmation for REMOVE. Mirrors the credentials
- * rotation modal so the dashboard's destructive surfaces share one
- * visual contract: role="dialog", aria-modal, focus trap, Escape and
- * backdrop dismiss.
- */
-const RemoveConfirm: Component<RemoveConfirmProps> = (props) => {
-  let dialogRef: HTMLDivElement | undefined;
-  useFocusTrap(() => dialogRef);
+const TerminalGlyph: Component = () => (
+  <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+    <path
+      d="M2 3l2 2-2 2M5 7h4"
+      stroke="currentColor"
+      stroke-width="1.2"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      fill="none"
+    />
+  </svg>
+);
 
-  // WAI-ARIA APG Dialog pattern: Escape must dismiss regardless of focus
-  // location. A window-level listener supersedes any internal focus
-  // traversal so screen-reader and shortcut-driven focus moves still
-  // get caught.
-  onMount(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        props.onCancel();
-      }
-    };
-    window.addEventListener('keydown', handler);
-    onCleanup(() => window.removeEventListener('keydown', handler));
-  });
-
-  const shortId = () => props.containerId.slice(0, 12);
-
-  return (
-    <div
-      class="containers-section__modal-backdrop"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) props.onCancel();
-      }}
-      data-testid="container-remove-modal-backdrop"
-    >
-      <div
-        ref={dialogRef}
-        class="containers-section__modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="container-remove-title"
-        data-testid="container-remove-modal"
-      >
-        <header class="containers-section__modal-head">
-          <h3
-            id="container-remove-title"
-            class="containers-section__modal-title"
-          >
-            REMOVE CONTAINER?
-          </h3>
-        </header>
-        <p class="containers-section__modal-body">
-          Remove container <strong>{shortId()}</strong>? This cannot be undone — any state inside
-          the container will be lost.
-        </p>
-        <div class="containers-section__modal-actions">
-          <Button
-            variant="ghost"
-            size="sm"
-            data-testid="container-remove-cancel"
-            disabled={props.pending}
-            onClick={props.onCancel}
-          >
-            CANCEL
-          </Button>
-          <Button
-            variant="primary"
-            size="sm"
-            data-testid="container-remove-confirm"
-            aria-busy={props.pending}
-            disabled={props.pending}
-            onClick={props.onConfirm}
-          >
-            YES, REMOVE
-          </Button>
-        </div>
-      </div>
-    </div>
-  );
-};
+const StopGlyph: Component = () => (
+  <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+    <rect x="3" y="3" width="6" height="6" rx="1" fill="currentColor" />
+  </svg>
+);
 
 // ---------------------------------------------------------------------------
-// Logs flyout
+// Inline logs panel
 // ---------------------------------------------------------------------------
 
-interface LogsFlyoutProps {
-  containerId: string;
+interface InlineLogsPanelProps {
+  containers: ContainerInfo[];
   onClose: () => void;
 }
 
@@ -397,59 +325,65 @@ const LOGS_POLL_MS = 2000;
 /** Tail size on each poll — keeps the IPC payload bounded. */
 const LOGS_TAIL = 200;
 
-const LogsFlyout: Component<LogsFlyoutProps> = (props) => {
-  const [lines, setLines] = createSignal<LogLine[]>([]);
-  const [error, setError] = createSignal<string | null>(null);
-  let dialogRef: HTMLDivElement | undefined;
-  useFocusTrap(() => dialogRef);
+interface DecoratedLine extends LogLine {
+  containerId: string;
+}
 
-  // The "since" cursor advances on every successful poll so the second
-  // and subsequent polls only fetch new lines. The first poll uses
-  // `tail` to seed the viewer with recent history.
-  let sinceCursor: string | null = null;
+/**
+ * F-723: inline log strip replacing the prior modal flyout. Renders below
+ * the row list inside the card chrome and multiplexes log lines across
+ * every running container, each line prefixed by the originating
+ * container's 12-char id.
+ */
+const InlineLogsPanel: Component<InlineLogsPanelProps> = (props) => {
+  const [lines, setLines] = createSignal<DecoratedLine[]>([]);
+  const [error, setError] = createSignal<string | null>(null);
+
+  // Per-container "since" cursors so each next poll only fetches new
+  // lines per container. First poll uses `tail` to seed the viewer.
+  const cursors: Map<string, string | null> = new Map();
+
+  const targetIds = () =>
+    props.containers.filter((c) => !c.stopped).map((c) => c.container_id);
 
   const fetchOnce = async (initial: boolean) => {
     try {
-      const opts: { since?: string; tail?: number } = {};
-      if (sinceCursor !== null) opts.since = sinceCursor;
-      if (initial) opts.tail = LOGS_TAIL;
-      const got = await containerLogs(props.containerId, opts);
-      if (got.length === 0) return;
-      // Advance the cursor past the newest line so the next poll only
-      // returns deltas. The fallback is "now-ish" so a missing
-      // timestamp on the last line doesn't peg us at the same spot.
-      const newest = got[got.length - 1];
-      if (newest?.timestamp) sinceCursor = newest.timestamp;
-      setLines((cur) => {
-        // `podman logs --since <ts>` is inclusive: if the boundary line
-        // shares the cursor's timestamp, it'll come back on the next
-        // poll. De-dup by `(timestamp, stream, line)` against the tail
-        // of the buffer so identical adjacent entries don't double-print.
-        // We only scan the recently-buffered tail (bounded by `got.length`)
-        // to keep the merge O(n + m) rather than O(n*m).
-        const seen = new Set<string>();
-        const tailStart = Math.max(0, cur.length - got.length);
-        for (let i = tailStart; i < cur.length; i++) {
-          const l = cur[i]!;
-          seen.add(`${l.timestamp ?? ''} ${l.stream} ${l.line}`);
-        }
-        const fresh = got.filter((l) => {
-          const key = `${l.timestamp ?? ''} ${l.stream} ${l.line}`;
-          if (seen.has(key)) return false;
-          seen.add(key);
-          return true;
+      for (const id of targetIds()) {
+        const opts: { since?: string; tail?: number } = {};
+        const cursor = cursors.get(id) ?? null;
+        if (cursor !== null) opts.since = cursor;
+        if (initial) opts.tail = LOGS_TAIL;
+        const got = await containerLogs(id, opts);
+        if (got.length === 0) continue;
+        const newest = got[got.length - 1];
+        if (newest?.timestamp) cursors.set(id, newest.timestamp);
+        setLines((cur) => {
+          const seen = new Set<string>();
+          const tailStart = Math.max(0, cur.length - got.length);
+          for (let i = tailStart; i < cur.length; i++) {
+            const l = cur[i]!;
+            if (l.containerId !== id) continue;
+            seen.add(`${l.timestamp ?? ''} ${l.stream} ${l.line}`);
+          }
+          const fresh: DecoratedLine[] = got
+            .filter((l) => {
+              const key = `${l.timestamp ?? ''} ${l.stream} ${l.line}`;
+              if (seen.has(key)) return false;
+              seen.add(key);
+              return true;
+            })
+            .map((l) => ({ ...l, containerId: id }));
+          const merged = cur.concat(fresh);
+          return merged.length > LOGS_BUFFER_CAP
+            ? merged.slice(merged.length - LOGS_BUFFER_CAP)
+            : merged;
         });
-        const merged = cur.concat(fresh);
-        return merged.length > LOGS_BUFFER_CAP
-          ? merged.slice(merged.length - LOGS_BUFFER_CAP)
-          : merged;
-      });
+      }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
     }
   };
 
-  // Initial load + interval polling.
   onMount(() => {
     void fetchOnce(true);
     const id = window.setInterval(() => {
@@ -457,9 +391,8 @@ const LogsFlyout: Component<LogsFlyoutProps> = (props) => {
     }, LOGS_POLL_MS);
     onCleanup(() => window.clearInterval(id));
 
-    // ESC closes regardless of focus location.
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
+      if (e.key === 'Escape' && document.activeElement?.closest('.containers-section__logs-panel')) {
         e.preventDefault();
         props.onClose();
       }
@@ -470,69 +403,61 @@ const LogsFlyout: Component<LogsFlyoutProps> = (props) => {
 
   return (
     <div
-      class="containers-section__flyout-backdrop"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) props.onClose();
-      }}
-      data-testid="container-logs-flyout"
+      id="containers-section-logs"
+      class="containers-section__logs-panel"
+      data-testid="containers-logs-panel"
     >
-      <div
-        ref={dialogRef}
-        id={`container-logs-${props.containerId}`}
-        class="containers-section__flyout"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="container-logs-title"
-      >
-        <header class="containers-section__flyout-head">
-          <h3
-            id="container-logs-title"
-            class="containers-section__flyout-title"
-          >
-            LOGS — {props.containerId.slice(0, 12)}
-          </h3>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={props.onClose}
-            data-testid="container-logs-close"
-            aria-label="Close logs"
-          >
-            CLOSE
-          </Button>
-        </header>
-        <Show when={error()}>
-          {(msg) => (
-            <p class="containers-section__error" role="alert">
-              {msg()}
-            </p>
-          )}
-        </Show>
-        <pre
-          class="containers-section__log-pane"
-          role="log"
-          aria-live="polite"
-          aria-label={`Container ${props.containerId.slice(0, 12)} logs`}
+      <header class="containers-section__logs-head">
+        <span class="containers-section__logs-title">
+          LOGS {'—'} {RUNTIME_LABEL}
+        </span>
+        <Button
+          variant="ghost"
+          size="sm"
+          class="containers-section__head-btn"
+          onClick={props.onClose}
+          data-testid="containers-logs-close"
+          aria-label="Close logs"
         >
-          <For each={lines()}>
-            {(l) => (
-              <div
-                class="containers-section__log-line"
-                classList={{
-                  'containers-section__log-line--err': l.stream === 'stderr',
-                }}
-              >
-                <Show when={l.timestamp}>
-                  {(ts) => (
-                    <span class="containers-section__log-ts">{ts()}</span>
-                  )}
-                </Show>
-                <span class="containers-section__log-text">{l.line}</span>
-              </div>
-            )}
-          </For>
-        </pre>
-      </div>
+          Close
+        </Button>
+      </header>
+      <Show when={error()}>
+        {(msg) => (
+          <p
+            class="containers-section__error"
+            role="alert"
+            data-testid="containers-logs-error"
+          >
+            {msg()}
+          </p>
+        )}
+      </Show>
+      <pre
+        class="containers-section__log-pane"
+        role="log"
+        aria-live="polite"
+        aria-label="Container logs"
+      >
+        <For each={lines()}>
+          {(l) => (
+            <div
+              class="containers-section__log-line"
+              classList={{
+                'containers-section__log-line--err': l.stream === 'stderr',
+              }}
+            >
+              <span class="containers-section__log-cid">{l.containerId.slice(0, 12)}</span>
+              <Show when={l.timestamp}>
+                {(ts) => (
+                  <span class="containers-section__log-ts">{ts()}</span>
+                )}
+              </Show>
+              <span class="containers-section__log-text">{l.line}</span>
+            </div>
+          )}
+        </For>
+      </pre>
     </div>
   );
 };
@@ -571,7 +496,7 @@ export const ContainerRuntimeBanner: Component<ContainerRuntimeBannerProps> = (p
       aria-label={headline()}
     >
       <span class="containers-banner__icon" aria-hidden="true">
-        ⚠
+        {'⚠'}
       </span>
       <div class="containers-banner__body">
         <p class="containers-banner__headline">{headline()}</p>
@@ -648,7 +573,7 @@ export function installInstructionsUrl(_status: RuntimeStatus): string {
 }
 
 function truncate(s: string, max: number): string {
-  return s.length > max ? `${s.slice(0, max - 1)}…` : s;
+  return s.length > max ? `${s.slice(0, max - 1)}${'…'}` : s;
 }
 
 function formatRelative(rfc3339: string): string {
@@ -661,4 +586,3 @@ function formatRelative(rfc3339: string): string {
   if (ms < 86_400_000) return `${Math.floor(ms / 3_600_000)}h ago`;
   return new Date(t).toISOString().slice(0, 10);
 }
-

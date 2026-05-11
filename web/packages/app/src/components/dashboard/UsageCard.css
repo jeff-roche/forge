@@ -1,0 +1,258 @@
+/* F-722: Dashboard Usage card.
+ *
+ * Layout per `docs/ui-specs/dashboard.md §Usage card`. KPI tile + spark
+ * chart primitives per `DESIGN.md §KPI tile` + `§Spark chart`. Tokens
+ * only — every literal references `tokens.css`. */
+
+.usage-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  padding: var(--sp-5);
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-border-1);
+  border-radius: var(--r-lg);
+  font-family: var(--font-body);
+  color: var(--color-text-primary);
+}
+
+.usage-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+
+.usage-card__label {
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-xs);
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+}
+
+.usage-card__label-sep {
+  color: var(--color-text-tertiary);
+}
+
+.usage-card__label-range {
+  /* Trailing range fragment paints lowercase per spec §Header. */
+  text-transform: none;
+  letter-spacing: 0.1em;
+}
+
+.usage-card__ranges {
+  display: flex;
+  gap: var(--sp-1);
+}
+
+.usage-card__range {
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-xs);
+  letter-spacing: 0.1em;
+  padding: var(--sp-1) var(--sp-2);
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  transition: background var(--ease), color var(--ease);
+}
+
+.usage-card__range:hover {
+  color: var(--color-text-secondary);
+}
+
+.usage-card__range--selected {
+  background: var(--color-surface-3);
+  color: var(--color-text-primary);
+}
+
+.usage-card__range:focus-visible {
+  outline: 2px solid var(--color-info);
+  outline-offset: 2px;
+}
+
+.usage-card__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+.usage-card__body--error {
+  /* Spec D.5.1: error block replaces the KPI grid; spark suppresses. */
+  gap: 0;
+}
+
+/* --------------------------------------------------------------------- */
+/* KPI tiles                                                              */
+/* --------------------------------------------------------------------- */
+
+.usage-card__kpis {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--sp-4);
+}
+
+.usage-card__tile {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-5);
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border-1);
+  border-radius: var(--r-lg);
+  min-width: 0;
+}
+
+.usage-card__tile::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 48px;
+  height: 2px;
+  background: var(--color-ember-400);
+}
+
+.usage-card__tile--ok::before {
+  background: var(--color-success);
+}
+
+.usage-card__tile--warn::before {
+  background: var(--color-warning);
+}
+
+.usage-card__tile--info::before {
+  background: var(--color-info);
+}
+
+.usage-card__tile-label {
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-xs);
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+}
+
+.usage-card__value {
+  /* TODO: add token --type-display-kpi (34px) per DESIGN.md §KPI tile.
+     Until then we lean on the existing display tier and override locally. */
+  font-family: var(--font-display);
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  font-size: var(--type-display-md);
+  margin-top: var(--sp-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.usage-card__unit {
+  /* TODO: add token --type-display-kpi-unit (16px) per DESIGN.md §KPI tile. */
+  font-family: var(--font-mono);
+  font-size: var(--type-body-lg);
+  color: var(--color-text-secondary);
+  margin-left: var(--sp-1);
+}
+
+.usage-card__delta {
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-sm);
+}
+
+.usage-card__delta--warn {
+  color: var(--color-warning);
+}
+
+.usage-card__delta--ok {
+  color: var(--color-success);
+}
+
+.usage-card__delta--flat {
+  color: var(--color-text-secondary);
+}
+
+/* Reserve the row height even when no Δ% is renderable so the three
+ * tiles align vertically — the spec illustrates a stable delta line. */
+.usage-card__delta--hidden {
+  display: inline-block;
+  min-height: var(--type-mono-sm);
+}
+
+/* --------------------------------------------------------------------- */
+/* Empty + spark                                                          */
+/* --------------------------------------------------------------------- */
+
+.usage-card__empty {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-sm);
+  color: var(--color-text-tertiary);
+  letter-spacing: 0.1em;
+}
+
+.usage-card__spark {
+  height: 60px;
+  padding: 0 var(--sp-4) var(--sp-4);
+}
+
+.usage-card__spark svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.usage-card__spark--empty svg {
+  opacity: 0.55;
+}
+
+/* --------------------------------------------------------------------- */
+/* Skeleton placeholders (loading state per spec D.5.1)                   */
+/* --------------------------------------------------------------------- */
+
+.usage-card__kpi-skeleton.forge-skeleton-group {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--sp-4);
+}
+
+.usage-card__kpi-skeleton .forge-skeleton {
+  height: 96px;
+  border-radius: var(--r-lg);
+}
+
+.usage-card__spark-skeleton .forge-skeleton {
+  height: 60px;
+  border-radius: var(--r-sm);
+}
+
+/* --------------------------------------------------------------------- */
+/* Error block                                                            */
+/* --------------------------------------------------------------------- */
+
+.usage-card__error {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-4);
+  background: var(--color-error-bg);
+  border-left: 3px solid var(--color-ember-400);
+  border-radius: var(--r-sm);
+}
+
+.usage-card__error-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: 700;
+  color: var(--color-ember-300);
+}
+
+.usage-card__error-detail {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--type-body-sm);
+  color: var(--color-text-secondary);
+  word-break: break-word;
+}

@@ -1,17 +1,17 @@
 import { type Component, createResource, createSignal, onMount, Show } from 'solid-js';
-import { ProviderPanel } from './Dashboard/ProviderPanel';
+import { DashboardHero } from '../components/dashboard/DashboardHero';
+import { EnabledAssetsCard } from '../components/dashboard/EnabledAssetsCard';
 import { ProvidersSection } from '../components/dashboard/ProvidersSection';
+import { UsageCard } from '../components/dashboard/UsageCard';
 import { SessionsPanel } from './Dashboard/SessionsPanel';
 import {
   CREDENTIAL_PROVIDERS,
   CredentialBanner,
-  CredentialsSection,
 } from '../components/dashboard/CredentialsSection';
 import {
   ContainerRuntimeBanner,
   ContainersSection,
 } from '../components/dashboard/ContainersSection';
-import { MemorySection } from '../components/dashboard/MemorySection';
 import { hasCredential } from '../ipc/credentials';
 import {
   CONTAINER_BANNER_DISMISSED_KEY,
@@ -19,7 +19,6 @@ import {
   type RuntimeStatus,
 } from '../ipc/containers';
 import { getSettings, setSetting } from '../ipc/session';
-import { activeWorkspaceRoot } from '../stores/session';
 import './Dashboard.css';
 
 /**
@@ -126,7 +125,7 @@ export const Dashboard: Component = () => {
 
   return (
     <main class="dashboard">
-      <h1 class="dashboard__title">Forge — Dashboard</h1>
+      <DashboardHero />
       <Show when={missing()}>
         {(m) => <CredentialBanner providerLabel={m().label} />}
       </Show>
@@ -138,14 +137,24 @@ export const Dashboard: Component = () => {
           />
         )}
       </Show>
-      <ProviderPanel />
-      <ProvidersSection />
-      <CredentialsSection />
-      <ContainersSection />
-      <Show when={activeWorkspaceRoot()}>
-        {(root) => <MemorySection workspaceRoot={root()} />}
-      </Show>
-      <SessionsPanel />
+      <div class="dashboard__grid">
+        <div class="dashboard__slot dashboard__slot--col-8">
+          <SessionsPanel />
+        </div>
+        <div class="dashboard__slot dashboard__slot--col-4">
+          <ProvidersSection />
+        </div>
+        <div class="dashboard__slot dashboard__slot--col-6">
+          <UsageCard />
+        </div>
+        <div class="dashboard__slot dashboard__slot--col-6">
+          <EnabledAssetsCard />
+        </div>
+        <div class="dashboard__slot dashboard__slot--col-12">
+          <ContainersSection />
+        </div>
+      </div>
     </main>
   );
 };
+

@@ -1,10 +1,10 @@
-/* F-586: Dashboard providers section.
+/* F-721: Dashboard Providers card (col-4) for the v-dash grid.
  *
- * Cards are `@forge/design` Tab primitives in `radio` variant — they
- * already carry `role="radio"` + `aria-checked` + `forge-tab--selected`
- * styling baked into `@forge/design/components.css`. The custom rules
- * here only paint the card shape (multi-line, two-row body) and the
- * credential / model hint pills. Every value comes from a design token.
+ * Compact stacked-list layout, one row per provider. Rows are the
+ * radiogroup hit targets; clicking fires `set_active_provider`. Active
+ * row paints the ember pip/border treatment per the four-state spec
+ * (loading / empty / error / ready). Every value flows through a design
+ * token — no raw colors, no hard-coded sizes outside the token scale.
  */
 
 .providers {
@@ -14,7 +14,7 @@
   padding: var(--sp-5);
   display: flex;
   flex-direction: column;
-  gap: var(--sp-4);
+  gap: var(--sp-3);
   font-family: var(--font-body);
   color: var(--color-text-primary);
 }
@@ -23,40 +23,64 @@
   display: flex;
   align-items: baseline;
   justify-content: space-between;
+  gap: var(--sp-2);
 }
 
 .providers__label {
   font-family: var(--font-mono);
   font-size: var(--type-mono-xxs);
-  letter-spacing: 0.2em;
-  color: var(--color-text-tertiary);
+  letter-spacing: 0.22em;
+  color: var(--color-text-secondary);
   text-transform: uppercase;
 }
 
-/* F-684: provider-grid loading state.
- *
- * The skeleton group lays out 4 card-shaped placeholders on the same
- * `auto-fill, minmax(220px, 1fr)` track that the live `.providers__grid` uses
- * so the surface does not jump when the resource resolves.
- */
-.providers__skeleton.forge-skeleton-group {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: var(--sp-3);
+.providers__manage {
+  font-family: var(--font-display);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: var(--type-mono-xxs);
+  padding: var(--sp-1) var(--sp-2);
+  border-radius: var(--r-sm);
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--color-text-secondary);
+  text-decoration: none;
+  cursor: pointer;
+  transition: var(--ease);
 }
 
-.providers__loading,
+.providers__manage:hover,
+.providers__manage:focus-visible {
+  color: var(--color-text-primary);
+  border-color: var(--color-border-2);
+}
+
+.providers__manage:focus-visible {
+  outline: 2px solid var(--color-ember-400);
+  outline-offset: 2px;
+}
+
+/* Loading skeleton: 4 row-shaped block placeholders matching the live
+ * row height (24px name + 16px sub + sp-2 gap + sp-2 padding ≈ 48px).
+ */
+.providers__skeleton.forge-skeleton-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.providers__skeleton .forge-skeleton--block {
+  height: 48px;
+  border-radius: var(--r-sm);
+}
+
 .providers__empty {
   font-family: var(--font-mono);
   font-size: var(--type-mono-sm);
-  color: var(--color-text-secondary);
-  letter-spacing: 0.2em;
-  margin: 0;
-}
-
-.providers__empty {
   color: var(--color-text-tertiary);
   letter-spacing: 0.05em;
+  margin: 0;
 }
 
 .providers__error,
@@ -90,126 +114,128 @@
   color: var(--color-text-secondary);
 }
 
-/* Override the .forge-tabs flex-row default — provider cards stack as a
- * grid so each can carry two rows of metadata.
- */
-.providers__grid.forge-tabs {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: var(--sp-3);
-  align-items: stretch;
-}
+/* ---------------------------------------------------------------------
+ * Row list — the radiogroup container and its rows.
+ * ------------------------------------------------------------------ */
 
-/* The Tab primitive's baseline is a single-line pill (.forge-tab in
- * components.css). Cards expand to a stacked layout — same selected /
- * focus / hover semantics, taller body.
- */
-.provider-card.forge-tab {
+.providers__list {
+  display: flex;
   flex-direction: column;
-  align-items: stretch;
-  justify-content: flex-start;
-  padding: var(--sp-3);
-  min-height: 72px;
+  gap: var(--sp-1);
+}
+
+.providers__row {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-sm);
+  background: transparent;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: var(--ease);
   text-align: left;
-  text-transform: none;
-  letter-spacing: 0;
-  font-family: var(--font-body);
-  font-size: var(--type-mono-md);
-  font-weight: 400;
-  border: 1px solid var(--color-border-2);
+}
+
+.providers__row:hover {
   background: var(--color-surface-2);
-}
-
-.provider-card.forge-tab[aria-checked='true'] {
-  background: var(--color-surface-3);
-  border-color: var(--color-ember-400);
-  color: var(--color-text-primary);
-}
-
-.provider-card.forge-tab:hover:not(:disabled) {
   border-color: var(--color-border-2);
-  color: var(--color-text-primary);
 }
 
-/* F-586 review: visual feedback while a switch is in flight. The
- * `aria-busy` attribute is the source of truth for screen readers; the
- * `--pending` class signals "we heard your click" without letting a
- * second click race the first.
- */
-.provider-card.forge-tab[aria-busy='true'],
-.provider-card.forge-tab--pending {
+.providers__row:focus-visible {
+  outline: 2px solid var(--color-ember-400);
+  outline-offset: 2px;
+}
+
+.providers__row--active {
+  background: var(--color-surface-2);
+  border-color: var(--color-ember-400);
+}
+
+.providers__row[aria-busy='true'],
+.providers__row--pending {
   border-color: var(--color-ember-300);
-}
-
-.provider-card.forge-tab:disabled {
   cursor: progress;
 }
 
-.provider-card__body {
+.providers__row[aria-disabled='true']:not(.providers__row--pending) {
+  cursor: not-allowed;
+}
+
+/* Brand dot: 10px circle keyed to the provider accent. Falls back to
+ * `--color-text-tertiary` when the provider id doesn't match any of the
+ * four canonical brand tokens.
+ */
+.providers__dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--color-text-tertiary);
+}
+
+.providers__row[data-brand='anthropic'] .providers__dot {
+  background: var(--color-provider-anthropic);
+}
+.providers__row[data-brand='openai'] .providers__dot {
+  background: var(--color-provider-openai);
+}
+.providers__row[data-brand='local'] .providers__dot {
+  background: var(--color-provider-local);
+}
+.providers__row[data-brand='custom'] .providers__dot {
+  background: var(--color-provider-custom);
+}
+
+.providers__identity {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-2);
-  width: 100%;
-}
-
-.provider-card__row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-2);
-}
-
-.provider-card__row--meta {
-  font-family: var(--font-mono);
-  font-size: var(--type-mono-sm);
-  color: var(--color-text-secondary);
-}
-
-.provider-card__name {
-  font-family: var(--font-display);
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  font-size: var(--type-body-md);
-  color: var(--color-text-primary);
-}
-
-.provider-card__active-pip {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--color-ember-400);
-  box-shadow: 0 0 6px var(--color-ember-400);
-  flex-shrink: 0;
-}
-
-.provider-card__hint {
-  font-family: var(--font-mono);
-  font-size: var(--type-mono-sm);
-  color: var(--color-text-secondary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  flex: 1;
+  gap: 2px;
   min-width: 0;
 }
 
-.provider-card__hint--missing {
-  color: var(--color-text-tertiary);
-  font-style: italic;
+.providers__name {
+  font-family: var(--font-body);
+  font-weight: 500;
+  font-size: var(--type-body-md);
+  color: var(--color-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.provider-card__cred {
+.providers__sub {
   font-family: var(--font-mono);
-  font-size: var(--type-mono-sm);
-  padding: 0 var(--sp-1);
+  font-size: var(--type-mono-xs);
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Status pill — supplied by `@forge/design` `<StatusPill>` primitive
+ * (DESIGN.md §Status pill, F-720). Row-level styles only constrain it
+ * to not stretch and to sit flush to the trailing edge.
+ */
+.providers__pill {
   flex-shrink: 0;
 }
 
-.provider-card__cred--present {
-  color: var(--color-success);
-}
-
-.provider-card__cred--missing {
-  color: var(--color-ember-300);
+/* Active-pip carry-over from the F-586 pattern — small ember glow on
+ * the right edge confirming the selection. Rendered after the pill so
+ * it sits flush to the row's trailing edge.
+ */
+.providers__active-pip {
+  position: absolute;
+  right: var(--sp-2);
+  top: 50%;
+  transform: translateY(-50%);
+  width: 4px;
+  height: 16px;
+  border-radius: 2px;
+  background: var(--color-ember-400);
+  box-shadow: 0 0 6px var(--color-ember-400);
+  pointer-events: none;
 }

@@ -393,3 +393,69 @@
     background-color: var(--color-surface-3);
   }
 }
+
+/* =============================================================================
+ * StatusPill — DESIGN.md §Status pill
+ *
+ * Foreground-only state label. Variants bind the foreground color; the
+ * background stays transparent so the pill reads as inline metadata, not
+ * as a chip. The leading dot inherits the pill color via `currentColor`.
+ * Pulse animation lands in F-740 — for now every variant renders static
+ * to honour `prefers-reduced-motion` and ship the visual baseline first.
+ * ============================================================================= */
+
+.forge-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-xxs);
+  letter-spacing: 0.06em;
+  text-transform: lowercase;
+  white-space: nowrap;
+  background: transparent;
+}
+
+.forge-status-pill__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+}
+
+.forge-status-pill__label {
+  color: inherit;
+}
+
+.forge-status-pill--streaming {
+  color: var(--color-ember-200);
+}
+
+.forge-status-pill--awaiting {
+  color: var(--color-warning);
+}
+
+.forge-status-pill--done {
+  color: var(--color-success);
+}
+
+.forge-status-pill--idle {
+  color: var(--color-text-secondary);
+}
+
+.forge-status-pill--ready {
+  color: var(--color-success);
+}
+
+.forge-status-pill--ready .forge-status-pill__dot {
+  box-shadow: 0 0 6px rgba(61, 220, 132, 0.5);
+}
+
+.forge-status-pill--auth {
+  color: var(--color-error);
+}
+
+.forge-status-pill--auth .forge-status-pill__dot {
+  box-shadow: 0 0 6px rgba(255, 74, 18, 0.5);
+}

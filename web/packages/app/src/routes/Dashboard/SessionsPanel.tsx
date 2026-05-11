@@ -1,11 +1,12 @@
 import { createResource, createSignal, For, Show, type Component } from 'solid-js';
+import { useNavigate } from '@solidjs/router';
 import {
   sessionList,
   openSession as ipcOpenSession,
   type SessionWireState,
   type SessionSummary,
 } from '../../ipc/dashboard';
-import { Button, Tab } from '@forge/design';
+import { Button, Skeleton, StatusPill, type StatusPillVariant } from '@forge/design';
 import { useRovingTabindex } from '../../lib/useRovingTabindex';
 import './SessionsPanel.css';
 
@@ -13,12 +14,13 @@ export type { SessionWireState, SessionSummary };
 
 type Tab = 'active' | 'archived';
 
-// F-401: surface backend failure as a distinct resource state. Previously
-// this swallowed all `session_list` rejections and returned `[]`, which
-// collapsed "backend failed" into "zero sessions" and violated
-// `component-principles.md`'s four-state coverage rule. Now the rejection
-// propagates to the SolidJS resource's `error` field, and the panel
-// renders a `SESSIONS UNAVAILABLE <detail>` block per `dashboard.md D.5`.
+/**
+ * F-720: dashboard Sessions card — verbatim copy + per-state pill colors
+ * per `docs/ui-specs/dashboard.md §Sessions card`. Row layout, not a card
+ * grid; chip filter (active / archived); ghost `View all` action.
+ *
+ * F-401 four-state coverage (loading / error / empty / ready) is preserved.
+ */
 async function fetchSessions(): Promise<SessionSummary[]> {
   const result = await sessionList();
   return Array.isArray(result) ? result : [];
@@ -31,32 +33,65 @@ function partition(sessions: SessionSummary[]): Record<Tab, SessionSummary[]> {
   };
 }
 
+/**
+ * Map the IPC wire state to the F-720 four-variant pill model. `active`
+ * sessions stream; `stopped` sessions sit idle (UDS not responding);
+ * `archived` sessions are done. The `awaiting` variant is reserved for the
+ * sub-agent approval pipeline (F-740); no wire state maps to it today.
+ */
+export function pillForState(state: SessionWireState): {
+  variant: StatusPillVariant;
+  label: string;
+} {
+  switch (state) {
+    case 'active':
+      return { variant: 'streaming', label: 'streaming' };
+    case 'stopped':
+      return { variant: 'idle', label: 'idle' };
+    case 'archived':
+      return { variant: 'done', label: 'done' };
+  }
+}
+
+/**
+ * Glyph keyed to the session lifecycle per spec §Row layout. Static
+ * single-character marks — F-740 may swap to icon components, but the
+ * verbatim mock uses these glyphs.
+ */
+function glyphForState(state: SessionWireState): string {
+  switch (state) {
+    case 'active':
+      return '⚒';
+    case 'stopped':
+      return '▣';
+    case 'archived':
+      return '✓';
+  }
+}
+
+function shortId(id: string): string {
+  return id.slice(0, 4);
+}
+
 function count(n: number): string {
   return n.toString().padStart(2, '0');
 }
 
-/**
- * Sessions panel for the Dashboard. Industrial-ledger specimen cards with
- * Active / Archived tabs. Data comes from the `session_list` Tauri command;
- * card clicks dispatch `open_session` to reopen the Session window.
- */
 export const SessionsPanel: Component = () => {
-  // F-401: no `initialValue` here so the resource reports `loading` while the
-  // first fetch is in flight; otherwise loading collapses into the ready-empty
-  // branch and the four-state coverage regresses.
+  const navigate = useNavigate();
   const [sessions, { refetch }] = createResource(fetchSessions);
   const [tab, setTab] = createSignal<Tab>('active');
-  // F-079: inline error surface when `open_session` rejects (IPC auth fail,
-  // missing window, validation error, etc.). Previously a fire-and-forget
-  // `void invoke(...)` swallowed all rejections silently.
   const [openError, setOpenError] = createSignal<string | null>(null);
-  // F-401: reading `sessions()` while the resource is in its `errored` state
-  // re-throws in the reactive scope. Gate on the resource's state so the
-  // fetch rejection stays observable via the error block without crashing
-  // the panel.
+
+  // Reading `sessions()` while the resource is in its `errored` state
+  // re-throws inside the reactive scope — gate every read on `state`.
   const rows = () => (sessions.state === 'ready' ? sessions() ?? [] : []);
   const groups = () => partition(rows());
   const current = () => groups()[tab()];
+
+  const runningCount = () => rows().filter((s) => s.state === 'active').length;
+  const idleCount = () => rows().filter((s) => s.state === 'stopped').length;
+
   const listErrorDetail = () => {
     const err = sessions.error;
     if (!err) return null;
@@ -71,23 +106,52 @@ export const SessionsPanel: Component = () => {
     });
   };
 
-  // F-416: roving tabindex on the session grid. The hook keeps exactly one
-  // card as the tab stop and handles ArrowRight/Left/Up/Down/Home/End so
-  // the grid is a single Tab stop with internal arrow navigation per
-  // WAI-ARIA APG grid pattern. The ref is a signal so the hook's effect
-  // re-attaches whenever <Show> toggles between grid and fallback.
-  const [gridRef, setGridRef] = createSignal<HTMLDivElement | undefined>();
-  useRovingTabindex(gridRef, '.session-card');
+  // Roving tabindex on the row list (F-416 pattern). One row is the tab
+  // stop; arrows / Home / End move focus within the list.
+  const [listRef, setListRef] = createSignal<HTMLDivElement | undefined>();
+  useRovingTabindex(listRef, '.sessions__row');
 
   const panelId = () => `sessions-panel-${tab()}`;
   const tabId = (t: Tab) => `sessions-tab-${t}`;
 
   return (
     <section class="sessions" aria-label="Sessions">
-      <div role="tablist" class="sessions__tabs">
-        <TabButton tab="active" current={tab()} onSelect={setTab} count={groups().active.length} />
-        <TabButton tab="archived" current={tab()} onSelect={setTab} count={groups().archived.length} />
+      <header class="sessions__header">
+        <span class="sessions__label">Sessions</span>
+        <div class="sessions__header-actions">
+          <Button
+            variant="ghost"
+            size="sm"
+            class="sessions__view-all"
+            onClick={() => navigate('/sessions')}
+          >
+            View all
+          </Button>
+        </div>
+      </header>
+
+      <div class="sessions__sub-header">
+        <div role="tablist" class="sessions__chips" aria-label="Session filter">
+          <ChipTab
+            tab="active"
+            current={tab()}
+            onSelect={setTab}
+            count={groups().active.length}
+          />
+          <ChipTab
+            tab="archived"
+            current={tab()}
+            onSelect={setTab}
+            count={groups().archived.length}
+          />
+        </div>
+        <Show when={runningCount() + idleCount() > 0}>
+          <span class="sessions__meta">
+            {runningCount()} running · {idleCount()} idle
+          </span>
+        </Show>
       </div>
+
       <Show when={openError()}>
         {(msg) => (
           <p class="sessions__error" role="alert">
@@ -95,22 +159,17 @@ export const SessionsPanel: Component = () => {
           </p>
         )}
       </Show>
-      {/* F-401: loading / error branches before the ready tabpanel so the
-          Dashboard panel renders four distinct async states per
-          `dashboard.md D.5`. Loading shows the mono-noun+state line;
-          error shows the `SESSIONS UNAVAILABLE` block with verbatim
-          detail and a RETRY action. Ready delegates to the existing
-          empty-or-grid split. */}
+
       <Show when={sessions.loading}>
-        <p
-          class="sessions__loading"
-          id={panelId()}
-          role="tabpanel"
-          aria-labelledby={tabId(tab())}
-        >
-          sessions · probing
-        </p>
+        <Skeleton
+          variant="card"
+          count={4}
+          label="Loading sessions"
+          class="sessions__skeleton"
+          data-testid="sessions-loading"
+        />
       </Show>
+
       <Show when={listErrorDetail()}>
         {(detail) => (
           <div
@@ -120,7 +179,7 @@ export const SessionsPanel: Component = () => {
             aria-labelledby={tabId(tab())}
           >
             <div class="sessions__list-error-body" role="alert">
-              <p class="sessions__list-error-title">SESSIONS UNAVAILABLE</p>
+              <p class="sessions__list-error-title">Couldn't load sessions.</p>
               <p class="sessions__list-error-detail">{detail()}</p>
               <Button
                 variant="ghost"
@@ -134,6 +193,7 @@ export const SessionsPanel: Component = () => {
           </div>
         )}
       </Show>
+
       <Show when={sessions.state === 'ready'}>
         <Show
           when={current().length > 0}
@@ -144,19 +204,19 @@ export const SessionsPanel: Component = () => {
               role="tabpanel"
               aria-labelledby={tabId(tab())}
             >
-              {tab() === 'active' ? '// no active sessions' : '// archive is empty'}
+              {tab() === 'active' ? 'No active sessions yet.' : 'Archive is empty.'}
             </p>
           }
         >
           <div
-            ref={setGridRef}
-            class="sessions__grid"
+            ref={setListRef}
+            class="sessions__list"
             id={panelId()}
             role="tabpanel"
             aria-labelledby={tabId(tab())}
           >
             <For each={current()}>
-              {(session) => <SessionCard session={session} onOpen={handleOpen} />}
+              {(session) => <SessionRow session={session} onOpen={handleOpen} />}
             </For>
           </div>
         </Show>
@@ -165,63 +225,66 @@ export const SessionsPanel: Component = () => {
   );
 };
 
-interface TabButtonProps {
+interface ChipTabProps {
   tab: Tab;
   current: Tab;
   count: number;
   onSelect: (t: Tab) => void;
 }
 
-const TabButton: Component<TabButtonProps> = (props) => {
+const ChipTab: Component<ChipTabProps> = (props) => {
   const selected = () => props.tab === props.current;
   return (
-    <Tab
+    <button
+      type="button"
+      role="tab"
       id={`sessions-tab-${props.tab}`}
       aria-controls={`sessions-panel-${props.tab}`}
-      class={`sessions__tab${selected() ? ' sessions__tab--active' : ''}`}
-      selected={selected()}
+      aria-selected={selected()}
+      class="sessions__chip"
+      classList={{ 'sessions__chip--selected': selected() }}
       onClick={() => props.onSelect(props.tab)}
     >
-      <span class="sessions__tab-label">{props.tab}</span>
-      <span class="sessions__tab-count">{count(props.count)}</span>
-    </Tab>
+      <span class="sessions__chip-label">{props.tab}</span>
+      <span class="sessions__chip-sep">·</span>
+      <span class="sessions__chip-count">{count(props.count)}</span>
+    </button>
   );
 };
 
-interface SessionCardProps {
+interface SessionRowProps {
   session: SessionSummary;
   onOpen: (id: string) => void;
 }
 
-const SessionCard: Component<SessionCardProps> = (props) => {
-  const stateClass = () => `session-card__pip session-card__pip--${props.session.state}`;
+const SessionRow: Component<SessionRowProps> = (props) => {
+  const pill = () => pillForState(props.session.state);
+  const glyph = () => glyphForState(props.session.state);
   return (
     <button
       type="button"
-      class="session-card"
+      class="sessions__row"
       onClick={() => props.onOpen(props.session.id)}
       aria-label={`Open session ${props.session.subject}`}
     >
-      <header class="session-card__header">
-        <h3 class="session-card__subject">{props.session.subject}</h3>
-        <span
-          class="session-card__badge"
-          classList={{
-            'session-card__badge--persist': props.session.persistence === 'persist',
-            'session-card__badge--ephemeral': props.session.persistence === 'ephemeral',
-          }}
-        >
-          {props.session.persistence}
-        </span>
-      </header>
-      <div class="session-card__state">
-        <span class={stateClass()} aria-hidden="true" />
-        <span class="session-card__state-label">{props.session.state}</span>
+      <span class={`sessions__icon sessions__icon--${props.session.state}`} aria-hidden="true">
+        {glyph()}
+      </span>
+      <div class="sessions__identity">
+        <div class="sessions__identity-line">
+          <span class="sessions__name">{props.session.subject}</span>
+          <span class="sessions__id">#{shortId(props.session.id)}</span>
+        </div>
+        <div class="sessions__identity-meta">
+          <Show when={props.session.provider}>
+            {(p) => <span class="sessions__provider">{p()}</span>}
+          </Show>
+          <span class="sessions__last">{formatRelative(props.session.lastEventAt)}</span>
+        </div>
       </div>
-      <footer class="session-card__footer">
-        <span class="session-card__provider">{props.session.provider ?? '—'}</span>
-        <span class="session-card__last">{formatRelative(props.session.lastEventAt)}</span>
-      </footer>
+      <StatusPill variant={pill().variant} class="sessions__pill">
+        {pill().label}
+      </StatusPill>
     </button>
   );
 };

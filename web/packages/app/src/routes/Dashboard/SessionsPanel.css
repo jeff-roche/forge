@@ -1,97 +1,247 @@
-/* Sessions panel — "industrial ledger" specimen tags. All values come from
-   ../../../../../design/src/tokens.css. No raw literals. */
+/* F-720 Sessions card — row layout per `docs/ui-specs/dashboard.md
+   §Sessions card`. Card chrome matches `ProvidersSection.css` for visual
+   consistency across the dashboard primary row. Tokens only — every
+   value comes from `../../../../../design/src/tokens.css`. */
 
 .sessions {
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-border-1);
+  border-radius: var(--r-sm);
+  padding: var(--sp-5);
   display: flex;
   flex-direction: column;
   gap: var(--sp-4);
+  font-family: var(--font-body);
+  color: var(--color-text-primary);
+  min-width: 0;
 }
 
-.sessions__tabs {
+/* -- Header row: label + View all action ----------------------------------- */
+
+.sessions__header {
   display: flex;
-  gap: var(--sp-6);
-  border-bottom: 1px solid var(--color-border-1);
-  padding-bottom: var(--sp-2);
-}
-
-.sessions__tab {
-  appearance: none;
-  background: transparent;
-  border: 0;
-  padding: var(--sp-2) 0;
-  margin: 0;
-  cursor: pointer;
-  color: var(--color-text-secondary);
-  display: inline-flex;
   align-items: baseline;
-  gap: var(--sp-2);
-  position: relative;
-  transition: color var(--ease);
-  font-family: var(--font-mono);
+  justify-content: space-between;
+  gap: var(--sp-3);
 }
 
-.sessions__tab:focus-visible {
-  outline: 2px solid var(--color-ember-400);
-  outline-offset: 2px;
-}
-
-.sessions__tab-label {
+.sessions__label {
   font-family: var(--font-mono);
   font-size: var(--type-mono-xs);
   letter-spacing: 0.2em;
   text-transform: uppercase;
-}
-
-.sessions__tab-count {
-  font-family: var(--font-mono);
-  font-size: var(--type-mono-xs);
-  letter-spacing: 0.15em;
   color: var(--color-text-tertiary);
-  transition: color var(--ease);
 }
 
-.sessions__tab--active {
+.sessions__header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.sessions__view-all {
+  letter-spacing: 0.1em;
+}
+
+/* -- Sub-header: chip filter + meta ---------------------------------------- */
+
+.sessions__sub-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+
+.sessions__chips {
+  display: inline-flex;
+  gap: var(--sp-1);
+  padding: var(--sp-1);
+  background: var(--color-surface-3);
+  border-radius: var(--r-sm);
+}
+
+.sessions__chip {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  border-radius: var(--r-sm);
+  padding: var(--sp-1) var(--sp-3);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-xxs);
+  letter-spacing: 0.1em;
+  text-transform: lowercase;
+  color: var(--color-text-tertiary);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  transition: var(--ease);
+}
+
+.sessions__chip:hover {
+  color: var(--color-text-secondary);
+}
+
+.sessions__chip:focus-visible {
+  outline: 2px solid var(--color-ember-400);
+  outline-offset: 2px;
+}
+
+.sessions__chip--selected {
+  background: var(--color-surface-2);
   color: var(--color-text-primary);
 }
 
-.sessions__tab--active .sessions__tab-count {
-  color: var(--color-text-ember);
+.sessions__chip-sep {
+  color: var(--color-text-tertiary);
+  opacity: 0.5;
 }
 
-.sessions__tab--active::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: calc(var(--sp-2) * -1 - 1px);
-  height: 2px;
-  background: var(--color-ember-400);
+.sessions__chip-count {
+  color: var(--color-text-tertiary);
+}
+
+.sessions__chip--selected .sessions__chip-count {
+  color: var(--color-text-secondary);
+}
+
+.sessions__meta {
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-xxs);
+  letter-spacing: 0.06em;
+  color: var(--color-text-tertiary);
+}
+
+/* -- Row list -------------------------------------------------------------- */
+
+.sessions__list {
+  display: flex;
+  flex-direction: column;
+}
+
+.sessions__row {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--color-border-1);
+  padding: var(--sp-3) var(--sp-2);
+  cursor: pointer;
+  text-align: left;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: var(--sp-3);
+  color: var(--color-text-primary);
+  transition: var(--ease);
+  width: 100%;
+}
+
+.sessions__row:last-child {
+  border-bottom: 0;
+}
+
+.sessions__row:hover {
+  background: var(--color-surface-2);
+}
+
+.sessions__row:focus-visible {
+  outline: 2px solid var(--color-ember-400);
+  outline-offset: -2px;
+}
+
+.sessions__icon {
+  width: var(--sp-4);
+  height: var(--sp-4);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-md);
+  flex-shrink: 0;
+}
+
+.sessions__icon--active {
+  color: var(--color-ember-400);
+}
+
+.sessions__icon--archived {
+  color: var(--color-success);
+}
+
+.sessions__icon--stopped {
+  color: var(--color-text-tertiary);
+}
+
+.sessions__identity {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.sessions__identity-line {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.sessions__name {
+  font-family: var(--font-body);
+  font-weight: 500;
+  color: var(--color-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sessions__id {
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-xs);
+  color: var(--color-text-tertiary);
+  flex-shrink: 0;
+}
+
+.sessions__identity-meta {
+  display: inline-flex;
+  gap: var(--sp-2);
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-xs);
+  color: var(--color-text-tertiary);
+}
+
+.sessions__provider::after {
+  content: ' ·';
+  opacity: 0.5;
+}
+
+.sessions__pill {
+  justify-self: end;
+}
+
+/* -- Loading / empty / error branches -------------------------------------- */
+
+.sessions__skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
 }
 
 .sessions__empty {
   font-family: var(--font-mono);
   font-size: var(--type-mono-sm);
   color: var(--color-text-tertiary);
-  margin: var(--sp-6) 0;
-}
-
-/* F-401: loading + error branches for the session list. Mono-noun+state
- * loading line and `SESSIONS UNAVAILABLE` block mirror ProviderPanel's
- * four-state coverage exemplar. */
-.sessions__loading {
-  font-family: var(--font-mono);
-  font-size: var(--type-mono-sm);
-  color: var(--color-text-secondary);
-  margin: var(--sp-6) 0;
+  margin: var(--sp-4) 0;
 }
 
 .sessions__list-error {
-  margin: var(--sp-4) 0;
+  margin: var(--sp-2) 0;
 }
 
 .sessions__list-error-body {
   border: 1px solid var(--color-error-border);
   background: var(--color-error-bg);
+  border-radius: var(--r-sm);
   padding: var(--sp-3);
   display: flex;
   flex-direction: column;
@@ -101,8 +251,7 @@
 .sessions__list-error-title {
   font-family: var(--font-mono);
   font-size: var(--type-mono-xxs);
-  letter-spacing: 0.15em;
-  text-transform: uppercase;
+  letter-spacing: 0.06em;
   color: var(--color-error);
   margin: 0;
 }
@@ -116,26 +265,7 @@
 }
 
 .sessions__retry {
-  appearance: none;
-  background: transparent;
-  border: 1px solid var(--color-error-border);
-  color: var(--color-error);
-  font-family: var(--font-mono);
-  font-size: var(--type-mono-xxs);
-  letter-spacing: 0.15em;
-  text-transform: uppercase;
-  padding: var(--sp-1) var(--sp-3);
-  cursor: pointer;
   align-self: flex-start;
-}
-
-.sessions__retry:hover {
-  background: var(--color-error-bg);
-}
-
-.sessions__retry:focus-visible {
-  outline: 2px solid var(--color-ember-400);
-  outline-offset: 2px;
 }
 
 /* F-079: inline error surface for failed open_session invokes. */
@@ -147,156 +277,5 @@
   padding: var(--sp-2) var(--sp-3);
   border: 1px solid var(--color-warning);
   border-radius: var(--r-sm);
-  background: rgba(255, 74, 18, 0.04);
-}
-
-.sessions__grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: var(--sp-4);
-}
-
-/* Specimen-tag card. */
-.session-card {
-  appearance: none;
-  text-align: left;
-  background: var(--color-surface-2);
-  border: 1px solid var(--color-border-1);
-  border-left: 2px solid transparent;
-  border-radius: var(--r-lg);
-  padding: var(--sp-5);
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-3);
-  cursor: pointer;
-  color: var(--color-text-primary);
-  transition:
-    background var(--ease),
-    border-color var(--ease),
-    transform var(--ease);
-}
-
-.session-card:hover {
-  background: var(--color-surface-3);
-  border-left-color: var(--color-ember-400);
-  transform: translateY(-1px);
-}
-
-.session-card:focus-visible {
-  outline: 2px solid var(--color-ember-400);
-  outline-offset: 2px;
-}
-
-.session-card__header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--sp-3);
-}
-
-.session-card__subject {
-  font-family: var(--font-body);
-  font-size: var(--type-body-lg);
-  font-weight: 500;
-  line-height: 1.3;
-  margin: 0;
-  color: var(--color-text-primary);
-  /* 2-line truncate */
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-
-.session-card__badge {
-  flex-shrink: 0;
-  font-family: var(--font-mono);
-  font-size: var(--type-mono-xs);
-  letter-spacing: 0.15em;
-  text-transform: uppercase;
-  padding: 2px var(--sp-2);
-  border-radius: var(--r-sm);
-  border: 1px solid transparent;
-}
-
-.session-card__badge--persist {
-  background: var(--color-error-bg);
-  color: var(--color-ember-300);
-  border-color: var(--color-error-border);
-}
-
-.session-card__badge--ephemeral {
-  color: var(--color-text-tertiary);
-  border-color: var(--color-border-2);
-}
-
-.session-card__state {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--sp-2);
-}
-
-.session-card__pip {
-  width: 6px;
-  height: 6px;
-  flex-shrink: 0;
-  display: inline-block;
-}
-
-.session-card__pip--active {
-  background: var(--color-ember-400);
-}
-
-.session-card__pip--archived {
-  background: var(--color-text-tertiary);
-}
-
-.session-card__pip--stopped {
-  background: var(--color-warning);
-  /* Static dimming communicates "stopped" without motion. The pulse below
-   * is opt-in via `prefers-reduced-motion: no-preference` so users with
-   * vestibular sensitivities (WCAG 2.3.3) keep the state cue without
-   * infinite animation. */
-  opacity: 0.8;
-}
-
-@media (prefers-reduced-motion: no-preference) {
-  .session-card__pip--stopped {
-    opacity: 1;
-    animation: sessions-pip-pulse 2s ease-in-out infinite;
-  }
-}
-
-@keyframes sessions-pip-pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.7;
-  }
-}
-
-.session-card__state-label {
-  font-family: var(--font-mono);
-  font-size: var(--type-mono-xs);
-  letter-spacing: 0.2em;
-  text-transform: uppercase;
-  color: var(--color-text-secondary);
-}
-
-.session-card__footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-3);
-  padding-top: var(--sp-3);
-  border-top: 1px solid var(--color-border-1);
-}
-
-.session-card__provider,
-.session-card__last {
-  font-family: var(--font-mono);
-  font-size: var(--type-mono-sm);
-  color: var(--color-text-secondary);
+  background: var(--color-warning-bg);
 }

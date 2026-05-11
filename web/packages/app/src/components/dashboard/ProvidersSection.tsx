@@ -1,5 +1,6 @@
 import { createResource, createSignal, For, Show, type Component } from 'solid-js';
-import { Skeleton, Tab, Tabs } from '@forge/design';
+import { A } from '@solidjs/router';
+import { Skeleton, StatusPill, type StatusPillVariant } from '@forge/design';
 import {
   getActiveProvider,
   listProviders,
@@ -22,19 +23,24 @@ async function fetchSnapshot(): Promise<Snapshot> {
 }
 
 /**
- * F-586 Providers section for the Dashboard.
+ * F-721 Providers card for the Dashboard's v-dash grid (col-4).
  *
- * Renders one card per built-in provider plus any user-configured
- * `[providers.custom_openai.<name>]` entry. The active provider is the
- * one whose id matches `[providers.active]`. Clicking a card invokes
- * `set_active_provider` and refetches; the IPC command emits a
- * `provider:changed` Tauri event app-wide so any open session window's
- * orchestrator picks up the change for the next turn.
+ * Compact stacked-list of one row per built-in provider plus any
+ * user-configured `[providers.custom_openai.<name>]` entry. Each row
+ * leads with a brand-color dot, carries the provider name + model
+ * summary (or error subtext), and a trailing readiness pill — `ready`
+ * (success) when the provider has a model available, `auth` (warning)
+ * when a required credential is missing or the model is unconfigured.
  *
- * Uses the `@forge/design` Tab primitive in `radio` variant so the cards
- * are a single-select radiogroup with proper ARIA. Roving-tabindex via
- * the existing helper keeps the panel a single Tab stop with internal
- * arrow navigation.
+ * Radio semantics are preserved: the wrapping list is a `radiogroup`
+ * and each row carries `role="radio"` + `aria-checked`. Clicking a row
+ * fires `set_active_provider`; the active row paints the ember pip /
+ * border treatment. F-720's `set_active_provider` IPC continues to emit
+ * `provider:changed` app-wide so any open session window picks up the
+ * change on its next turn.
+ *
+ * The header carries a `Manage` link to `/providers`. F-729 wires that
+ * route; until then the link dead-ends.
  */
 export const ProvidersSection: Component = () => {
   const [snapshot, { refetch }] = createResource(fetchSnapshot);
@@ -71,22 +77,21 @@ export const ProvidersSection: Component = () => {
     return err instanceof Error ? `Error: ${err.message}` : String(err);
   };
 
-  const [gridRef, setGridRef] = createSignal<HTMLDivElement | undefined>();
-  // F-699 verification: the `@forge/design` Tab primitive forwards the
-  // caller-supplied `class` onto the rendered <button>, so each card carries
-  // `forge-tab forge-tab--radio … provider-card` and the `.provider-card`
-  // selector below resolves cleanly. No wrapper class needed.
-  useRovingTabindex(gridRef, '.provider-card');
+  const [listRef, setListRef] = createSignal<HTMLDivElement | undefined>();
+  useRovingTabindex(listRef, '.providers__row');
 
   return (
     <section class="providers" aria-label="AI providers">
       <header class="providers__header">
-        <span class="providers__label">PROVIDERS</span>
+        <span class="providers__label">Providers</span>
+        <A class="providers__manage" href="/providers">
+          Manage
+        </A>
       </header>
 
       <Show when={snapshot.loading}>
         <Skeleton
-          variant="card"
+          variant="block"
           count={4}
           label="Loading providers"
           class="providers__skeleton"
@@ -121,16 +126,16 @@ export const ProvidersSection: Component = () => {
               </p>
             }
           >
-            <Tabs
-              variant="radio"
-              class="providers__grid"
+            <div
+              role="radiogroup"
               aria-label="Active provider"
               aria-busy={isSubmitting()}
-              ref={setGridRef as never}
+              class="providers__list"
+              ref={setListRef as never}
             >
               <For each={data().entries}>
                 {(entry) => (
-                  <ProviderCard
+                  <ProviderRow
                     entry={entry}
                     active={data().active === entry.id}
                     pending={pendingId() === entry.id}
@@ -139,7 +144,7 @@ export const ProvidersSection: Component = () => {
                   />
                 )}
               </For>
-            </Tabs>
+            </div>
           </Show>
         )}
       </Show>
@@ -147,7 +152,7 @@ export const ProvidersSection: Component = () => {
   );
 };
 
-interface ProviderCardProps {
+interface ProviderRowProps {
   entry: ProviderEntry;
   active: boolean;
   pending: boolean;
@@ -155,67 +160,85 @@ interface ProviderCardProps {
   onSelect: (id: string) => void;
 }
 
-const ProviderCard: Component<ProviderCardProps> = (props) => {
-  const credentialNeeded = () => props.entry.credential_required && !props.entry.has_credential;
+/**
+ * Stable mapping from runtime provider id onto one of the four
+ * `--color-provider-*` design tokens. Matches the four-color discipline
+ * enforced in `docs/design/ai-patterns.md` and reused by CatalogPane.
+ */
+type ProviderBrand = 'anthropic' | 'openai' | 'local' | 'custom' | 'unknown';
+
+function providerBrand(id: string): ProviderBrand {
+  if (id === 'anthropic') return 'anthropic';
+  if (id === 'openai') return 'openai';
+  if (id === 'ollama' || id === 'lm-studio' || id === 'local') return 'local';
+  if (id === 'mistral' || id === 'custom_openai' || id.startsWith('custom_openai:')) return 'custom';
+  return 'unknown';
+}
+
+type PillVariant = Extract<StatusPillVariant, 'ready' | 'auth'>;
+
+function pillVariant(entry: ProviderEntry): PillVariant {
+  if (entry.credential_required && !entry.has_credential) return 'auth';
+  if (!entry.model_available) return 'auth';
+  return 'ready';
+}
+
+function subtext(entry: ProviderEntry, variant: PillVariant): string {
+  if (variant === 'auth') {
+    if (entry.credential_required && !entry.has_credential) return 'credentials missing';
+    return 'unconfigured';
+  }
+  return entry.model ?? 'ready';
+}
+
+const ProviderRow: Component<ProviderRowProps> = (props) => {
+  const variant = () => pillVariant(props.entry);
+  const brand = () => providerBrand(props.entry.id);
+  const handleClick = () => {
+    if (props.disabled && !props.pending) return;
+    props.onSelect(props.entry.id);
+  };
+  const handleKeyDown = (e: KeyboardEvent) => {
+    if (e.key === ' ' || e.key === 'Enter') {
+      e.preventDefault();
+      handleClick();
+    }
+  };
   const ariaLabel = () => {
     const parts = [`Select ${props.entry.display_name}`];
-    if (credentialNeeded()) parts.push('CREDENTIAL MISSING');
-    if (!props.entry.model_available) parts.push('UNCONFIGURED');
+    parts.push(variant() === 'ready' ? 'ready' : 'authentication required');
     if (props.pending) parts.push('SWITCHING');
     return parts.join(', ');
   };
 
   return (
-    <Tab
-      variant="radio"
-      selected={props.active}
-      class="provider-card"
-      classList={{ 'provider-card--pending': props.pending }}
-      aria-label={ariaLabel()}
+    <div
+      role="radio"
+      tabindex={-1}
+      aria-checked={props.active}
       aria-busy={props.pending}
-      disabled={props.disabled && !props.pending}
-      onClick={() => props.onSelect(props.entry.id)}
+      aria-disabled={props.disabled && !props.pending}
+      aria-label={ariaLabel()}
+      class="providers__row"
+      classList={{
+        'providers__row--active': props.active,
+        'providers__row--pending': props.pending,
+      }}
+      data-brand={brand()}
+      onClick={handleClick}
+      onKeyDown={handleKeyDown}
     >
-      <div class="provider-card__body">
-        <div class="provider-card__row">
-          <span class="provider-card__name">{props.entry.display_name}</span>
-          <Show when={props.active}>
-            <span class="provider-card__active-pip" aria-hidden="true" />
-          </Show>
-        </div>
-        <div class="provider-card__row provider-card__row--meta">
-          <ModelHint entry={props.entry} />
-          <CredentialHint entry={props.entry} />
-        </div>
+      <span class="providers__dot" aria-hidden="true" />
+      <div class="providers__identity">
+        <span class="providers__name">{props.entry.display_name}</span>
+        <span class="providers__sub">{subtext(props.entry, variant())}</span>
       </div>
-    </Tab>
+      <StatusPill class="providers__pill" data-variant={variant()} variant={variant()}>
+        {variant()}
+      </StatusPill>
+      <Show when={props.active}>
+        <span class="providers__active-pip" aria-hidden="true" />
+      </Show>
+    </div>
   );
 };
-
-const ModelHint: Component<{ entry: ProviderEntry }> = (props) => (
-  <Show
-    when={props.entry.model_available}
-    fallback={<span class="provider-card__hint provider-card__hint--missing">unconfigured</span>}
-  >
-    <span class="provider-card__hint">
-      {props.entry.model ?? 'ready'}
-    </span>
-  </Show>
-);
-
-const CredentialHint: Component<{ entry: ProviderEntry }> = (props) => (
-  <Show when={props.entry.credential_required}>
-    <Show
-      when={props.entry.has_credential}
-      fallback={
-        <span class="provider-card__cred provider-card__cred--missing" aria-label="credential missing">
-          ⚠ key
-        </span>
-      }
-    >
-      <span class="provider-card__cred provider-card__cred--present" aria-label="credential present">
-        ✓ key
-      </span>
-    </Show>
-  </Show>
-);
