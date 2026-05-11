@@ -1,4 +1,6 @@
+export type { AddMcpServerInput } from './generated/AddMcpServerInput';
 export type { AddProviderInput } from './generated/AddProviderInput';
+export type { McpServerConfig } from './generated/McpServerConfig';
 export type { AgentId } from './generated/AgentId';
 export type { AgentInstanceId } from './generated/AgentInstanceId';
 export type { AppSettings } from './generated/AppSettings';

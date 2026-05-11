@@ -50,6 +50,11 @@ pub mod containers_ipc;
 // compiled so non-webview tests link without Tauri; the
 // `#[tauri::command]` wrappers are gated behind `webview`.
 pub mod memory_ipc;
+// F-734: Catalog `+ Add MCP server` command (`add_mcp_server`). Pure
+// validators (`validate_input`, `merge_entry`, `resolve_mcp_json_path`)
+// are always compiled so non-webview unit tests link without Tauri; the
+// `#[tauri::command]` wrapper is gated behind `webview`.
+pub mod mcp_ipc;
 // F-586: provider-selection commands (`dashboard_list_providers`,
 // `get_active_provider`, `set_active_provider`). Pure helpers
 // (`build_provider_list`, `is_known_provider_id`, `validate_provider_id`)

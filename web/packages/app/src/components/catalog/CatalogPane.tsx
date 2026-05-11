@@ -17,7 +17,7 @@ import {
   Show,
   type Component,
 } from 'solid-js';
-import { Skeleton, Tab, Tabs } from '@forge/design';
+import { Button, Skeleton, Tab, Tabs } from '@forge/design';
 import type { RosterEntry, ScopedRosterEntry } from '@forge/ipc';
 import {
   listAgents,
@@ -25,7 +25,9 @@ import {
   listSkills,
   SESSION_WIDE_SCOPE,
 } from '../../ipc/catalog';
-import { settings, setSetting } from '../../stores/settings';
+import { settings } from '../../stores/settings';
+import { AddMcpServerForm } from '../AddMcpServerForm';
+import { CatalogEnabledToggle } from './CatalogEnabledToggle';
 import './CatalogPane.css';
 
 export type CatalogKind = 'skills' | 'mcp' | 'agents';
@@ -77,7 +79,24 @@ interface CatalogRow {
   scope: ScopedRosterEntry['scope'];
   /** F-694: design-token color id when the row itself is a Provider entry. */
   providerColor: ProviderColorId | null;
+  /**
+   * F-736: file-tier the entry was loaded from (`workspace`/.<kind>` vs
+   * `~/.<kind>`). The `Workspace` / `User` filter chips key off this.
+   * Sourced from an optional `tier` field on the scope payload when the
+   * backend supplies it; `undefined` otherwise.
+   */
+  tier: CatalogTier | undefined;
+  /**
+   * F-736: transport variant for MCP rows (`stdio` | `http`). Sourced from
+   * an optional `transport` field on the `Mcp` roster entry when the backend
+   * supplies it; `undefined` otherwise (including for non-MCP rows). The
+   * MCP-only `stdio` / `http` filter chips key off this.
+   */
+  transport: McpTransport | undefined;
 }
+
+type CatalogTier = 'workspace' | 'user';
+type McpTransport = 'stdio' | 'http';
 
 /**
  * F-694: maps a runtime provider id onto one of the four `--color-provider-*`
@@ -128,7 +147,34 @@ function toRow(kind: CatalogKind, scoped: ScopedRosterEntry): CatalogRow {
     scope: scoped.scope,
     providerColor:
       scoped.entry.type === 'Provider' ? providerColorId(scoped.entry.id) : null,
+    tier: readTier(scoped.scope),
+    transport: readTransport(scoped.entry),
   };
+}
+
+/**
+ * F-736: extract the file-tier from a roster scope. The generated `RosterScope`
+ * union doesn't carry a `tier` field today; the catalog list_* commands will
+ * grow one as the loader differentiates workspace vs user roots. Read it via
+ * an unchecked property access so the filter predicates work the moment the
+ * backend stamps it in, without round-tripping through the IPC type-gen.
+ */
+function readTier(scope: ScopedRosterEntry['scope']): CatalogTier | undefined {
+  const value = (scope as { tier?: unknown }).tier;
+  return value === 'workspace' || value === 'user' ? value : undefined;
+}
+
+/**
+ * F-736: extract the transport (`stdio`/`http`) from an MCP roster entry.
+ * The generated `RosterEntry::Mcp` variant carries only `{ type, id }`
+ * today; the loader will surface the transport tag alongside it. Until then,
+ * predicates that key off `transport` return false, which mirrors the spec
+ * intent (the chip "filters to rows whose transport is X").
+ */
+function readTransport(entry: ScopedRosterEntry['entry']): McpTransport | undefined {
+  if (entry.type !== 'Mcp') return undefined;
+  const value = (entry as { transport?: unknown }).transport;
+  return value === 'stdio' || value === 'http' ? value : undefined;
 }
 
 function scopeLabel(scope: ScopedRosterEntry['scope']): string {
@@ -195,10 +241,75 @@ function isEnabled(kind: CatalogKind, id: string): boolean {
   return typeof value === 'boolean' ? value : true;
 }
 
+// F-736: filter chip strip per `docs/ui-specs/catalog.md §Search and filters`.
+// Single-select (`role="radiogroup"`); selecting one clears the others;
+// `stdio`/`http` chips render only on the MCP tab; switching off MCP resets
+// the selection to `'all'` if either was active.
+type FilterChip = 'all' | 'enabled' | 'workspace' | 'user' | 'stdio' | 'http';
+
+interface ChipDef {
+  id: FilterChip;
+  label: string;
+}
+
+const BASE_CHIPS: ChipDef[] = [
+  { id: 'all', label: 'All' },
+  { id: 'enabled', label: 'Enabled' },
+  { id: 'workspace', label: 'Workspace' },
+  { id: 'user', label: 'User' },
+];
+
+const MCP_TRANSPORT_CHIPS: ChipDef[] = [
+  { id: 'stdio', label: 'stdio' },
+  { id: 'http', label: 'http' },
+];
+
+function chipsForKind(kind: CatalogKind): ChipDef[] {
+  return kind === 'mcp' ? [...BASE_CHIPS, ...MCP_TRANSPORT_CHIPS] : BASE_CHIPS;
+}
+
+function chipLabel(chip: FilterChip): string {
+  const all = [...BASE_CHIPS, ...MCP_TRANSPORT_CHIPS];
+  return all.find((c) => c.id === chip)?.label ?? chip;
+}
+
+function chipPredicate(chip: FilterChip): (row: CatalogRow) => boolean {
+  switch (chip) {
+    case 'all':
+      return () => true;
+    case 'enabled':
+      return (row) => isEnabled(row.kind, row.id);
+    case 'workspace':
+      return (row) => row.tier === 'workspace';
+    case 'user':
+      return (row) => row.tier === 'user';
+    case 'stdio':
+      return (row) => row.transport === 'stdio';
+    case 'http':
+      return (row) => row.transport === 'http';
+  }
+}
+
 export const CatalogPane: Component<CatalogPaneProps> = (props) => {
-  const [activeKind, setActiveKind] = createSignal<CatalogKind>('skills');
+  const [activeKind, setActiveKindSignal] = createSignal<CatalogKind>('skills');
   const [search, setSearch] = createSignal('');
   const [toggleError, setToggleError] = createSignal<string | null>(null);
+  // F-736: filter chip selection. Route-local; defaults to `'all'`. Switching
+  // tabs persists the selection *unless* the previously-selected chip is no
+  // longer valid for the new tab (i.e. `stdio`/`http` leaving the MCP tab),
+  // in which case the spec calls for a reset back to `'all'`.
+  const [activeChip, setActiveChip] = createSignal<FilterChip>('all');
+  const setActiveKind = (kind: CatalogKind): void => {
+    setActiveKindSignal(kind);
+    if (kind !== 'mcp' && (activeChip() === 'stdio' || activeChip() === 'http')) {
+      setActiveChip('all');
+    }
+  };
+  // F-734: Catalog `+ Add MCP server` modal. Mounted at the pane level so
+  // the dialog can refetch the MCP resource on success without re-rendering
+  // the tab panel. The button itself lives in the MCP tab header block
+  // (see the `mcp-tab-header` region below).
+  const [addMcpOpen, setAddMcpOpen] = createSignal(false);
 
   // F-592: each kind owns its own resource so a slow / failing skill loader
   // does not block MCP + Agents tabs from rendering. The tab's loading,
@@ -220,8 +331,10 @@ export const CatalogPane: Component<CatalogPaneProps> = (props) => {
 
   const filterRows = (rows: CatalogRow[]): CatalogRow[] => {
     const q = search().trim().toLowerCase();
-    if (q.length === 0) return rows;
-    return rows.filter((r) => r.name.toLowerCase().includes(q));
+    const chip = chipPredicate(activeChip());
+    const matchesSearch = (r: CatalogRow): boolean =>
+      q.length === 0 || r.name.toLowerCase().includes(q);
+    return rows.filter((r) => matchesSearch(r) && chip(r));
   };
 
   const rowsForKind = (kind: CatalogKind): CatalogRow[] => {
@@ -242,13 +355,15 @@ export const CatalogPane: Component<CatalogPaneProps> = (props) => {
   const mcpCount = createMemo(() => filterRows(rowsForKind('mcp')).length);
   const agentsCount = createMemo(() => filterRows(rowsForKind('agents')).length);
 
-  const handleToggle = (kind: CatalogKind, id: string, next: boolean) => {
+  // F-735: toggle component owns the IPC roundtrip + optimistic rollback;
+  // the pane only sinks the verbatim error into the section-level alert
+  // line so the spec's "section-level error" surface stays the canonical
+  // home for `set_setting` failures.
+  const handleToggleError = (detail: string) => {
+    setToggleError(`set_setting failed: ${detail}`);
+  };
+  const handleToggleSuccess = () => {
     setToggleError(null);
-    const key = `catalog.enabled.${kind}.${id}`;
-    setSetting(key, next, 'user', props.workspaceRoot).catch((err: unknown) => {
-      const detail = err instanceof Error ? err.message : String(err);
-      setToggleError(`set_setting failed: ${detail}`);
-    });
   };
 
   const handleSearchInput = (e: InputEvent) => {
@@ -302,6 +417,18 @@ export const CatalogPane: Component<CatalogPaneProps> = (props) => {
         )}
       </Show>
 
+      {/* F-734: + Add MCP server modal. Default scope = `workspace` since the
+          catalog only mounts with a registered workspace root. */}
+      <AddMcpServerForm
+        open={addMcpOpen()}
+        scope="workspace"
+        workspaceRoot={props.workspaceRoot}
+        onClose={() => setAddMcpOpen(false)}
+        onAdded={() => {
+          mcpRes[1].refetch();
+        }}
+      />
+
       <For each={KINDS}>
         {(kind) => {
           const [resource] = resourceFor(kind.id);
@@ -323,6 +450,51 @@ export const CatalogPane: Component<CatalogPaneProps> = (props) => {
                 id={`catalog-panel-${kind.id}`}
                 aria-labelledby={`catalog-tab-${kind.id}`}
               >
+                {/*
+                  F-734: MCP-tab-only header block. Hosts the `+ Add MCP
+                  server` button. F-736 will append filter chips into the
+                  same region; structure as a flex row so chips can sit
+                  alongside the button without further surgery.
+                */}
+                <Show when={kind.id === 'mcp'}>
+                  <div class="catalog__mcp-tab-header" data-testid="mcp-tab-header">
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      type="button"
+                      data-testid="catalog-add-mcp"
+                      onClick={() => setAddMcpOpen(true)}
+                    >
+                      + Add MCP server
+                    </Button>
+                  </div>
+                </Show>
+
+                {/*
+                  F-736: filter chips. Single-select; `stdio`/`http` only on
+                  the MCP tab. Composes with the header search input through
+                  `filterRows`.
+                */}
+                <Tabs
+                  variant="radio"
+                  class="catalog__chips"
+                  aria-label="Catalog filters"
+                  data-testid={`catalog-chips-${kind.id}`}
+                >
+                  <For each={chipsForKind(kind.id)}>
+                    {(chip) => (
+                      <Tab
+                        variant="radio"
+                        selected={activeChip() === chip.id}
+                        data-testid={`catalog-chip-${kind.id}-${chip.id}`}
+                        onClick={() => setActiveChip(chip.id)}
+                      >
+                        {chip.label}
+                      </Tab>
+                    )}
+                  </For>
+                </Tabs>
+
                 <Show when={resource.loading}>
                   <Skeleton
                     variant="block"
@@ -366,13 +538,15 @@ export const CatalogPane: Component<CatalogPaneProps> = (props) => {
                         <div
                           class="catalog__empty"
                           data-empty-kind={kind.id}
-                          data-empty-reason="search"
+                          data-empty-reason={search().trim() ? 'search' : 'chip'}
                           role="status"
                           aria-live="polite"
                         >
                           <p class="catalog__empty-title">No matches</p>
                           <p class="catalog__empty-hint">
-                            Nothing in {kind.label} matches “{search()}”.
+                            {search().trim()
+                              ? `Nothing in ${kind.label} matches “${search()}”.`
+                              : `No ${kind.label} match the “${chipLabel(activeChip())}” filter.`}
                           </p>
                         </div>
                       }
@@ -391,7 +565,9 @@ export const CatalogPane: Component<CatalogPaneProps> = (props) => {
                                     <CatalogRowView
                                       row={row}
                                       enabled={isEnabled(row.kind, row.id)}
-                                      onToggle={(next) => handleToggle(row.kind, row.id, next)}
+                                      workspaceRoot={props.workspaceRoot}
+                                      onError={handleToggleError}
+                                      onToggled={handleToggleSuccess}
                                     />
                                   )}
                                 </For>
@@ -435,11 +611,12 @@ const CatalogTab: Component<CatalogTabProps> = (props) => (
 interface CatalogRowViewProps {
   row: CatalogRow;
   enabled: boolean;
-  onToggle: (next: boolean) => void;
+  workspaceRoot: string;
+  onError: (detail: string) => void;
+  onToggled: (enabled: boolean) => void;
 }
 
 const CatalogRowView: Component<CatalogRowViewProps> = (props) => {
-  const id = `catalog-toggle-${props.row.kind}-${props.row.id}`;
   return (
     <li
       class="catalog-row"
@@ -453,19 +630,16 @@ const CatalogRowView: Component<CatalogRowViewProps> = (props) => {
           <span class="catalog-row__meta">{props.row.meta}</span>
         </Show>
       </div>
-      <label class="catalog-row__toggle" for={id}>
-        <span class="catalog-row__toggle-label">
-          {props.enabled ? 'enabled' : 'disabled'}
-        </span>
-        <input
-          id={id}
-          type="checkbox"
-          role="switch"
-          aria-label={`${props.enabled ? 'Disable' : 'Enable'} ${props.row.name}`}
-          checked={props.enabled}
-          onChange={(e) => props.onToggle(e.currentTarget.checked)}
-        />
-      </label>
+      <CatalogEnabledToggle
+        kind={props.row.kind}
+        id={props.row.id}
+        name={props.row.name}
+        enabled={props.enabled}
+        level="user"
+        workspaceRoot={props.workspaceRoot}
+        onError={props.onError}
+        onToggled={props.onToggled}
+      />
     </li>
   );
 };

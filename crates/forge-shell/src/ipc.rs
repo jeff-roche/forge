@@ -736,6 +736,11 @@ pub fn build_invoke_handler<R: Runtime>() -> Box<dyn Fn(tauri::ipc::Invoke<R>) -
         // (Inspector "Export transcript" button) or the matching
         // `session-{id}` window; other session windows are rejected.
         crate::transcript_ipc::export_transcript,
+        // F-734: catalog `+ Add MCP server` modal. Writes a single entry
+        // into the workspace or user-scope `.mcp.json` document. The
+        // `require_window_label` gate inside the command rejects every
+        // window label other than `dashboard`.
+        crate::mcp_ipc::add_mcp_server,
     ])
 }
 

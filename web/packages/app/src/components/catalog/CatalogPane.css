@@ -77,6 +77,26 @@
   gap: var(--sp-4);
 }
 
+/* F-734: MCP tab header row. Hosts the `+ Add MCP server` button; F-736
+ * appends filter chips into the same flex row. Right-aligned so the
+ * button sits at the panel edge per the spec mock. */
+.catalog__mcp-tab-header {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+}
+
+/* F-736: filter chip strip. Single-select radiogroup wrapped over the
+ * `@forge/design` Tab `variant="radio"` primitive. Sits below the MCP tab
+ * header (or below the tab strip on Skills/Agents) and above the panel
+ * content; the chip width grows on the MCP tab to accommodate the
+ * `stdio` / `http` transport chips. */
+.catalog__chips {
+  flex-wrap: wrap;
+  row-gap: var(--sp-1);
+}
+
 /* F-684: catalog tab loading state — list-shaped skeleton matching the
  * `.catalog__rows` layout the resource resolves into. */
 .catalog__skeleton.forge-skeleton-group {
@@ -272,21 +292,4 @@
   font-family: var(--font-mono);
   font-size: var(--type-mono-sm);
   color: var(--color-text-secondary);
-}
-
-.catalog-row__toggle {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  cursor: pointer;
-}
-
-.catalog-row__toggle-label {
-  font-family: var(--font-mono);
-  font-size: var(--type-mono-xxs);
-  letter-spacing: 0.2em;
-  color: var(--color-text-tertiary);
-  text-transform: uppercase;
-  min-width: var(--sp-12);
-  text-align: right;
 }

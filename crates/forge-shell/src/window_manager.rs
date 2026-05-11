@@ -182,6 +182,9 @@ pub fn run() -> Result<()> {
             // F-727: dashboard `Attach to session` picker. Returns the
             // attachable (detached) subset of `session_list`.
             crate::session_spawn_ipc::list_sessions,
+            // F-734: catalog `+ Add MCP server` modal. Writes a single
+            // entry into the workspace or user-scope `.mcp.json` document.
+            crate::mcp_ipc::add_mcp_server,
         ])
         .setup(|app| {
             crate::ipc::manage_bridge(&app.handle().clone());
