@@ -27,11 +27,22 @@ import type { BgAgentSummary, SessionId } from '@forge/ipc';
 import { StatusBar } from './StatusBar';
 import type {
   BgAgentsSubscribe,
+  ConnectionState,
   NotificationAdapter,
+  ProviderChangedSubscribe,
 } from './StatusBar';
 import type { SessionEventPayload } from '../ipc/session';
 import { setActiveSessionId } from '../stores/session';
 import { resetSettingsStore, seedSettings } from '../stores/settings';
+import { setInvokeForTesting } from '../lib/tauri';
+
+// F-717: StatusBar now subscribes to the `provider:changed` Tauri event on
+// mount. Stub the channel module-wide so jsdom tests never reach the
+// missing Tauri bridge — every code path can still inject a
+// `subscribeProviderChanged` spy when it wants to drive provider events.
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: vi.fn(async () => () => undefined),
+}));
 
 const SID = 'test-session-1' as SessionId;
 
@@ -132,10 +143,15 @@ beforeEach(() => {
   // directly before each mount and clear it in afterEach.
   setActiveSessionId(SID);
   resetSettingsStore();
+  // F-717: hermetic invoke stub so the default `sessionList` /
+  // `getActiveProvider` IPCs don't reach the missing Tauri bridge during
+  // bg-agent tests that don't care about the new left-slot feeds.
+  setInvokeForTesting((async () => undefined) as never);
 });
 
 afterEach(() => {
   setActiveSessionId(null);
+  setInvokeForTesting(null);
   cleanup();
 });
 
@@ -650,5 +666,258 @@ describe('StatusBar — AgentMonitor entry points (F-153)', () => {
     await waitFor(() => {
       expect(history.get()).toBe(`/agents/${SID}?instance=prod-row-2`);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F-717: left + right slot rendering per `docs/ui-specs/app-shell.md
+// §Status bar`. Every segment must paint a literal `unknown` token while
+// its feed is loading or unavailable — never collapsed, never em-dash,
+// never hidden. Ready states render the actual value.
+// ---------------------------------------------------------------------------
+
+/**
+ * Defer the resolution of a Promise so a test can assert the loading
+ * (pre-resolve) and ready (post-resolve) frames distinctly. Mirrors the
+ * `createMountedSubscription` test's resolve-pattern.
+ */
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (err: unknown) => void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (err: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+function bgBusStub(): { subscribe: BgAgentsSubscribe } {
+  return {
+    subscribe: async () => () => undefined,
+  };
+}
+
+describe('StatusBar — left slot (F-717)', () => {
+  it('renders the static `forge` brand segment', async () => {
+    const { findByTestId } = render(() => (
+      <StatusBar
+        listBackgroundAgents={vi.fn().mockResolvedValue([])}
+        subscribe={bgBusStub().subscribe}
+        sessionList={vi.fn().mockResolvedValue([])}
+        getActiveProvider={vi.fn().mockResolvedValue(null)}
+      />
+    ));
+    const left = await findByTestId('status-bar-left');
+    expect(left).toHaveTextContent('forge');
+  });
+
+  it('branch segment renders the literal `unknown` token (F-741 stub)', async () => {
+    const { findByTestId } = render(() => (
+      <StatusBar
+        listBackgroundAgents={vi.fn().mockResolvedValue([])}
+        subscribe={bgBusStub().subscribe}
+        sessionList={vi.fn().mockResolvedValue([])}
+        getActiveProvider={vi.fn().mockResolvedValue(null)}
+      />
+    ));
+    expect(await findByTestId('status-bar-branch')).toHaveTextContent('unknown');
+  });
+
+  it('sessions segment: loading → `unknown`, ready → `<N> sessions`', async () => {
+    const d = deferred<{ id: string }[]>();
+    const { findByTestId, getByTestId } = render(() => (
+      <StatusBar
+        listBackgroundAgents={vi.fn().mockResolvedValue([])}
+        subscribe={bgBusStub().subscribe}
+        sessionList={(() => d.promise) as never}
+        getActiveProvider={vi.fn().mockResolvedValue(null)}
+      />
+    ));
+    // Loading frame — the session_list promise is still pending.
+    expect(await findByTestId('status-bar-sessions')).toHaveTextContent(
+      'unknown',
+    );
+
+    d.resolve([{ id: 'a' }, { id: 'b' }, { id: 'c' }]);
+    await waitFor(() => {
+      expect(getByTestId('status-bar-sessions')).toHaveTextContent(
+        '3 sessions',
+      );
+    });
+  });
+
+  it('sessions segment renders `unknown` when session_list rejects', async () => {
+    const sessionList = vi.fn().mockRejectedValue(new Error('boom'));
+    const { findByTestId } = render(() => (
+      <StatusBar
+        listBackgroundAgents={vi.fn().mockResolvedValue([])}
+        subscribe={bgBusStub().subscribe}
+        sessionList={sessionList as never}
+        getActiveProvider={vi.fn().mockResolvedValue(null)}
+      />
+    ));
+    await waitFor(() => {
+      expect(sessionList).toHaveBeenCalled();
+    });
+    expect(await findByTestId('status-bar-sessions')).toHaveTextContent(
+      'unknown',
+    );
+  });
+
+  it('provider segment: loading → `unknown`, ready → provider id', async () => {
+    const d = deferred<string | null>();
+    const { findByTestId, getByTestId } = render(() => (
+      <StatusBar
+        listBackgroundAgents={vi.fn().mockResolvedValue([])}
+        subscribe={bgBusStub().subscribe}
+        sessionList={vi.fn().mockResolvedValue([])}
+        getActiveProvider={(() => d.promise) as never}
+      />
+    ));
+    expect(await findByTestId('status-bar-provider')).toHaveTextContent(
+      'unknown',
+    );
+    d.resolve('anthropic');
+    await waitFor(() => {
+      expect(getByTestId('status-bar-provider')).toHaveTextContent('anthropic');
+    });
+  });
+
+  it('provider segment renders `unknown` when get_active_provider returns null', async () => {
+    const getProvider = vi.fn().mockResolvedValue(null);
+    const { findByTestId } = render(() => (
+      <StatusBar
+        listBackgroundAgents={vi.fn().mockResolvedValue([])}
+        subscribe={bgBusStub().subscribe}
+        sessionList={vi.fn().mockResolvedValue([])}
+        getActiveProvider={getProvider}
+      />
+    ));
+    await waitFor(() => {
+      expect(getProvider).toHaveBeenCalled();
+    });
+    expect(await findByTestId('status-bar-provider')).toHaveTextContent(
+      'unknown',
+    );
+  });
+
+  it('provider segment updates when provider:changed fires', async () => {
+    let onChange: ((id: string) => void) | null = null;
+    const subscribeProviderChanged: ProviderChangedSubscribe = async (h) => {
+      onChange = h;
+      return () => undefined;
+    };
+    const { findByTestId, getByTestId } = render(() => (
+      <StatusBar
+        listBackgroundAgents={vi.fn().mockResolvedValue([])}
+        subscribe={bgBusStub().subscribe}
+        sessionList={vi.fn().mockResolvedValue([])}
+        getActiveProvider={vi.fn().mockResolvedValue('ollama')}
+        subscribeProviderChanged={subscribeProviderChanged}
+      />
+    ));
+    await waitFor(() => {
+      expect(getByTestId('status-bar-provider')).toHaveTextContent('ollama');
+    });
+    await waitFor(() => {
+      expect(onChange).not.toBeNull();
+    });
+    onChange!('anthropic');
+    await waitFor(() => {
+      expect(getByTestId('status-bar-provider')).toHaveTextContent('anthropic');
+    });
+    // Touch findByTestId to keep the destructure used.
+    expect(await findByTestId('status-bar-provider')).toBeTruthy();
+  });
+
+  it('state segment: no prop → `unknown`; explicit value → that value', async () => {
+    const unknown = render(() => (
+      <StatusBar
+        listBackgroundAgents={vi.fn().mockResolvedValue([])}
+        subscribe={bgBusStub().subscribe}
+        sessionList={vi.fn().mockResolvedValue([])}
+        getActiveProvider={vi.fn().mockResolvedValue(null)}
+      />
+    ));
+    expect(await unknown.findByTestId('status-bar-state')).toHaveTextContent(
+      'unknown',
+    );
+    unknown.unmount();
+
+    const ready = render(() => (
+      <StatusBar
+        listBackgroundAgents={vi.fn().mockResolvedValue([])}
+        subscribe={bgBusStub().subscribe}
+        sessionList={vi.fn().mockResolvedValue([])}
+        getActiveProvider={vi.fn().mockResolvedValue(null)}
+        connectionState={'streaming' as ConnectionState}
+      />
+    ));
+    expect(await ready.findByTestId('status-bar-state')).toHaveTextContent(
+      'streaming',
+    );
+  });
+
+  it('renders `·` separators between left-slot segments', async () => {
+    const { findByTestId } = render(() => (
+      <StatusBar
+        listBackgroundAgents={vi.fn().mockResolvedValue([])}
+        subscribe={bgBusStub().subscribe}
+        sessionList={vi.fn().mockResolvedValue([])}
+        getActiveProvider={vi.fn().mockResolvedValue(null)}
+      />
+    ));
+    const left = await findByTestId('status-bar-left');
+    // Four separators between five segments (forge · branch · sessions ·
+    // provider · state).
+    const dots = left.querySelectorAll('.status-bar__separator');
+    expect(dots.length).toBe(4);
+    dots.forEach((d) => expect(d.textContent).toBe('·'));
+  });
+});
+
+describe('StatusBar — right slot (F-717)', () => {
+  it('usage badge stubbed to `unknown` (F-741)', async () => {
+    const { findByTestId } = render(() => (
+      <StatusBar
+        listBackgroundAgents={vi.fn().mockResolvedValue([])}
+        subscribe={bgBusStub().subscribe}
+        sessionList={vi.fn().mockResolvedValue([])}
+        getActiveProvider={vi.fn().mockResolvedValue(null)}
+      />
+    ));
+    expect(await findByTestId('status-bar-usage')).toHaveTextContent('unknown');
+  });
+
+  it('runtime badge stubbed to `unknown` (F-741)', async () => {
+    const { findByTestId } = render(() => (
+      <StatusBar
+        listBackgroundAgents={vi.fn().mockResolvedValue([])}
+        subscribe={bgBusStub().subscribe}
+        sessionList={vi.fn().mockResolvedValue([])}
+        getActiveProvider={vi.fn().mockResolvedValue(null)}
+      />
+    ));
+    expect(await findByTestId('status-bar-runtime')).toHaveTextContent(
+      'unknown',
+    );
+  });
+
+  it('keeps the bg-agents badge as the last right-slot element', async () => {
+    const { findByTestId } = render(() => (
+      <StatusBar
+        listBackgroundAgents={vi.fn().mockResolvedValue([running('a1')])}
+        subscribe={bgBusStub().subscribe}
+        sessionList={vi.fn().mockResolvedValue([])}
+        getActiveProvider={vi.fn().mockResolvedValue(null)}
+      />
+    ));
+    const right = await findByTestId('status-bar-right');
+    const badge = await findByTestId('bg-agents-badge');
+    expect(right.contains(badge)).toBe(true);
   });
 });

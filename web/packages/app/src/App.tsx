@@ -1,28 +1,11 @@
-import type { Component, JSX } from 'solid-js';
+import type { Component } from 'solid-js';
 import { Router, Route } from '@solidjs/router';
 import { Dashboard } from './routes/Dashboard';
 import { SessionWindow } from './routes/Session/SessionWindow';
 import { AgentMonitor } from './routes/AgentMonitor';
 import { Catalog } from './routes/Catalog';
 import { Usage } from './routes/Usage';
-import { CommandPalette, registerBuiltins } from './commands';
-
-/**
- * Shell wrapper that owns the app-level chrome (command palette today;
- * future toast host, global error boundary, etc.). Lives inside the Router
- * so its children can call Router hooks (`useNavigate` in registerBuiltins).
- */
-const AppShell: Component<{ children?: JSX.Element }> = (props) => {
-  // F-157 / F-153 loop close: register built-in palette entries once the
-  // router context is available.
-  registerBuiltins();
-  return (
-    <>
-      <CommandPalette />
-      {props.children}
-    </>
-  );
-};
+import { AppShell } from './shell/AppShell';
 
 export const App: Component = () => {
   return (

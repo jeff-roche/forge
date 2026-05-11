@@ -28,6 +28,7 @@ import {
 import { useNavigate } from '@solidjs/router';
 import { Button } from '@forge/design';
 import type { BgAgentSummary } from '@forge/ipc';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import {
   isPermissionGranted as pluginIsPermissionGranted,
   requestPermission as pluginRequestPermission,
@@ -40,6 +41,10 @@ import {
   stopBackgroundAgent as defaultStopBackgroundAgent,
   type SessionEventPayload,
 } from '../ipc/session';
+import {
+  getActiveProvider as defaultGetActiveProvider,
+  sessionList as defaultSessionList,
+} from '../ipc/dashboard';
 import { activeSessionId } from '../stores/session';
 import { settings } from '../stores/settings';
 import { pushToast } from '../components/toast';
@@ -86,6 +91,44 @@ const defaultSubscribe: BgAgentsSubscribe = (handler) =>
   onSessionEvent(handler);
 
 // ---------------------------------------------------------------------------
+// F-717: route-agnostic status feeds.
+//
+// Each segment of the left/right slots is sourced from a small injectable
+// surface so jsdom tests can drive every (loading | unknown | ready)
+// transition without a real Tauri bridge.
+// ---------------------------------------------------------------------------
+
+/** Connection-state pill variant per `app-shell.md §Status bar`. */
+export type ConnectionState =
+  | 'streaming'
+  | 'awaiting approval'
+  | 'done'
+  | 'idle'
+  | 'ready'
+  | 'auth';
+
+/** Subscribe to `provider:changed` Tauri events. */
+export type ProviderChangedSubscribe = (
+  handler: (providerId: string) => void,
+) => Promise<UnlistenFn>;
+
+const defaultProviderChangedSubscribe: ProviderChangedSubscribe = async (
+  handler,
+) =>
+  listen<{ type: 'provider_changed'; provider_id?: string }>(
+    'provider:changed',
+    (event) => {
+      const providerId = event.payload?.provider_id;
+      if (typeof providerId === 'string' && providerId.length > 0) {
+        handler(providerId);
+      }
+    },
+  );
+
+/** Token rendered when a feed has not yielded data. */
+export const UNKNOWN_TOKEN = 'unknown';
+
+// ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
@@ -115,6 +158,31 @@ export interface StatusBarProps {
    * asserted without a router harness.
    */
   navigate?: StatusBarNavigate;
+  /**
+   * F-717: source of the `<N> sessions` segment in the left slot. Defaults
+   * to the typed `session_list` IPC wrapper; tests inject a controllable
+   * promise so the loading / unknown / ready transitions can be exercised
+   * without a real Tauri bridge.
+   */
+  sessionList?: typeof defaultSessionList;
+  /**
+   * F-717: initial active-provider id read. Defaults to the
+   * `get_active_provider` IPC wrapper. The `provider:changed` subscription
+   * keeps the segment fresh after the first paint.
+   */
+  getActiveProvider?: typeof defaultGetActiveProvider;
+  /**
+   * F-717: subscribe to dashboard `provider:changed` events. Defaults to
+   * the real Tauri `listen('provider:changed', ...)` channel.
+   */
+  subscribeProviderChanged?: ProviderChangedSubscribe;
+  /**
+   * F-717: connection state surfaced as the rightmost left-slot segment.
+   * `null` renders the literal `unknown` token. Sourced upstream from the
+   * session telemetry store; left as a prop for now so the chrome stays
+   * decoupled from per-route stores.
+   */
+  connectionState?: ConnectionState | null;
 }
 
 interface BgEventStarted {
@@ -147,6 +215,17 @@ function classifyEvent(ev: unknown): BgEventStarted | BgEventCompleted | null {
   }
   return null;
 }
+
+/**
+ * F-717: literal `·` between left/right slot segments. `aria-hidden` so
+ * screen readers don't announce the dot as part of the slot copy — the
+ * surrounding segments carry the meaningful labels.
+ */
+const Separator: Component = () => (
+  <span class="status-bar__separator" aria-hidden="true">
+    ·
+  </span>
+);
 
 export const StatusBar: Component<StatusBarProps> = (props) => {
   const listBg = (): typeof defaultListBackgroundAgents =>
@@ -190,7 +269,13 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
   const [running, setRunning] = createSignal<BgAgentSummary[]>([]);
   const [popoverOpen, setPopoverOpen] = createSignal(false);
 
+  // F-717: left-slot feeds. `null` means the source has not yielded yet —
+  // renders the literal `unknown` token per the app-shell spec.
+  const [sessionCount, setSessionCount] = createSignal<number | null>(null);
+  const [providerId, setProviderId] = createSignal<string | null>(null);
+
   let unlisten: (() => void) | null = null;
+  let unlistenProviderChanged: UnlistenFn | null = null;
   let mounted = true;
 
   const badgeCount = () =>
@@ -277,6 +362,49 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
         console.error('list_background_agents failed', err);
       }
     })();
+
+    // F-717: seed the `<N> sessions` segment from `session_list`. A failed
+    // fetch leaves the signal at `null`, which renders `unknown` — chrome
+    // never paints `role="alert"` for status feeds.
+    const listSessions = props.sessionList ?? defaultSessionList;
+    void (async () => {
+      try {
+        const rows = await listSessions();
+        if (mounted && Array.isArray(rows)) setSessionCount(rows.length);
+      } catch (err) {
+        console.error('session_list failed', err);
+      }
+    })();
+
+    // F-717: seed the `<provider>` segment from `get_active_provider`, then
+    // hook `provider:changed` so dashboard swaps update the bar live.
+    const getProvider = props.getActiveProvider ?? defaultGetActiveProvider;
+    void (async () => {
+      try {
+        const id = await getProvider();
+        if (mounted && typeof id === 'string' && id.length > 0) {
+          setProviderId(id);
+        }
+      } catch (err) {
+        console.error('get_active_provider failed', err);
+      }
+    })();
+    const subscribeProvider =
+      props.subscribeProviderChanged ?? defaultProviderChangedSubscribe;
+    void (async () => {
+      try {
+        const off = await subscribeProvider((id) => {
+          if (mounted) setProviderId(id);
+        });
+        if (mounted) {
+          unlistenProviderChanged = off;
+        } else {
+          off();
+        }
+      } catch (err) {
+        console.error('provider:changed listen failed', err);
+      }
+    })();
   });
 
   onCleanup(() => {
@@ -284,6 +412,10 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
     if (unlisten) {
       unlisten();
       unlisten = null;
+    }
+    if (unlistenProviderChanged) {
+      unlistenProviderChanged();
+      unlistenProviderChanged = null;
     }
   });
 
@@ -343,23 +475,87 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
     }
   };
 
+  // F-717: every left/right slot field renders the literal `unknown` token
+  // when its feed has not yielded. `app-shell.md §Status bar` is explicit:
+  // unknown is NOT collapsed, NOT hidden, NOT an em-dash — the token reads
+  // `unknown` so users can audit the missing-feed at a glance.
+  const sessionCountLabel = (): string => {
+    const n = sessionCount();
+    return n === null ? UNKNOWN_TOKEN : `${n} sessions`;
+  };
+  const providerLabel = (): string => providerId() ?? UNKNOWN_TOKEN;
+  const stateLabel = (): string => props.connectionState ?? UNKNOWN_TOKEN;
+  // TODO(F-741): wire git branch IPC.
+  const branchLabel = (): string => UNKNOWN_TOKEN;
+  // TODO(F-741): wire usage feed (spend + token totals from forge-usage).
+  const usageLabel = (): string => UNKNOWN_TOKEN;
+  // TODO(F-741): wire runtime feed (container/runtime status).
+  const runtimeLabel = (): string => UNKNOWN_TOKEN;
+
   return (
     <footer class="status-bar" aria-label="Status bar" data-testid="status-bar">
-      <Show when={badgeCount() > 0}>
-        <button
-          type="button"
-          class="status-bar__bg-badge"
-          data-testid="bg-agents-badge"
-          aria-label={`${badgeCount()} background agents`}
-          aria-haspopup="menu"
-          aria-expanded={popoverOpen()}
-          onClick={togglePopover}
-          onDblClick={onBadgeDoubleClick}
+      <div class="status-bar__left" data-testid="status-bar-left">
+        <span class="status-bar__segment status-bar__brand">forge</span>
+        <Separator />
+        <span
+          class="status-bar__segment"
+          data-testid="status-bar-branch"
         >
-          <span class="status-bar__bg-badge-count">{badgeCount()}</span>
-          <span class="status-bar__bg-badge-label">{' bg'}</span>
-        </button>
-      </Show>
+          {branchLabel()}
+        </span>
+        <Separator />
+        <span
+          class="status-bar__segment"
+          data-testid="status-bar-sessions"
+        >
+          {sessionCountLabel()}
+        </span>
+        <Separator />
+        <span
+          class="status-bar__segment"
+          data-testid="status-bar-provider"
+        >
+          {providerLabel()}
+        </span>
+        <Separator />
+        <span
+          class="status-bar__segment status-bar__state"
+          data-state={stateLabel()}
+          data-testid="status-bar-state"
+        >
+          {stateLabel()}
+        </span>
+      </div>
+      <div class="status-bar__right" data-testid="status-bar-right">
+        <span
+          class="status-bar__segment"
+          data-testid="status-bar-usage"
+        >
+          {usageLabel()}
+        </span>
+        <Separator />
+        <span
+          class="status-bar__segment"
+          data-testid="status-bar-runtime"
+        >
+          {runtimeLabel()}
+        </span>
+        <Show when={badgeCount() > 0}>
+          <button
+            type="button"
+            class="status-bar__bg-badge"
+            data-testid="bg-agents-badge"
+            aria-label={`${badgeCount()} background agents`}
+            aria-haspopup="menu"
+            aria-expanded={popoverOpen()}
+            onClick={togglePopover}
+            onDblClick={onBadgeDoubleClick}
+          >
+            <span class="status-bar__bg-badge-count">{badgeCount()}</span>
+            <span class="status-bar__bg-badge-label">{' bg'}</span>
+          </button>
+        </Show>
+      </div>
       <Show when={popoverOpen() && badgeCount() > 0}>
         <div
           class="status-bar__bg-popover"

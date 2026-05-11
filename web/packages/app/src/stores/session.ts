@@ -24,6 +24,16 @@ export const [activeSessionId, setActiveSessionId] = createSignal<SessionId | nu
 export const [activeWorkspaceRoot, setActiveWorkspaceRoot] =
   createSignal<string | null>(null);
 
+/**
+ * F-716: bridge from AppShell's FilesSidebar back to the active session's
+ * layout store. SessionWindow publishes its `openFile` callback here while
+ * mounted; AppShell reads it to wire the FilesSidebar's `onOpen`. Null when
+ * no session is mounted, when called outside SessionWindow's lifecycle, or
+ * before its layout store has loaded.
+ */
+export const [activeOpenFile, setActiveOpenFile] =
+  createSignal<((path: string) => void) | null>(null);
+
 export const [sessions, setSessions] = createStore<Record<SessionId, SessionSummary>>({});
 
 /**

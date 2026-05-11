@@ -1,28 +1,15 @@
-.session-window {
-  display: flex;
-  flex-direction: column;
-  min-height: 100vh;
-  background: var(--color-bg);
-  color: var(--color-text-primary);
-  font-family: var(--font-body);
-}
-
-/* F-126: chrome row — activity bar + optional sidebar + main pane column. */
-.session-window__chrome {
-  display: flex;
-  flex: 1 1 auto;
-  min-height: 0;
-}
-
-/* F-150: the top-level grid host. Occupies the remaining chrome column
+/* F-150: the session route's grid host. Occupies the AppShell content slot
    and delegates pane rendering to GridContainer. The grid's leaves each
    render with their own `.session-window__pane` chrome. */
-.session-window__grid {
+.session-window {
   display: flex;
   flex: 1 1 auto;
   min-height: 0;
   min-width: 0;
   position: relative;
+  background: var(--color-bg);
+  color: var(--color-text-primary);
+  font-family: var(--font-body);
 }
 
 .session-window__pane {

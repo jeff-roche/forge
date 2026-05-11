@@ -33,16 +33,50 @@
 .status-bar {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
-  gap: var(--sp-2);
-  padding: 2px 8px;
-  min-height: 22px;
-  font-size: var(--type-body-sm);
-  font-weight: 500;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  padding: 0 var(--sp-3);
+  height: 22px;
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-xxs);
+  letter-spacing: 0.05em;
   background: var(--color-ember-400);
   color: var(--color-text-inverted);
   position: relative;
   flex-shrink: 0;
+}
+
+/* F-717: left + right slot tracks. Both render mono text on the ember-400
+ * brand surface — separators inherit the bar's `color: text-inverted` at
+ * 0.5 opacity so the dot reads as a divider, not as content. */
+.status-bar__left,
+.status-bar__right {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.status-bar__segment {
+  white-space: nowrap;
+}
+
+.status-bar__brand {
+  font-weight: 600;
+}
+
+.status-bar__separator {
+  opacity: 0.5;
+}
+
+/* F-717: connection-state pill variants. The brand-exception covers the
+ * bar body's ember-400 × text-inverted pair (see `StatusBar.css.test.ts`);
+ * the state segment inherits that surface and stays in white text on every
+ * variant. The variant attribute (`data-state`) only carries semantic
+ * tagging for downstream visual treatment (live dot, etc., wired by
+ * subsequent tickets); the literal label remains the dominant signal. */
+.status-bar__state {
+  text-transform: lowercase;
 }
 
 /* Pill-shaped badge that opens the running-agents popover. F-392-followup

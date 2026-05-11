@@ -176,16 +176,13 @@ describe('SessionWindow', () => {
 
   it('detaches the session:event listener on unmount', async () => {
     const { unmount } = renderAt('/session/abc123');
-    // F-138: both the SessionWindow adapter listener and the StatusBar's
-    // bg-agents listener attach to `session:event`.
-    // F-640: SessionWindow also subscribes to `provider:changed` to
-    // forward dashboard events onto the per-session UDS as
-    // `IpcMessage::SwitchProvider`.
-    // Wait for all three before asserting unlisten counts so a race on
-    // whichever resolves last doesn't under-count.
-    await waitFor(() => expect(listenMock).toHaveBeenCalledTimes(3));
+    // F-716: with the StatusBar lifted to AppShell, SessionWindow attaches
+    // two listeners: its own session:event adapter and the F-640
+    // provider:changed forwarder. Wait for both before asserting unlisten
+    // counts so a race on whichever resolves last doesn't under-count.
+    await waitFor(() => expect(listenMock).toHaveBeenCalledTimes(2));
     unmount();
-    await waitFor(() => expect(unlistenMock).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(unlistenMock).toHaveBeenCalledTimes(2));
   });
 
   // F-640: dashboard `provider:changed` events must be forwarded to the
@@ -445,10 +442,10 @@ describe('SessionWindow', () => {
   });
 
   it('routes Rust-shaped session:event payloads through the adapter into the chat pane', async () => {
-    // F-138: multiple callers attach listeners (SessionWindow's adapter and
-    // the StatusBar's bg-agents subscriber). Capture every handler so the
-    // test can dispatch to all of them and the adapter path is still
-    // exercised regardless of attachment order.
+    // F-716: SessionWindow attaches a single `session:event` adapter
+    // listener (plus a `provider:changed` listener captured separately).
+    // Capture every handler so the test can dispatch through the adapter
+    // path regardless of attachment order.
     const handlers: Array<(ev: { payload: unknown }) => void> = [];
     listenMock.mockImplementation(async (_name: string, handler: (ev: { payload: unknown }) => void) => {
       handlers.push(handler);
@@ -457,10 +454,7 @@ describe('SessionWindow', () => {
 
     const { findByTestId } = renderAt('/session/abc123');
     await findByTestId('chat-pane');
-    // Both listeners (SessionWindow adapter + StatusBar bg-agents) must be
-    // attached before we dispatch, otherwise the adapter handler can miss
-    // the event that was supposed to reach the chat pane.
-    await waitFor(() => expect(handlers.length).toBeGreaterThanOrEqual(2));
+    await waitFor(() => expect(handlers.length).toBeGreaterThanOrEqual(1));
 
     // Fire a real Rust-shaped user_message event — the adapter must rename
     // id → message_id and discriminate on kind so the store renders it.
@@ -488,60 +482,6 @@ describe('SessionWindow', () => {
   });
 
   // -----------------------------------------------------------------------
-  // F-126: activity bar + files sidebar
-  // -----------------------------------------------------------------------
-
-  it('renders the activity bar alongside the pane', async () => {
-    const { findByTestId } = renderAt('/session/abc123');
-    const bar = await findByTestId('activity-bar');
-    expect(bar).toBeInTheDocument();
-    expect(await findByTestId('activity-bar-files')).toBeInTheDocument();
-  });
-
-  it('keeps the files sidebar hidden by default', async () => {
-    const { findByTestId, queryByTestId } = renderAt('/session/abc123');
-    await findByTestId('activity-bar');
-    expect(queryByTestId('files-sidebar')).toBeNull();
-  });
-
-  it('toggles the files sidebar when Cmd+Shift+E fires after the workspace is known', async () => {
-    const { findByTestId, queryByTestId } = renderAt('/session/abc123');
-    // Wait for session_hello -> activeWorkspaceRoot populated, and the
-    // activity bar rendered.
-    await findByTestId('activity-bar');
-    await waitFor(() =>
-      expect(invokeMock).toHaveBeenCalledWith('session_hello', {
-        sessionId: 'abc123',
-      }),
-    );
-
-    window.dispatchEvent(
-      new KeyboardEvent('keydown', { key: 'E', metaKey: true, shiftKey: true }),
-    );
-    await findByTestId('files-sidebar');
-
-    window.dispatchEvent(
-      new KeyboardEvent('keydown', { key: 'E', metaKey: true, shiftKey: true }),
-    );
-    await waitFor(() => expect(queryByTestId('files-sidebar')).toBeNull());
-  });
-
-  it('toggles the files sidebar when the activity bar Files button is clicked', async () => {
-    const { findByTestId, queryByTestId } = renderAt('/session/abc123');
-    await findByTestId('activity-bar');
-    await waitFor(() =>
-      expect(invokeMock).toHaveBeenCalledWith('session_hello', {
-        sessionId: 'abc123',
-      }),
-    );
-    const files = await findByTestId('activity-bar-files');
-    files.click();
-    await findByTestId('files-sidebar');
-    files.click();
-    await waitFor(() => expect(queryByTestId('files-sidebar')).toBeNull());
-  });
-
-  // -----------------------------------------------------------------------
   // F-150: Files-sidebar Open -> layoutStore -> GridContainer -> EditorPane.
   // Unlike F-126's singleton-slot flow, opening a file splits the grid so
   // the existing chat pane remains visible side-by-side with a new editor
@@ -549,27 +489,11 @@ describe('SessionWindow', () => {
   // chat pane as the sole leaf.
   // -----------------------------------------------------------------------
 
-  it('splits the grid and mounts an EditorPane when the Files sidebar opens a file', async () => {
-    // Arrange the `tree` IPC mock to return a workspace with one file so
-    // the sidebar has something to double-click.
-    const treeNode = {
-      name: 'ws',
-      path: '/ws',
-      kind: 'Dir',
-      children: [
-        {
-          name: 'README.md',
-          path: '/ws/README.md',
-          kind: 'File',
-          children: null,
-        },
-      ],
-    };
+  it('splits the grid and mounts an EditorPane when the FilesSidebar bridge fires openFile', async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === 'session_hello') return helloAck;
       if (cmd === 'read_layouts') return defaultLayouts();
       if (cmd === 'write_layouts') return undefined;
-      if (cmd === 'tree') return treeNode;
       if (cmd === 'read_file') {
         // EditorPane.sendOpen calls `read_file` when it mounts. Return a
         // stubbed content so the pane doesn't error out.
@@ -579,7 +503,7 @@ describe('SessionWindow', () => {
     });
 
     const store = makeFakeLayoutStore();
-    const { findByTestId, findByText, queryByTestId } = renderWithStore(
+    const { findByTestId, queryByTestId } = renderWithStore(
       '/session/abc123',
       store,
     );
@@ -588,18 +512,13 @@ describe('SessionWindow', () => {
     await findByTestId('chat-pane');
     expect(queryByTestId('editor-pane')).toBeNull();
 
-    // Open the Files sidebar via the activity bar.
-    const filesBtn = await findByTestId('activity-bar-files');
-    filesBtn.click();
-    await findByTestId('files-sidebar');
-
-    // Double-click the README row. Sidebar emits onOpen(path);
-    // SessionWindow calls store.openFile(path); the tree splits so both
-    // the chat leaf and a freshly-minted editor leaf render in parallel.
-    const row = await findByText('README.md');
-    row.dispatchEvent(
-      new MouseEvent('dblclick', { bubbles: true, cancelable: true }),
-    );
+    // F-716: SessionWindow publishes its openFile through the
+    // `activeOpenFile` store while mounted; AppShell's FilesSidebar invokes
+    // it. Drive that bridge directly here — the AppShell render harness is
+    // covered separately in `AppShell.test.tsx`.
+    const { activeOpenFile } = await import('../../stores/session');
+    await waitFor(() => expect(activeOpenFile()).not.toBeNull());
+    activeOpenFile()!('/ws/README.md');
 
     const editor = await findByTestId('editor-pane');
     expect(editor).toBeInTheDocument();

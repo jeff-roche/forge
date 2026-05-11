@@ -20,6 +20,7 @@ import {
 } from '../../ipc/session';
 import {
   activeWorkspaceRoot,
+  setActiveOpenFile,
   setActiveSessionId,
   setActiveWorkspaceRoot,
   setSessionEvents,
@@ -50,9 +51,6 @@ import {
 } from '../../layout/layoutStore';
 import { GridContainer, type LayoutLeaf } from '../../layout/GridContainer';
 import { useDragToDock } from '../../layout/useDragToDock';
-import { ActivityBar, type ActivityId } from '../../shell/ActivityBar';
-import { FilesSidebar } from '../../shell/FilesSidebar';
-import { StatusBar } from '../../shell/StatusBar';
 import './SessionWindow.css';
 
 /**
@@ -223,6 +221,7 @@ export const SessionWindow: Component = () => {
     if (s) void s.flush();
     setActiveSessionId(null);
     setActiveWorkspaceRoot(null);
+    setActiveOpenFile(null);
   });
 
   const handleCloseWindow = () => {
@@ -250,54 +249,22 @@ export const SessionWindow: Component = () => {
   const providerLabel = () => formatProviderLabel(telemetry());
   const costLabel = () => formatCostLabel(telemetry());
 
-  // F-126: activity-bar + files-sidebar chrome. `activeActivity` is `null`
-  // when the sidebar is hidden (default) and an activity id when visible.
-  // `Cmd/Ctrl+Shift+E` toggles the files sidebar without routing through
-  // the activity bar click handler so the shortcut works even when the
-  // activity bar is keyboard-focused elsewhere.
-  const [activeActivity, setActiveActivity] = createSignal<ActivityId | null>(null);
-
-  const toggleFiles = (): void => {
-    setActiveActivity((prev) => (prev === 'files' ? null : 'files'));
-  };
-
-  const onActivitySelect = (id: ActivityId): void => {
-    // Only 'files' is wired in F-126. Search/Git are placeholders.
-    if (id !== 'files') return;
-    toggleFiles();
-  };
-
-  const onShortcut = (e: KeyboardEvent): void => {
-    // Cmd/Ctrl+Shift+E toggles the files sidebar. Match Mac's `Meta` and
-    // Windows/Linux `Ctrl` on the same binding, matching the issue's
-    // platform-agnostic spec.
-    const mod = e.metaKey || e.ctrlKey;
-    if (mod && e.shiftKey && (e.key === 'E' || e.key === 'e')) {
-      e.preventDefault();
-      toggleFiles();
-    }
-  };
-
+  // F-716: AppShell owns the FilesSidebar mount and shortcut. SessionWindow
+  // publishes its layout-store-backed openFile so the sidebar's Open routes
+  // through `layoutStore.openFile(path)`, which either updates an existing
+  // editor leaf's active_file or splits the tree to mount a fresh editor.
+  // Solid's Setter treats a function value as an updater — wrap once so the
+  // callable lands in the signal verbatim.
   onMount(() => {
-    window.addEventListener('keydown', onShortcut);
+    setActiveOpenFile(() => (path: string) => {
+      const s = store();
+      if (s === null) {
+        console.warn('openFile dropped — layout store not ready', path);
+        return;
+      }
+      s.openFile(path);
+    });
   });
-  onCleanup(() => {
-    window.removeEventListener('keydown', onShortcut);
-  });
-
-  // F-150: files-sidebar Open routes through layoutStore.openFile(path),
-  // which either updates an existing editor leaf's active_file or splits
-  // the tree to mount a fresh editor leaf.
-  const onFileOpen = (path: string): void => {
-    const s = store();
-    if (s === null) {
-      // Store not yet loaded (pre-hello). Extremely unlikely because the
-      // FilesSidebar is gated on `activeWorkspaceRoot`, but guard anyway.
-      console.warn('openFile dropped — layout store not ready', path);
-      return;
-    }
-    s.openFile(path);
-  };
 
   // F-150: the active layout's tree is what GridContainer renders. When the
   // store hasn't loaded yet (no-workspace edge case on mount), we fall back
@@ -376,35 +343,17 @@ export const SessionWindow: Component = () => {
   };
 
   return (
-    <main class="session-window">
-      <div class="session-window__chrome">
-        <ActivityBar
-          active={activeActivity()}
-          onSelect={onActivitySelect}
-        />
-        <Show when={activeActivity() === 'files' && activeWorkspaceRoot() !== null}>
-          <FilesSidebar
-            workspaceRoot={activeWorkspaceRoot() as string}
-            onOpen={onFileOpen}
-          />
-        </Show>
-        <section
-          class="session-window__grid"
-          aria-label="Session pane grid"
-        >
-          <GridContainer
-            tree={activeTree()}
-            renderLeaf={renderLeaf}
-            onRatioChange={onRatioChange}
-            dragState={dockApi.drag()}
-          />
-        </section>
-      </div>
-      {/* F-138: status bar lives at the bottom of the session chrome.
-          Subscribes to `session:event` for background-agent lifecycle
-          events and surfaces the running count + Promote/Stop popover. */}
-      <StatusBar />
-    </main>
+    <section
+      class="session-window"
+      aria-label="Session pane grid"
+    >
+      <GridContainer
+        tree={activeTree()}
+        renderLeaf={renderLeaf}
+        onRatioChange={onRatioChange}
+        dragState={dockApi.drag()}
+      />
+    </section>
   );
 };
 

@@ -1,0 +1,27 @@
+/* F-716: route-agnostic chrome layout. Activity bar + optional sidebar
+ * + content fill the viewport above a 22px status bar. The F-718 primary-
+ * nav Sidebar slots between the ActivityBar and `__content` when it lands.
+ */
+
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  background: var(--color-bg);
+  color: var(--color-text-primary);
+  font-family: var(--font-body);
+}
+
+.app-shell__body {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.app-shell__content {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
