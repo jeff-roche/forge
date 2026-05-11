@@ -348,7 +348,7 @@ describe('StatusBar — notification modes', () => {
     seedSettings({
       notifications: { bg_agents: mode },
       windows: { session_mode: 'single' },
-      providers: { custom_openai: {} },
+      providers: { enabled: {}, custom_openai: {} },
       catalog: { enabled: {} },
       dashboard: { container_banner_dismissed: false },
       memory: { enabled: {} },

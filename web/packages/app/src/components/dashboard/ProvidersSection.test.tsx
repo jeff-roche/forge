@@ -155,6 +155,27 @@ describe('ProvidersSection (F-721)', () => {
     expect(labels.some((l) => l.includes('Custom OpenAI-compat'))).toBe(true);
   });
 
+  // F-733: disabled providers (per the Providers page Enabled toggle) must
+  // not appear in the active-provider selector. Disabled rows still appear
+  // on the Providers page so the user can re-enable or remove them.
+  it('skips providers with enabled=false from the radiogroup', async () => {
+    setupInvokeMock({
+      entries: [
+        sample({ id: 'ollama', display_name: 'Ollama', enabled: true }),
+        sample({ id: 'anthropic', display_name: 'Anthropic', enabled: false }),
+        sample({ id: 'openai', display_name: 'OpenAI', enabled: true }),
+      ],
+    });
+    const { findAllByRole } = renderSection();
+    await waitForFetch();
+
+    const rows = await findAllByRole('radio');
+    const labels = rows.map((r) => r.textContent ?? '');
+    expect(labels.some((l) => l.includes('Anthropic'))).toBe(false);
+    expect(labels.some((l) => l.includes('Ollama'))).toBe(true);
+    expect(labels.some((l) => l.includes('OpenAI'))).toBe(true);
+  });
+
   // -------------------------------------------------------------------------
   // Header — Manage link
   // -------------------------------------------------------------------------

@@ -74,15 +74,20 @@ interface ProviderOption {
  * a credential-required provider that hasn't stored a key is `auth`.
  */
 function toProviderOptions(entries: ProviderEntry[]): ProviderOption[] {
-  return entries.map((p) => {
-    const blocked = p.credential_required && !p.has_credential;
-    const suffix = blocked ? ' · auth' : !p.model_available ? ' · no model' : '';
-    return {
-      id: p.id,
-      label: `${p.display_name}${suffix}`,
-      enabled: !blocked && p.model_available,
-    };
-  });
+  // F-733: drop providers whose `enabled` flag is explicitly `false`. Absent
+  // flags (legacy payloads) read as enabled; the Providers page is the only
+  // writer of the kill switch.
+  return entries
+    .filter((p) => p.enabled !== false)
+    .map((p) => {
+      const blocked = p.credential_required && !p.has_credential;
+      const suffix = blocked ? ' · auth' : !p.model_available ? ' · no model' : '';
+      return {
+        id: p.id,
+        label: `${p.display_name}${suffix}`,
+        enabled: !blocked && p.model_available,
+      };
+    });
 }
 
 /** Pick the default provider id per spec §Fields. */

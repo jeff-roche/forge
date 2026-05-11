@@ -82,6 +82,9 @@ function isAwaiting(session: SessionSummary): boolean {
 }
 
 function isConnected(provider: ProviderEntry, credentialsPresent: Record<string, boolean>): boolean {
+  // F-733: a disabled provider is not a candidate for "connected" — the
+  // user opted it out, so the hero sentence must not advertise it.
+  if (provider.enabled === false) return false;
   if (!provider.model_available) return false;
   if (provider.credential_required && !credentialsPresent[provider.id]) return false;
   return true;
@@ -91,6 +94,9 @@ function isMissingCredentials(
   provider: ProviderEntry,
   credentialsPresent: Record<string, boolean>,
 ): boolean {
+  // F-733: disabled providers are not waiting for credentials — they're
+  // off. Skip them so the sentence stays accurate.
+  if (provider.enabled === false) return false;
   return provider.credential_required && !credentialsPresent[provider.id];
 }
 

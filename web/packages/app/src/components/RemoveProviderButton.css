@@ -1,0 +1,67 @@
+/* F-732: destructive Remove confirm dialog. Tokens only. */
+
+.remove-provider__backdrop {
+  position: fixed;
+  inset: 0;
+  background: var(--color-overlay);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: var(--sp-5);
+}
+
+.remove-provider__dialog {
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-border-2);
+  border-radius: var(--r-md);
+  padding: var(--sp-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  width: 100%;
+  max-width: 420px;
+  box-shadow: var(--shadow-modal);
+}
+
+.remove-provider__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+.remove-provider__title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: var(--type-body-md);
+  color: var(--color-ember-300);
+}
+
+.remove-provider__body {
+  margin: 0;
+  font-size: var(--type-body-md);
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+}
+
+.remove-provider__error {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--color-bg);
+  border: 1px solid var(--color-error-border);
+  border-radius: var(--r-sm);
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-sm);
+  color: var(--color-text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.remove-provider__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-3);
+}

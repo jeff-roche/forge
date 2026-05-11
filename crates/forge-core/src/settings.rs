@@ -183,6 +183,13 @@ pub struct ProvidersSettings {
     /// same string shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active: Option<String>,
+    /// F-733: per-provider enable flag. `enabled.<id> = <bool>` mirrors the
+    /// dotted-key the dashboard writes through `set_provider_enabled`.
+    /// `add_provider` seeds `enabled.<id> = true` for built-ins; the toggle
+    /// flips that flag. Absent entries default to "enabled" at the read
+    /// site so the historical case (built-ins implicit) keeps working.
+    #[serde(default)]
+    pub enabled: OpenKeyMap,
     /// One entry per user-named OpenAI-compatible server.
     #[serde(default)]
     pub custom_openai: BTreeMap<String, CustomOpenAiEntry>,

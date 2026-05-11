@@ -82,6 +82,28 @@ export interface ProviderEntry {
   has_credential: boolean;
   model_available: boolean;
   model?: string;
+  /** `base_url` of the underlying custom_openai section (custom rows only). */
+  endpoint?: string;
+  /** Reserved future override (always undefined today). */
+  api_version?: string;
+  /**
+   * F-733: per-provider enable flag. The Providers page toggle is the only
+   * writer; absent settings default to `true` so historical configs (pre
+   * F-730) keep their built-ins live. The active-provider selector and the
+   * new-session picker filter rows where `enabled === false`. Optional on
+   * the TS surface so legacy IPC payloads — and test fixtures that pre-date
+   * F-733 — still type-check; readers MUST treat `undefined` as enabled.
+   */
+  enabled?: boolean;
+}
+
+/**
+ * F-733: read-site helper. The `enabled` flag is optional on the wire so
+ * pre-F-733 payloads (where the field is absent) treat as enabled. Use
+ * this anywhere a UI must filter disabled rows.
+ */
+export function isProviderEnabled(entry: ProviderEntry): boolean {
+  return entry.enabled !== false;
 }
 
 /**

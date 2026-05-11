@@ -702,6 +702,20 @@ pub fn build_invoke_handler<R: Runtime>() -> Box<dyn Fn(tauri::ipc::Invoke<R>) -
         crate::providers_ipc::dashboard_list_providers,
         crate::providers_ipc::get_active_provider,
         crate::providers_ipc::set_active_provider,
+        // F-730 / F-731 / F-732: Providers page editor IPCs — add_provider
+        // writes a new built-in / custom_openai entry; test_provider_connection
+        // issues a probe under a 5s deadline against the configured endpoint;
+        // update_provider rewrites a custom_openai section; remove_provider
+        // drops the entry (and clears `[providers.active]` when the removed
+        // id was active).
+        crate::providers_ipc::add_provider,
+        crate::providers_ipc::test_provider_connection,
+        crate::providers_ipc::update_provider,
+        crate::providers_ipc::remove_provider,
+        // F-733: per-row Enabled toggle on the Providers page. Flips
+        // `providers.enabled.<id>` and clears `[providers.active]` when the
+        // disabled id was active. Emits `provider:changed`.
+        crate::providers_ipc::set_provider_enabled,
         // F-597: container lifecycle UI on the Dashboard. Five commands
         // share the `dashboard` window-label gate: detect probes the
         // runtime, list/stop/remove/logs operate on the registry +

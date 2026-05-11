@@ -26,6 +26,14 @@ export type ProvidersSettings = {
  */
 active?: string | null, 
 /**
+ * F-733: per-provider enable flag. `enabled.<id> = <bool>` mirrors the
+ * dotted-key the dashboard writes through `set_provider_enabled`.
+ * `add_provider` seeds `enabled.<id> = true` for built-ins; the toggle
+ * flips that flag. Absent entries default to "enabled" at the read
+ * site so the historical case (built-ins implicit) keeps working.
+ */
+enabled: { [key in string]: boolean }, 
+/**
  * One entry per user-named OpenAI-compatible server.
  */
 custom_openai: { [key in string]: CustomOpenAiEntry }, };

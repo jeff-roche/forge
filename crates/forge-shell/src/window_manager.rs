@@ -144,6 +144,25 @@ pub fn run() -> Result<()> {
             crate::providers_ipc::dashboard_list_providers,
             crate::providers_ipc::get_active_provider,
             crate::providers_ipc::set_active_provider,
+            // F-730: + Add provider modal on the Providers page. Writes the
+            // built-in / custom_openai entry into user-tier settings.
+            crate::providers_ipc::add_provider,
+            // F-731: per-row Test connection chip on the Providers page.
+            // Reads the configured base URL + stored credential and issues a
+            // single low-cost probe against the provider's models endpoint
+            // under a 5s wall-clock deadline.
+            crate::providers_ipc::test_provider_connection,
+            // F-732: Providers page edit / remove commands. `update_provider`
+            // rewrites a `[providers.custom_openai.<name>]` section; built-in
+            // ids are rejected. `remove_provider` drops the section (or the
+            // built-in `providers.enabled.<id>` flag) and clears
+            // `[providers.active]` when the removed id was the active one.
+            crate::providers_ipc::update_provider,
+            crate::providers_ipc::remove_provider,
+            // F-733: per-row Enabled toggle on the Providers page. Flips
+            // `providers.enabled.<id>` and clears `[providers.active]` when
+            // the disabled id was active. Emits `provider:changed`.
+            crate::providers_ipc::set_provider_enabled,
             // F-593: backend foundation for the (deferred F-594) usage view —
             // the dashboard queries aggregated UsageTick rollups via this
             // command; cross-workspace flag aggregates across every

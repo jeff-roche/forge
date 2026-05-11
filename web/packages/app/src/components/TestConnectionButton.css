@@ -1,0 +1,13 @@
+/* F-731 test-connection chip. Tokens only per DESIGN.md. */
+
+.test-connection {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.test-connection__alert {
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-xs);
+  color: var(--color-error);
+}

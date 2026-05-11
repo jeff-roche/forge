@@ -3,6 +3,7 @@ import { A } from '@solidjs/router';
 import { Skeleton, StatusPill, type StatusPillVariant } from '@forge/design';
 import {
   getActiveProvider,
+  isProviderEnabled,
   listProviders,
   setActiveProvider,
   type ProviderEntry,
@@ -19,7 +20,10 @@ interface Snapshot {
 
 async function fetchSnapshot(): Promise<Snapshot> {
   const [entries, active] = await Promise.all([listProviders(), getActiveProvider()]);
-  return { entries, active };
+  // F-733: the dashboard's active-provider selector only lists enabled rows
+  // so the user cannot promote a disabled provider. Disabled rows still
+  // appear on the Providers page so the user can re-enable or remove them.
+  return { entries: entries.filter(isProviderEnabled), active };
 }
 
 /**

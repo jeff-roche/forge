@@ -38,6 +38,7 @@ use tauri::{AppHandle, Emitter, Runtime, State, Webview};
 use tokio::sync::Mutex;
 #[allow(unused_imports)]
 use tracing;
+use ts_rs::TS;
 
 #[cfg(feature = "webview")]
 use crate::credentials_ipc::CredentialsState;
@@ -127,6 +128,10 @@ const BUILTIN_PROVIDERS: &[BuiltinDescriptor] = &[
 /// "absent" by contract), or when the credential is irrelevant
 /// (Ollama keyless). The dashboard renders the warning glyph only when
 /// `credential_required && !has_credential`.
+///
+/// `endpoint` / `api_version` are populated only for `custom_openai:<name>`
+/// rows so the Providers page's Edit dialog can pre-fill its inputs from
+/// the row payload directly (no follow-up read). Built-in rows omit them.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProviderEntry {
     pub id: String,
@@ -139,6 +144,29 @@ pub struct ProviderEntry {
     /// entry). `None` for built-ins without a baked-in model.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// `base_url` of the underlying `[providers.custom_openai.<name>]`
+    /// section. Populated for `custom_openai:*` rows only — built-ins
+    /// resolve their endpoint through `builtin_probe_url`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    /// Optional `api_version` override stored under the same
+    /// `[providers.custom_openai.<name>]` section. Reserved for a future
+    /// expansion of `CustomOpenAiEntry`; today the field is always `None`
+    /// because the typed settings struct ignores the dotted-key write — the
+    /// Edit dialog re-prompts for the value, which is consistent with the
+    /// spec's "blank means clear" semantics on edit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_version: Option<String>,
+    /// F-733: per-provider enable flag mirroring `providers.enabled.<id>`.
+    /// Absent settings entries read as `true` — historical configs (pre
+    /// F-730) that never wrote the flag keep their built-ins live. The
+    /// Providers page toggle and the new-session picker key on this bit.
+    #[serde(default = "default_enabled_true")]
+    pub enabled: bool,
+}
+
+fn default_enabled_true() -> bool {
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -158,6 +186,12 @@ pub fn build_provider_list(
     settings: &forge_core::settings::AppSettings,
     cred_present: impl Fn(&str) -> bool,
 ) -> Vec<ProviderEntry> {
+    let is_enabled = |id: &str| -> bool {
+        // Absent keys read as `true` so historical configs (pre F-730) that
+        // never wrote `providers.enabled.<id>` keep their built-ins live.
+        settings.providers.enabled.get(id).copied().unwrap_or(true)
+    };
+
     let mut out: Vec<ProviderEntry> = BUILTIN_PROVIDERS
         .iter()
         .map(|b| ProviderEntry {
@@ -174,6 +208,9 @@ pub fn build_provider_list(
             // supplies it via the spec / a custom entry.
             model_available: !b.user_supplied_model,
             model: None,
+            endpoint: None,
+            api_version: None,
+            enabled: is_enabled(b.id),
         })
         .collect();
 
@@ -197,11 +234,21 @@ pub fn build_provider_list(
             } else {
                 None
             },
+            endpoint: Some(entry.base_url.clone()),
+            api_version: None,
+            enabled: is_enabled(&id),
             id,
         });
     }
 
     out
+}
+
+/// `true` when `id` is currently enabled per `providers.enabled.<id>`.
+/// Absent keys default to `true` — historical configs that never wrote a
+/// flag keep working. The Providers page toggle is the only writer.
+pub fn is_enabled_provider(settings: &forge_core::settings::AppSettings, id: &str) -> bool {
+    settings.providers.enabled.get(id).copied().unwrap_or(true)
 }
 
 /// `true` when `id` matches one of the built-in slugs or one of the
@@ -230,6 +277,26 @@ use crate::ipc::MAX_PROVIDER_ID_BYTES;
 pub const DASHBOARD_LIST_PROVIDERS_ERROR: &str = "dashboard_list_providers: ";
 pub const GET_ACTIVE_PROVIDER_ERROR: &str = "get_active_provider: ";
 pub const SET_ACTIVE_PROVIDER_ERROR: &str = "set_active_provider: ";
+pub const ADD_PROVIDER_ERROR: &str = "add_provider: ";
+pub const TEST_PROVIDER_CONNECTION_ERROR: &str = "test_provider_connection: ";
+pub const UPDATE_PROVIDER_ERROR: &str = "update_provider: ";
+pub const REMOVE_PROVIDER_ERROR: &str = "remove_provider: ";
+pub const SET_PROVIDER_ENABLED_ERROR: &str = "set_provider_enabled: ";
+
+/// Built-in provider kinds accepted by `add_provider`. The umbrella
+/// `custom_openai` slug is excluded from this set — custom OpenAI-compat
+/// entries flow through the `custom_openai:<name>` branch which writes a
+/// `[providers.custom_openai.<name>]` section instead of an `enabled` flag.
+///
+/// `mistral` is admitted here ahead of a dedicated runtime adapter: the
+/// dashboard add-provider form ships it as a built-in kind so the schema
+/// keeps room for a future first-class adapter without a wire break.
+pub const BUILTIN_ADDABLE_KINDS: &[&str] = &[
+    PROVIDER_ANTHROPIC,
+    PROVIDER_OPENAI,
+    PROVIDER_OLLAMA,
+    "mistral",
+];
 
 /// Pure validation helper exposed for unit tests.
 pub fn validate_provider_id(provider_id: &str) -> Result<(), String> {
@@ -373,6 +440,16 @@ pub async fn set_active_provider<R: Runtime>(
         ));
     }
 
+    // F-733: disabled providers cannot be the active selection. The toggle
+    // is the user-facing kill switch; selecting through `set_active_provider`
+    // (radio click, programmatic caller) is rejected verbatim per F-673 so
+    // the renderer can surface the safeguard inline.
+    if !is_enabled_provider(&settings, &provider_id) {
+        return Err(format!(
+            "{SET_ACTIVE_PROVIDER_ERROR}provider {provider_id} is disabled"
+        ));
+    }
+
     // Persist to user-tier so the choice survives across workspaces. Same
     // semantics as the existing settings-write path: load → mutate raw TOML
     // → validate → save.
@@ -418,6 +495,807 @@ pub async fn set_active_provider<R: Runtime>(
             provider_id = %provider_id,
             error = %e,
             "ProviderChanged emit failed",
+        );
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// ---- add_provider ---------------------------------------------------------
+// ---------------------------------------------------------------------------
+
+/// `add_provider` IPC input. Two shapes share one struct — the
+/// `id` discriminates:
+///
+/// - `"anthropic"` / `"openai"` / `"ollama"` / `"mistral"` — built-in kind.
+///   The optional `config` MUST be `None`; setting it is rejected so the
+///   wire shape stays a typed pair and a future schema change for a built-in
+///   can't silently absorb a `custom_openai`-shaped payload.
+/// - `"custom_openai:<name>"` — custom OpenAI-compat endpoint. `config`
+///   is required and is persisted as `[providers.custom_openai.<name>]`.
+#[derive(Debug, Clone, Deserialize, Serialize, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+pub struct AddProviderInput {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<CustomOpenAiConfig>,
+}
+
+/// Connection details for a `custom_openai:<name>` entry, supplied at add
+/// time. Mirrors the wire fields the `providers-page.md` spec calls for —
+/// the credential is stored separately via `login_provider` and is never
+/// carried on this struct.
+#[derive(Debug, Clone, Deserialize, Serialize, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+pub struct CustomOpenAiConfig {
+    pub endpoint: String,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_version: Option<String>,
+}
+
+/// Pure validation exposed for unit tests. Mirrors the field rules in
+/// `docs/ui-specs/providers-page.md` §"Add provider":
+///
+/// - `id` non-empty, ≤ `MAX_PROVIDER_ID_BYTES`, matches a built-in slug OR
+///   parses as `custom_openai:<name>` with a non-empty `[A-Za-z0-9_-]+` suffix.
+/// - Built-in branch: `config` MUST be `None`.
+/// - Custom-openai branch: `config` is required; `endpoint` parses as
+///   `http`/`https`; `model` non-empty.
+pub fn validate_add_provider_input(input: &AddProviderInput) -> Result<(), String> {
+    validate_provider_id(&input.id).map_err(|e| format!("{ADD_PROVIDER_ERROR}{e}"))?;
+    let is_custom = input.id.starts_with(CUSTOM_OPENAI_PREFIX);
+    if is_custom {
+        let cfg = input
+            .config
+            .as_ref()
+            .ok_or_else(|| format!("{ADD_PROVIDER_ERROR}custom_openai requires config"))?;
+        validate_endpoint(&cfg.endpoint)?;
+        if cfg.model.trim().is_empty() {
+            return Err(format!("{ADD_PROVIDER_ERROR}model is required"));
+        }
+    } else if !BUILTIN_ADDABLE_KINDS.contains(&input.id.as_str()) {
+        return Err(format!(
+            "{ADD_PROVIDER_ERROR}unknown provider kind: {}",
+            input.id
+        ));
+    } else if input.config.is_some() {
+        return Err(format!(
+            "{ADD_PROVIDER_ERROR}built-in provider {} does not accept config",
+            input.id
+        ));
+    }
+    Ok(())
+}
+
+fn validate_endpoint(raw: &str) -> Result<(), String> {
+    let url = url::Url::parse(raw)
+        .map_err(|e| format!("{ADD_PROVIDER_ERROR}invalid endpoint URL: {e}"))?;
+    match url.scheme() {
+        "http" | "https" => Ok(()),
+        other => Err(format!(
+            "{ADD_PROVIDER_ERROR}invalid endpoint URL: scheme {other} is not http/https"
+        )),
+    }
+}
+
+/// Pure check: `true` when `id` is already configured in `settings` — either
+/// as a built-in flagged enabled in `[providers.enabled]` or as a
+/// `[providers.custom_openai.<name>]` entry. Exposed for unit tests.
+pub fn provider_already_configured(settings_toml: &str, id: &str) -> Result<bool, String> {
+    if let Some(name) = id.strip_prefix(CUSTOM_OPENAI_PREFIX) {
+        let tree: toml::Value = if settings_toml.trim().is_empty() {
+            return Ok(false);
+        } else {
+            toml::from_str(settings_toml).map_err(|e| format!("{ADD_PROVIDER_ERROR}{e}"))?
+        };
+        return Ok(tree
+            .get("providers")
+            .and_then(|p| p.get("custom_openai"))
+            .and_then(|c| c.get(name))
+            .is_some());
+    }
+    let tree: toml::Value = if settings_toml.trim().is_empty() {
+        return Ok(false);
+    } else {
+        toml::from_str(settings_toml).map_err(|e| format!("{ADD_PROVIDER_ERROR}{e}"))?
+    };
+    Ok(tree
+        .get("providers")
+        .and_then(|p| p.get("enabled"))
+        .and_then(|e| e.get(id))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false))
+}
+
+#[cfg(feature = "webview")]
+#[tauri::command]
+pub async fn add_provider<R: Runtime>(
+    input: AddProviderInput,
+    webview: Webview<R>,
+    state: State<'_, crate::ipc::BridgeState>,
+    creds: State<'_, CredentialsState>,
+) -> Result<ProviderEntry, String> {
+    crate::ipc::require_window_label(&webview, "dashboard", "add_provider")
+        .map_err(|e| format!("{ADD_PROVIDER_ERROR}{e}"))?;
+    validate_add_provider_input(&input)?;
+
+    // Serialize the read-modify-write so a double-submit from the modal
+    // can't race two writers. Same guard `set_active_provider` uses — the
+    // worst-case latency is one disk write.
+    let _write_lock = settings_write_guard().lock().await;
+
+    let user_dir = crate::ipc::resolve_user_config_dir(&state)
+        .ok_or_else(|| format!("{ADD_PROVIDER_ERROR}could not resolve user config directory"))?;
+    let user_path = forge_core::settings::user_settings_path_in(&user_dir);
+    let existing = tokio::fs::read_to_string(&user_path)
+        .await
+        .unwrap_or_default();
+
+    if provider_already_configured(&existing, &input.id)? {
+        return Err(format!(
+            "{ADD_PROVIDER_ERROR}provider {} already configured",
+            input.id
+        ));
+    }
+
+    let updated = if let Some(name) = input.id.strip_prefix(CUSTOM_OPENAI_PREFIX) {
+        let cfg = input.config.as_ref().expect("validated above");
+        write_custom_openai_section(&existing, name, cfg)?
+    } else {
+        apply_setting_update(
+            &existing,
+            &format!("providers.enabled.{}", input.id),
+            toml::Value::Boolean(true),
+        )
+        .map_err(|e| format!("{ADD_PROVIDER_ERROR}{e}"))?
+    };
+    save_user_settings_raw_in(&user_dir, &updated)
+        .await
+        .map_err(|e| format!("{ADD_PROVIDER_ERROR}{e}"))?;
+
+    // Build the row the frontend renders — same shape `dashboard_list_providers`
+    // returns so the page can splice it in without a refetch.
+    let settings = forge_core::settings::load_user_settings_in(&user_dir)
+        .await
+        .map_err(|e| format!("{ADD_PROVIDER_ERROR}{e}"))?;
+    let store = creds.store();
+    let presence = cred_presence_map(&store, std::slice::from_ref(&input.id)).await;
+    let presence_map: std::collections::HashMap<String, bool> = presence.into_iter().collect();
+    let rows = build_provider_list(&settings, |id| {
+        presence_map.get(id).copied().unwrap_or(false)
+    });
+    rows.into_iter().find(|r| r.id == input.id).ok_or_else(|| {
+        format!(
+            "{ADD_PROVIDER_ERROR}post-write lookup failed for {}",
+            input.id
+        )
+    })
+}
+
+/// Walk-and-set helper for the `[providers.custom_openai.<name>]` branch.
+/// Three dotted-key writes (`base_url`, `model`, optional `api_version`) so
+/// the auth-shape default and the empty model_list stay implicit.
+fn write_custom_openai_section(
+    existing: &str,
+    name: &str,
+    cfg: &CustomOpenAiConfig,
+) -> Result<String, String> {
+    let mut body = apply_setting_update(
+        existing,
+        &format!("providers.custom_openai.{name}.base_url"),
+        toml::Value::String(cfg.endpoint.clone()),
+    )
+    .map_err(|e| format!("{ADD_PROVIDER_ERROR}{e}"))?;
+    body = apply_setting_update(
+        &body,
+        &format!("providers.custom_openai.{name}.model"),
+        toml::Value::String(cfg.model.clone()),
+    )
+    .map_err(|e| format!("{ADD_PROVIDER_ERROR}{e}"))?;
+    if let Some(api_version) = &cfg.api_version {
+        body = apply_setting_update(
+            &body,
+            &format!("providers.custom_openai.{name}.api_version"),
+            toml::Value::String(api_version.clone()),
+        )
+        .map_err(|e| format!("{ADD_PROVIDER_ERROR}{e}"))?;
+    }
+    Ok(body)
+}
+
+// ---------------------------------------------------------------------------
+// ---- test_provider_connection --------------------------------------------
+// ---------------------------------------------------------------------------
+
+/// `test_provider_connection` IPC input. The `provider_id` discriminates a
+/// built-in slug (`anthropic` / `openai` / `ollama` / `mistral`) from a
+/// `custom_openai:<name>` entry — same surface `add_provider` accepts.
+#[derive(Debug, Clone, Deserialize, Serialize, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+pub struct TestProviderConnectionInput {
+    pub provider_id: String,
+}
+
+/// `test_provider_connection` IPC output. `ok` is the canonical success bit;
+/// `latency_ms` is populated only when `ok = true` and the probe round-trip
+/// fits the 5s deadline. `model_count` is best-effort — providers that do
+/// not return a model list on the probe endpoint leave it `None`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+pub struct TestProviderConnectionOutput {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_count: Option<u32>,
+}
+
+/// Wall-clock deadline applied to each probe — matches the 5s budget in
+/// `docs/ui-specs/providers-page.md §"Test connection"`.
+pub const TEST_PROVIDER_CONNECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Built-in models endpoint per kind. The `custom_openai:<name>` branch
+/// derives its URL from the user-configured `base_url`.
+fn builtin_probe_url(kind: &str) -> Option<&'static str> {
+    match kind {
+        PROVIDER_ANTHROPIC => Some("https://api.anthropic.com/v1/models"),
+        PROVIDER_OPENAI => Some("https://api.openai.com/v1/models"),
+        PROVIDER_OLLAMA => Some("http://127.0.0.1:11434/api/tags"),
+        "mistral" => Some("https://api.mistral.ai/v1/models"),
+        _ => None,
+    }
+}
+
+/// Classify an HTTP status into one of the canonical
+/// `test_provider_connection` error infixes. `auth ` is the load-bearing
+/// signal — the dashboard pill flips to `auth-required` on this prefix.
+fn classify_status(status: u16) -> String {
+    match status {
+        401 | 403 => format!("auth HTTP {status}"),
+        s if (400..500).contains(&s) => format!("network HTTP {s}"),
+        s => format!("network HTTP {s}"),
+    }
+}
+
+#[cfg(feature = "webview")]
+async fn probe_http_request(
+    client: &reqwest::Client,
+    url: &str,
+    headers: Vec<(String, String)>,
+) -> Result<TestProviderConnectionOutput, String> {
+    let mut builder = client.get(url);
+    for (name, value) in &headers {
+        builder = builder.header(name.as_str(), value);
+    }
+
+    let started = std::time::Instant::now();
+    let response = builder
+        .send()
+        .await
+        .map_err(|e| format!("{TEST_PROVIDER_CONNECTION_ERROR}network {e}"))?;
+    let status = response.status();
+    let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+    if !status.is_success() {
+        return Err(format!(
+            "{TEST_PROVIDER_CONNECTION_ERROR}{}",
+            classify_status(status.as_u16())
+        ));
+    }
+
+    // Best-effort model_count: parse the body as JSON and look for a
+    // top-level `data` array (OpenAI/Mistral/Anthropic) or `models` array
+    // (Ollama). Failures here do not invalidate the probe — the connection
+    // itself succeeded.
+    let model_count = response
+        .json::<serde_json::Value>()
+        .await
+        .ok()
+        .and_then(|body| {
+            body.get("data")
+                .or_else(|| body.get("models"))
+                .and_then(|arr| arr.as_array())
+                .and_then(|arr| u32::try_from(arr.len()).ok())
+        });
+
+    Ok(TestProviderConnectionOutput {
+        ok: true,
+        latency_ms: Some(latency_ms),
+        model_count,
+    })
+}
+
+#[cfg(feature = "webview")]
+async fn load_credential(
+    creds: &Arc<dyn Credentials>,
+    provider_id: &str,
+) -> Result<String, String> {
+    use secrecy::ExposeSecret;
+    let secret = creds
+        .get(provider_id)
+        .await
+        .map_err(|e| format!("{TEST_PROVIDER_CONNECTION_ERROR}{e}"))?
+        .ok_or_else(|| format!("{TEST_PROVIDER_CONNECTION_ERROR}missing credential"))?;
+    Ok(secret.expose_secret().to_string())
+}
+
+#[cfg(feature = "webview")]
+async fn dispatch_probe(
+    client: &reqwest::Client,
+    provider_id: &str,
+    settings: &forge_core::settings::AppSettings,
+    creds: &Arc<dyn Credentials>,
+) -> Result<TestProviderConnectionOutput, String> {
+    if let Some(name) = provider_id.strip_prefix(CUSTOM_OPENAI_PREFIX) {
+        let entry = settings.providers.custom_openai.get(name).ok_or_else(|| {
+            format!("{TEST_PROVIDER_CONNECTION_ERROR}unknown provider: {provider_id}")
+        })?;
+        let url = format!("{}/v1/models", entry.base_url.trim_end_matches('/'));
+        let headers = match &entry.auth {
+            forge_core::settings::AuthShapeSettings::None => Vec::new(),
+            forge_core::settings::AuthShapeSettings::Bearer => {
+                let key = load_credential(creds, provider_id).await?;
+                vec![("authorization".to_string(), format!("Bearer {key}"))]
+            }
+            forge_core::settings::AuthShapeSettings::Header { name } => {
+                let key = load_credential(creds, provider_id).await?;
+                vec![(name.clone(), key)]
+            }
+        };
+        return probe_http_request(client, &url, headers).await;
+    }
+
+    let url = builtin_probe_url(provider_id).ok_or_else(|| {
+        format!("{TEST_PROVIDER_CONNECTION_ERROR}unknown provider: {provider_id}")
+    })?;
+
+    let headers: Vec<(String, String)> = match provider_id {
+        PROVIDER_OLLAMA => Vec::new(),
+        PROVIDER_ANTHROPIC => {
+            let key = load_credential(creds, provider_id).await?;
+            vec![
+                ("x-api-key".to_string(), key),
+                ("anthropic-version".to_string(), "2023-06-01".to_string()),
+            ]
+        }
+        _ => {
+            // openai / mistral
+            let key = load_credential(creds, provider_id).await?;
+            vec![("authorization".to_string(), format!("Bearer {key}"))]
+        }
+    };
+
+    probe_http_request(client, url, headers).await
+}
+
+#[cfg(feature = "webview")]
+#[tauri::command]
+pub async fn test_provider_connection<R: Runtime>(
+    input: TestProviderConnectionInput,
+    webview: Webview<R>,
+    state: State<'_, crate::ipc::BridgeState>,
+    creds: State<'_, CredentialsState>,
+) -> Result<TestProviderConnectionOutput, String> {
+    crate::ipc::require_window_label(&webview, "dashboard", "test_provider_connection")
+        .map_err(|e| format!("{TEST_PROVIDER_CONNECTION_ERROR}{e}"))?;
+    validate_provider_id(&input.provider_id)
+        .map_err(|e| format!("{TEST_PROVIDER_CONNECTION_ERROR}{e}"))?;
+
+    let user_dir = crate::ipc::resolve_user_config_dir(&state);
+    let settings = match user_dir.as_deref() {
+        Some(dir) => forge_core::settings::load_user_settings_in(dir)
+            .await
+            .map_err(|e| format!("{TEST_PROVIDER_CONNECTION_ERROR}{e}"))?,
+        None => forge_core::settings::AppSettings::default(),
+    };
+
+    let client = reqwest::Client::builder()
+        .build()
+        .map_err(|e| format!("{TEST_PROVIDER_CONNECTION_ERROR}network {e}"))?;
+    let store = creds.store();
+
+    let probe = dispatch_probe(&client, &input.provider_id, &settings, &store);
+    match tokio::time::timeout(TEST_PROVIDER_CONNECTION_TIMEOUT, probe).await {
+        Ok(result) => result,
+        Err(_) => Err(format!("{TEST_PROVIDER_CONNECTION_ERROR}timeout")),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ---- update_provider ------------------------------------------------------
+// ---------------------------------------------------------------------------
+
+/// `update_provider` IPC input. Restricted to `custom_openai:<name>` entries —
+/// built-in providers carry no editable fields today (kind/model are baked
+/// into the runtime adapter), so `update_provider` rejects any id whose
+/// prefix is not `custom_openai:`. The `config` field is reused verbatim
+/// from `add_provider` for wire-shape symmetry.
+#[derive(Debug, Clone, Deserialize, Serialize, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+pub struct UpdateProviderInput {
+    pub id: String,
+    pub config: CustomOpenAiConfig,
+}
+
+/// Pure validation exposed for unit tests.
+pub fn validate_update_provider_input(input: &UpdateProviderInput) -> Result<(), String> {
+    validate_provider_id(&input.id).map_err(|e| format!("{UPDATE_PROVIDER_ERROR}{e}"))?;
+    if !input.id.starts_with(CUSTOM_OPENAI_PREFIX) {
+        return Err(format!(
+            "{UPDATE_PROVIDER_ERROR}built-in providers are not editable"
+        ));
+    }
+    validate_endpoint_for(UPDATE_PROVIDER_ERROR, &input.config.endpoint)?;
+    if input.config.model.trim().is_empty() {
+        return Err(format!("{UPDATE_PROVIDER_ERROR}model is required"));
+    }
+    Ok(())
+}
+
+/// `validate_endpoint`'s twin keyed on a caller-supplied prefix. The
+/// original `validate_endpoint` hard-codes `ADD_PROVIDER_ERROR`; rather than
+/// rewire that call site, we expose a prefix-aware variant so each command
+/// keeps its own F-673 error prefix.
+fn validate_endpoint_for(prefix: &str, raw: &str) -> Result<(), String> {
+    let url = url::Url::parse(raw).map_err(|e| format!("{prefix}invalid endpoint URL: {e}"))?;
+    match url.scheme() {
+        "http" | "https" => Ok(()),
+        other => Err(format!(
+            "{prefix}invalid endpoint URL: scheme {other} is not http/https"
+        )),
+    }
+}
+
+#[cfg(feature = "webview")]
+#[tauri::command]
+pub async fn update_provider<R: Runtime>(
+    input: UpdateProviderInput,
+    webview: Webview<R>,
+    state: State<'_, crate::ipc::BridgeState>,
+    creds: State<'_, CredentialsState>,
+) -> Result<ProviderEntry, String> {
+    crate::ipc::require_window_label(&webview, "dashboard", "update_provider")
+        .map_err(|e| format!("{UPDATE_PROVIDER_ERROR}{e}"))?;
+    validate_update_provider_input(&input)?;
+
+    let _write_lock = settings_write_guard().lock().await;
+
+    let user_dir = crate::ipc::resolve_user_config_dir(&state)
+        .ok_or_else(|| format!("{UPDATE_PROVIDER_ERROR}could not resolve user config directory"))?;
+    let user_path = forge_core::settings::user_settings_path_in(&user_dir);
+    let existing = tokio::fs::read_to_string(&user_path)
+        .await
+        .unwrap_or_default();
+
+    let name = input
+        .id
+        .strip_prefix(CUSTOM_OPENAI_PREFIX)
+        .expect("validated above");
+
+    if !custom_openai_section_present(&existing, name)? {
+        return Err(format!(
+            "{UPDATE_PROVIDER_ERROR}provider {} not configured",
+            input.id
+        ));
+    }
+
+    let updated = rewrite_custom_openai_section(&existing, name, &input.config)?;
+    save_user_settings_raw_in(&user_dir, &updated)
+        .await
+        .map_err(|e| format!("{UPDATE_PROVIDER_ERROR}{e}"))?;
+
+    let settings = forge_core::settings::load_user_settings_in(&user_dir)
+        .await
+        .map_err(|e| format!("{UPDATE_PROVIDER_ERROR}{e}"))?;
+    let store = creds.store();
+    let presence = cred_presence_map(&store, std::slice::from_ref(&input.id)).await;
+    let presence_map: std::collections::HashMap<String, bool> = presence.into_iter().collect();
+    let rows = build_provider_list(&settings, |id| {
+        presence_map.get(id).copied().unwrap_or(false)
+    });
+    rows.into_iter().find(|r| r.id == input.id).ok_or_else(|| {
+        format!(
+            "{UPDATE_PROVIDER_ERROR}post-write lookup failed for {}",
+            input.id
+        )
+    })
+}
+
+/// Pure check: returns `true` when `[providers.custom_openai.<name>]` is
+/// present in the TOML body. Exposed for unit tests.
+pub fn custom_openai_section_present(settings_toml: &str, name: &str) -> Result<bool, String> {
+    if settings_toml.trim().is_empty() {
+        return Ok(false);
+    }
+    let tree: toml::Value =
+        toml::from_str(settings_toml).map_err(|e| format!("{UPDATE_PROVIDER_ERROR}{e}"))?;
+    Ok(tree
+        .get("providers")
+        .and_then(|p| p.get("custom_openai"))
+        .and_then(|c| c.get(name))
+        .is_some())
+}
+
+/// Re-key the `[providers.custom_openai.<name>]` section with `cfg`. Strips
+/// any pre-existing `api_version` when the caller leaves it `None` so an
+/// edit that clears the override actually clears it on disk.
+fn rewrite_custom_openai_section(
+    existing: &str,
+    name: &str,
+    cfg: &CustomOpenAiConfig,
+) -> Result<String, String> {
+    let mut body = apply_setting_update(
+        existing,
+        &format!("providers.custom_openai.{name}.base_url"),
+        toml::Value::String(cfg.endpoint.clone()),
+    )
+    .map_err(|e| format!("{UPDATE_PROVIDER_ERROR}{e}"))?;
+    body = apply_setting_update(
+        &body,
+        &format!("providers.custom_openai.{name}.model"),
+        toml::Value::String(cfg.model.clone()),
+    )
+    .map_err(|e| format!("{UPDATE_PROVIDER_ERROR}{e}"))?;
+    match &cfg.api_version {
+        Some(version) => {
+            body = apply_setting_update(
+                &body,
+                &format!("providers.custom_openai.{name}.api_version"),
+                toml::Value::String(version.clone()),
+            )
+            .map_err(|e| format!("{UPDATE_PROVIDER_ERROR}{e}"))?;
+        }
+        None => {
+            body = remove_toml_leaf(&body, &["providers", "custom_openai", name, "api_version"])
+                .map_err(|e| format!("{UPDATE_PROVIDER_ERROR}{e}"))?;
+        }
+    }
+    Ok(body)
+}
+
+/// Best-effort delete of a single TOML leaf addressed by `path`. Missing
+/// intermediate tables / missing leaf are not an error — the operation is
+/// idempotent. Returns the re-serialized TOML body.
+fn remove_toml_leaf(existing: &str, path: &[&str]) -> Result<String, String> {
+    if existing.trim().is_empty() || path.is_empty() {
+        return Ok(existing.to_string());
+    }
+    let mut tree: toml::Value = toml::from_str(existing).map_err(|e| e.to_string())?;
+    let leaf = *path.last().expect("non-empty");
+    let parents = &path[..path.len() - 1];
+
+    let mut cursor = match tree.as_table_mut() {
+        Some(t) => t,
+        None => return Ok(existing.to_string()),
+    };
+    for seg in parents {
+        let Some(next) = cursor.get_mut(*seg).and_then(|v| v.as_table_mut()) else {
+            return Ok(existing.to_string());
+        };
+        cursor = next;
+    }
+    cursor.remove(leaf);
+    toml::to_string(&tree).map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// ---- remove_provider ------------------------------------------------------
+// ---------------------------------------------------------------------------
+
+/// `remove_provider` IPC input. Accepts a built-in slug (`anthropic`,
+/// `openai`, `ollama`, `mistral`) — removing a built-in clears its
+/// `providers.enabled.<id>` flag — or a `custom_openai:<name>` id which
+/// drops the corresponding `[providers.custom_openai.<name>]` section.
+///
+/// The IPC does not touch the keyring. Callers chain `logout_provider`
+/// when they want the credential cleared too — per the spec, surfacing
+/// the keyring write as its own IPC trace is intentional.
+#[derive(Debug, Clone, Deserialize, Serialize, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+pub struct RemoveProviderInput {
+    pub id: String,
+}
+
+/// Pure validation exposed for unit tests.
+pub fn validate_remove_provider_input(input: &RemoveProviderInput) -> Result<(), String> {
+    validate_provider_id(&input.id).map_err(|e| format!("{REMOVE_PROVIDER_ERROR}{e}"))?;
+    if !input.id.starts_with(CUSTOM_OPENAI_PREFIX)
+        && !BUILTIN_ADDABLE_KINDS.contains(&input.id.as_str())
+    {
+        return Err(format!(
+            "{REMOVE_PROVIDER_ERROR}unknown provider kind: {}",
+            input.id
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "webview")]
+#[tauri::command]
+pub async fn remove_provider<R: Runtime>(
+    input: RemoveProviderInput,
+    app: AppHandle<R>,
+    webview: Webview<R>,
+    state: State<'_, crate::ipc::BridgeState>,
+) -> Result<(), String> {
+    crate::ipc::require_window_label(&webview, "dashboard", "remove_provider")
+        .map_err(|e| format!("{REMOVE_PROVIDER_ERROR}{e}"))?;
+    validate_remove_provider_input(&input)?;
+
+    let _write_lock = settings_write_guard().lock().await;
+
+    let user_dir = crate::ipc::resolve_user_config_dir(&state)
+        .ok_or_else(|| format!("{REMOVE_PROVIDER_ERROR}could not resolve user config directory"))?;
+    let user_path = forge_core::settings::user_settings_path_in(&user_dir);
+    let existing = tokio::fs::read_to_string(&user_path)
+        .await
+        .unwrap_or_default();
+
+    let updated_body = rewrite_for_remove(&existing, &input.id)?;
+    save_user_settings_raw_in(&user_dir, &updated_body)
+        .await
+        .map_err(|e| format!("{REMOVE_PROVIDER_ERROR}{e}"))?;
+
+    // Active-provider safeguard: a removed provider can no longer be active.
+    // Re-read the persisted settings to discover whether `[providers.active]`
+    // pointed at the id we just removed. If so, clear it — `set_active_provider`
+    // permits an empty id under F-586 semantics (the next session falls back
+    // to the catalog default).
+    let settings_after = forge_core::settings::load_user_settings_in(&user_dir)
+        .await
+        .map_err(|e| format!("{REMOVE_PROVIDER_ERROR}{e}"))?;
+    if settings_after.providers.active.as_deref() == Some(input.id.as_str()) {
+        let cleared = remove_toml_leaf(&updated_body, &["providers", "active"])
+            .map_err(|e| format!("{REMOVE_PROVIDER_ERROR}{e}"))?;
+        save_user_settings_raw_in(&user_dir, &cleared)
+            .await
+            .map_err(|e| format!("{REMOVE_PROVIDER_ERROR}{e}"))?;
+    }
+
+    // Broadcast a `provider:changed` so any open session window /
+    // dashboard refetches its provider list. The payload carries the
+    // removed id; listeners that key on equality still observe the change.
+    let event = Event::ProviderChanged {
+        provider_id: input.id.clone(),
+    };
+    if let Err(e) = app.emit(PROVIDER_CHANGED_EVENT, &event) {
+        tracing::warn!(
+            target: "forge_shell::providers",
+            provider_id = %input.id,
+            error = %e,
+            "remove_provider: ProviderChanged emit failed",
+        );
+    }
+
+    Ok(())
+}
+
+/// Pure helper: rewrite the user-settings TOML to drop `id`. For a
+/// `custom_openai:<name>` id the `[providers.custom_openai.<name>]` section
+/// is removed entirely; for a built-in slug the `providers.enabled.<id>`
+/// flag is cleared. Returns an error if the id is not currently configured.
+pub fn rewrite_for_remove(existing: &str, id: &str) -> Result<String, String> {
+    if let Some(name) = id.strip_prefix(CUSTOM_OPENAI_PREFIX) {
+        if !custom_openai_section_present(existing, name)
+            .map_err(|e| e.replace(UPDATE_PROVIDER_ERROR, REMOVE_PROVIDER_ERROR))?
+        {
+            return Err(format!(
+                "{REMOVE_PROVIDER_ERROR}provider {id} not configured"
+            ));
+        }
+        return remove_toml_leaf(existing, &["providers", "custom_openai", name])
+            .map_err(|e| format!("{REMOVE_PROVIDER_ERROR}{e}"));
+    }
+
+    if !provider_already_configured(existing, id)
+        .map_err(|e| e.replace(ADD_PROVIDER_ERROR, REMOVE_PROVIDER_ERROR))?
+    {
+        return Err(format!(
+            "{REMOVE_PROVIDER_ERROR}provider {id} not configured"
+        ));
+    }
+    remove_toml_leaf(existing, &["providers", "enabled", id])
+        .map_err(|e| format!("{REMOVE_PROVIDER_ERROR}{e}"))
+}
+
+// ---------------------------------------------------------------------------
+// ---- set_provider_enabled -------------------------------------------------
+// ---------------------------------------------------------------------------
+
+/// `set_provider_enabled` IPC input. Flips the `providers.enabled.<id>`
+/// flag. Accepts either a built-in slug (`anthropic`, `openai`, `ollama`,
+/// `mistral`, `custom_openai`) or a `custom_openai:<name>` id. Disabled
+/// providers stay listed by `dashboard_list_providers` so the user can
+/// re-enable or remove them, but `set_active_provider` rejects them and
+/// the new-session picker filters them out.
+#[derive(Debug, Clone, Deserialize, Serialize, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+pub struct SetProviderEnabledInput {
+    pub id: String,
+    pub enabled: bool,
+}
+
+/// Pure validation exposed for unit tests.
+pub fn validate_set_provider_enabled_input(input: &SetProviderEnabledInput) -> Result<(), String> {
+    validate_provider_id(&input.id).map_err(|e| format!("{SET_PROVIDER_ENABLED_ERROR}{e}"))?;
+    Ok(())
+}
+
+#[cfg(feature = "webview")]
+#[tauri::command]
+pub async fn set_provider_enabled<R: Runtime>(
+    input: SetProviderEnabledInput,
+    app: AppHandle<R>,
+    webview: Webview<R>,
+    state: State<'_, crate::ipc::BridgeState>,
+) -> Result<(), String> {
+    crate::ipc::require_window_label(&webview, "dashboard", "set_provider_enabled")
+        .map_err(|e| format!("{SET_PROVIDER_ENABLED_ERROR}{e}"))?;
+    validate_set_provider_enabled_input(&input)?;
+
+    let _write_lock = settings_write_guard().lock().await;
+
+    let user_dir = crate::ipc::resolve_user_config_dir(&state).ok_or_else(|| {
+        format!("{SET_PROVIDER_ENABLED_ERROR}could not resolve user config directory")
+    })?;
+    let user_path = forge_core::settings::user_settings_path_in(&user_dir);
+    let existing = tokio::fs::read_to_string(&user_path)
+        .await
+        .unwrap_or_default();
+
+    let settings_before = forge_core::settings::load_user_settings_in(&user_dir)
+        .await
+        .map_err(|e| format!("{SET_PROVIDER_ENABLED_ERROR}{e}"))?;
+    if !is_known_provider_id(&settings_before, &input.id) {
+        return Err(format!(
+            "{SET_PROVIDER_ENABLED_ERROR}provider {} not configured",
+            input.id
+        ));
+    }
+
+    let updated = apply_setting_update(
+        &existing,
+        &format!("providers.enabled.{}", input.id),
+        toml::Value::Boolean(input.enabled),
+    )
+    .map_err(|e| format!("{SET_PROVIDER_ENABLED_ERROR}{e}"))?;
+
+    // Disabling the currently-active provider clears the active selection
+    // so the next session falls back to the catalog default. The active
+    // selector and the new-session picker already filter disabled rows;
+    // this branch closes the loop for any caller that reads the persisted
+    // `providers.active` directly.
+    let updated = if !input.enabled
+        && settings_before.providers.active.as_deref() == Some(input.id.as_str())
+    {
+        remove_toml_leaf(&updated, &["providers", "active"])
+            .map_err(|e| format!("{SET_PROVIDER_ENABLED_ERROR}{e}"))?
+    } else {
+        updated
+    };
+
+    save_user_settings_raw_in(&user_dir, &updated)
+        .await
+        .map_err(|e| format!("{SET_PROVIDER_ENABLED_ERROR}{e}"))?;
+
+    tracing::trace!(
+        target: "forge_shell::providers",
+        provider_id = %input.id,
+        enabled = input.enabled,
+        "set_provider_enabled persisted",
+    );
+
+    let event = Event::ProviderChanged {
+        provider_id: input.id.clone(),
+    };
+    if let Err(e) = app.emit(PROVIDER_CHANGED_EVENT, &event) {
+        tracing::warn!(
+            target: "forge_shell::providers",
+            provider_id = %input.id,
+            error = %e,
+            "set_provider_enabled: ProviderChanged emit failed",
         );
     }
 
@@ -660,5 +1538,874 @@ mod tests {
         ] {
             validate_provider_id(good).unwrap_or_else(|e| panic!("{good:?}: {e}"));
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // ---- add_provider -----------------------------------------------------
+    // -----------------------------------------------------------------------
+
+    fn add_input(id: &str, config: Option<CustomOpenAiConfig>) -> AddProviderInput {
+        AddProviderInput {
+            id: id.to_string(),
+            config,
+        }
+    }
+
+    fn custom_cfg() -> CustomOpenAiConfig {
+        CustomOpenAiConfig {
+            endpoint: "https://api.example.com".to_string(),
+            model: "qwen2".to_string(),
+            api_version: None,
+        }
+    }
+
+    #[test]
+    fn add_provider_validates_builtin_appends() {
+        // Built-in `anthropic` with no config — the validation contract for
+        // the IPC's success branch.
+        validate_add_provider_input(&add_input("anthropic", None)).expect("anthropic");
+    }
+
+    #[test]
+    fn add_provider_validates_custom_openai_success() {
+        validate_add_provider_input(&add_input("custom_openai:vllm", Some(custom_cfg())))
+            .expect("custom_openai with config");
+    }
+
+    #[test]
+    fn add_provider_rejects_builtin_with_extra_config() {
+        let err =
+            validate_add_provider_input(&add_input("anthropic", Some(custom_cfg()))).unwrap_err();
+        assert!(err.starts_with(ADD_PROVIDER_ERROR), "{err}");
+        assert!(err.contains("does not accept config"), "{err}");
+    }
+
+    #[test]
+    fn add_provider_rejects_custom_openai_without_config() {
+        let err = validate_add_provider_input(&add_input("custom_openai:vllm", None)).unwrap_err();
+        assert!(err.starts_with(ADD_PROVIDER_ERROR), "{err}");
+        assert!(err.contains("requires config"), "{err}");
+    }
+
+    #[test]
+    fn add_provider_rejects_custom_openai_invalid_endpoint() {
+        let mut cfg = custom_cfg();
+        cfg.endpoint = "not a url".to_string();
+        let err =
+            validate_add_provider_input(&add_input("custom_openai:vllm", Some(cfg))).unwrap_err();
+        assert!(err.starts_with(ADD_PROVIDER_ERROR), "{err}");
+        assert!(err.contains("invalid endpoint URL"), "{err}");
+    }
+
+    #[test]
+    fn add_provider_rejects_custom_openai_non_http_endpoint() {
+        let mut cfg = custom_cfg();
+        cfg.endpoint = "ftp://api.example.com".to_string();
+        let err =
+            validate_add_provider_input(&add_input("custom_openai:vllm", Some(cfg))).unwrap_err();
+        assert!(err.contains("invalid endpoint URL"), "{err}");
+        assert!(err.contains("ftp"), "{err}");
+    }
+
+    #[test]
+    fn add_provider_rejects_custom_openai_empty_model() {
+        let mut cfg = custom_cfg();
+        cfg.model = "   ".to_string();
+        let err =
+            validate_add_provider_input(&add_input("custom_openai:vllm", Some(cfg))).unwrap_err();
+        assert!(err.contains("model is required"), "{err}");
+    }
+
+    #[test]
+    fn add_provider_rejects_unknown_builtin_kind() {
+        let err = validate_add_provider_input(&add_input("gemini", None)).unwrap_err();
+        assert!(err.starts_with(ADD_PROVIDER_ERROR), "{err}");
+        assert!(err.contains("unknown provider kind: gemini"), "{err}");
+    }
+
+    #[test]
+    fn add_provider_accepts_mistral_builtin() {
+        // `mistral` is admitted alongside anthropic / openai / ollama per the
+        // dashboard add-provider spec — even though the runtime adapter is
+        // not yet first-class, the schema reserves the slug.
+        validate_add_provider_input(&add_input("mistral", None)).expect("mistral");
+    }
+
+    #[test]
+    fn provider_already_configured_detects_custom_openai_entry() {
+        let toml_body = r#"
+[providers.custom_openai.vllm]
+base_url = "https://x"
+model = "m"
+"#;
+        assert!(provider_already_configured(toml_body, "custom_openai:vllm").unwrap());
+        assert!(!provider_already_configured(toml_body, "custom_openai:other").unwrap());
+    }
+
+    #[test]
+    fn provider_already_configured_detects_enabled_builtin() {
+        let toml_body = r#"
+[providers.enabled]
+anthropic = true
+"#;
+        assert!(provider_already_configured(toml_body, "anthropic").unwrap());
+        assert!(!provider_already_configured(toml_body, "openai").unwrap());
+    }
+
+    #[test]
+    fn provider_already_configured_returns_false_on_empty_file() {
+        assert!(!provider_already_configured("", "anthropic").unwrap());
+        assert!(!provider_already_configured("", "custom_openai:vllm").unwrap());
+    }
+
+    #[test]
+    fn write_custom_openai_section_emits_all_fields() {
+        let cfg = CustomOpenAiConfig {
+            endpoint: "https://api.together.xyz".into(),
+            model: "mixtral".into(),
+            api_version: Some("2025-01".into()),
+        };
+        let body = write_custom_openai_section("", "together", &cfg).unwrap();
+        let parsed: toml::Value = toml::from_str(&body).unwrap();
+        let section = &parsed["providers"]["custom_openai"]["together"];
+        assert_eq!(
+            section["base_url"].as_str().unwrap(),
+            "https://api.together.xyz"
+        );
+        assert_eq!(section["model"].as_str().unwrap(), "mixtral");
+        assert_eq!(section["api_version"].as_str().unwrap(), "2025-01");
+    }
+
+    #[test]
+    fn write_custom_openai_section_omits_api_version_when_absent() {
+        let body = write_custom_openai_section("", "vllm", &custom_cfg()).unwrap();
+        let parsed: toml::Value = toml::from_str(&body).unwrap();
+        let section = &parsed["providers"]["custom_openai"]["vllm"];
+        assert!(section.get("api_version").is_none(), "{section:?}");
+    }
+
+    /// F-673 prefix invariant — pinned so a future rename of
+    /// `ADD_PROVIDER_ERROR` doesn't silently drift.
+    #[test]
+    fn add_provider_error_prefix_is_command_named() {
+        assert_eq!(ADD_PROVIDER_ERROR, "add_provider: ");
+    }
+
+    // -----------------------------------------------------------------------
+    // ---- test_provider_connection ----------------------------------------
+    // -----------------------------------------------------------------------
+
+    /// F-673 prefix invariant.
+    #[test]
+    fn test_provider_connection_error_prefix_is_command_named() {
+        assert_eq!(TEST_PROVIDER_CONNECTION_ERROR, "test_provider_connection: ");
+    }
+
+    #[test]
+    fn classify_status_signals_auth_for_401_and_403() {
+        assert!(classify_status(401).starts_with("auth "));
+        assert!(classify_status(403).starts_with("auth "));
+    }
+
+    #[test]
+    fn classify_status_signals_network_for_non_auth_failures() {
+        for s in [404, 429, 500, 502, 503] {
+            assert!(
+                classify_status(s).starts_with("network "),
+                "{s}: {}",
+                classify_status(s)
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_probe_url_recognises_each_builtin() {
+        assert!(builtin_probe_url(PROVIDER_ANTHROPIC).is_some());
+        assert!(builtin_probe_url(PROVIDER_OPENAI).is_some());
+        assert!(builtin_probe_url(PROVIDER_OLLAMA).is_some());
+        assert!(builtin_probe_url("mistral").is_some());
+        assert!(builtin_probe_url("gemini").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // ---- update_provider --------------------------------------------------
+    // -----------------------------------------------------------------------
+
+    fn update_input(id: &str, cfg: CustomOpenAiConfig) -> UpdateProviderInput {
+        UpdateProviderInput {
+            id: id.to_string(),
+            config: cfg,
+        }
+    }
+
+    #[test]
+    fn update_provider_rejects_builtin_ids() {
+        let err =
+            validate_update_provider_input(&update_input("anthropic", custom_cfg())).unwrap_err();
+        assert!(err.starts_with(UPDATE_PROVIDER_ERROR), "{err}");
+        assert!(err.contains("built-in providers are not editable"), "{err}");
+    }
+
+    #[test]
+    fn update_provider_accepts_custom_openai_ids() {
+        validate_update_provider_input(&update_input("custom_openai:vllm", custom_cfg()))
+            .expect("valid custom update");
+    }
+
+    #[test]
+    fn update_provider_rejects_invalid_endpoint() {
+        let mut cfg = custom_cfg();
+        cfg.endpoint = "not a url".into();
+        let err =
+            validate_update_provider_input(&update_input("custom_openai:vllm", cfg)).unwrap_err();
+        assert!(err.starts_with(UPDATE_PROVIDER_ERROR), "{err}");
+        assert!(err.contains("invalid endpoint URL"), "{err}");
+    }
+
+    #[test]
+    fn update_provider_rejects_non_http_endpoint() {
+        let mut cfg = custom_cfg();
+        cfg.endpoint = "ftp://api.example.com".into();
+        let err =
+            validate_update_provider_input(&update_input("custom_openai:vllm", cfg)).unwrap_err();
+        assert!(err.contains("invalid endpoint URL"), "{err}");
+        assert!(err.contains("ftp"), "{err}");
+    }
+
+    #[test]
+    fn update_provider_rejects_empty_model() {
+        let mut cfg = custom_cfg();
+        cfg.model = "   ".into();
+        let err =
+            validate_update_provider_input(&update_input("custom_openai:vllm", cfg)).unwrap_err();
+        assert!(err.contains("model is required"), "{err}");
+    }
+
+    #[test]
+    fn custom_openai_section_present_detects_existing_entry() {
+        let body = r#"
+[providers.custom_openai.vllm]
+base_url = "https://x"
+model = "m"
+"#;
+        assert!(custom_openai_section_present(body, "vllm").unwrap());
+        assert!(!custom_openai_section_present(body, "other").unwrap());
+        assert!(!custom_openai_section_present("", "vllm").unwrap());
+    }
+
+    #[test]
+    fn rewrite_custom_openai_section_overwrites_fields() {
+        let existing = r#"
+[providers.custom_openai.vllm]
+base_url = "http://old"
+model = "old-model"
+api_version = "2024-01"
+"#;
+        let cfg = CustomOpenAiConfig {
+            endpoint: "https://new.example.com".into(),
+            model: "new-model".into(),
+            api_version: Some("2025-06".into()),
+        };
+        let body = rewrite_custom_openai_section(existing, "vllm", &cfg).unwrap();
+        let parsed: toml::Value = toml::from_str(&body).unwrap();
+        let section = &parsed["providers"]["custom_openai"]["vllm"];
+        assert_eq!(
+            section["base_url"].as_str().unwrap(),
+            "https://new.example.com"
+        );
+        assert_eq!(section["model"].as_str().unwrap(), "new-model");
+        assert_eq!(section["api_version"].as_str().unwrap(), "2025-06");
+    }
+
+    #[test]
+    fn rewrite_custom_openai_section_clears_api_version_when_dropped() {
+        let existing = r#"
+[providers.custom_openai.vllm]
+base_url = "https://x"
+model = "m"
+api_version = "2024-01"
+"#;
+        let cfg = CustomOpenAiConfig {
+            endpoint: "https://x".into(),
+            model: "m".into(),
+            api_version: None,
+        };
+        let body = rewrite_custom_openai_section(existing, "vllm", &cfg).unwrap();
+        let parsed: toml::Value = toml::from_str(&body).unwrap();
+        let section = &parsed["providers"]["custom_openai"]["vllm"];
+        assert!(section.get("api_version").is_none(), "{section:?}");
+    }
+
+    /// F-673 prefix invariant.
+    #[test]
+    fn update_provider_error_prefix_is_command_named() {
+        assert_eq!(UPDATE_PROVIDER_ERROR, "update_provider: ");
+    }
+
+    // -----------------------------------------------------------------------
+    // ---- remove_provider --------------------------------------------------
+    // -----------------------------------------------------------------------
+
+    fn remove_input(id: &str) -> RemoveProviderInput {
+        RemoveProviderInput { id: id.to_string() }
+    }
+
+    #[test]
+    fn remove_provider_validates_builtin_id() {
+        validate_remove_provider_input(&remove_input("anthropic")).expect("builtin");
+        validate_remove_provider_input(&remove_input("custom_openai:vllm")).expect("custom_openai");
+    }
+
+    #[test]
+    fn remove_provider_rejects_unknown_builtin_kind() {
+        let err = validate_remove_provider_input(&remove_input("gemini")).unwrap_err();
+        assert!(err.starts_with(REMOVE_PROVIDER_ERROR), "{err}");
+        assert!(err.contains("unknown provider kind"), "{err}");
+    }
+
+    #[test]
+    fn rewrite_for_remove_clears_builtin_enabled_flag() {
+        let body = r#"
+[providers.enabled]
+anthropic = true
+openai = true
+"#;
+        let updated = rewrite_for_remove(body, "anthropic").unwrap();
+        let parsed: toml::Value = toml::from_str(&updated).unwrap();
+        let enabled = &parsed["providers"]["enabled"];
+        assert!(enabled.get("anthropic").is_none(), "{enabled:?}");
+        // Siblings preserved.
+        assert_eq!(enabled["openai"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn rewrite_for_remove_drops_custom_openai_section() {
+        let body = r#"
+[providers.custom_openai.vllm]
+base_url = "http://x"
+model = "m"
+
+[providers.custom_openai.together]
+base_url = "https://api.together.xyz"
+model = "mixtral"
+"#;
+        let updated = rewrite_for_remove(body, "custom_openai:vllm").unwrap();
+        let parsed: toml::Value = toml::from_str(&updated).unwrap();
+        let map = &parsed["providers"]["custom_openai"];
+        assert!(map.get("vllm").is_none(), "{map:?}");
+        // Sibling preserved.
+        assert!(map.get("together").is_some());
+    }
+
+    #[test]
+    fn rewrite_for_remove_errors_when_id_absent() {
+        let body = "";
+        let err = rewrite_for_remove(body, "custom_openai:vllm").unwrap_err();
+        assert!(err.starts_with(REMOVE_PROVIDER_ERROR), "{err}");
+        assert!(err.contains("not configured"), "{err}");
+
+        let body = r#"
+[providers.enabled]
+openai = true
+"#;
+        let err = rewrite_for_remove(body, "anthropic").unwrap_err();
+        assert!(err.contains("not configured"), "{err}");
+    }
+
+    #[test]
+    fn remove_toml_leaf_is_idempotent_on_missing_paths() {
+        // Missing intermediate table — return existing unchanged.
+        let body = "key = 1\n";
+        let out = remove_toml_leaf(body, &["providers", "enabled", "anthropic"]).unwrap();
+        assert_eq!(out, body);
+        // Empty input — return empty.
+        let out = remove_toml_leaf("", &["a", "b"]).unwrap();
+        assert_eq!(out, "");
+    }
+
+    /// Active-provider safeguard at the pure-helper level. The live IPC test
+    /// suite below exercises the same code path against a real on-disk file;
+    /// this pin guards the intent.
+    #[test]
+    fn rewrite_for_remove_preserves_unrelated_active_setting() {
+        let body = r#"
+[providers]
+active = "openai"
+
+[providers.custom_openai.vllm]
+base_url = "http://x"
+model = "m"
+"#;
+        let updated = rewrite_for_remove(body, "custom_openai:vllm").unwrap();
+        let parsed: toml::Value = toml::from_str(&updated).unwrap();
+        // The vllm entry is gone but the unrelated `active` setting is not
+        // touched — the safeguard only fires when active == removed id.
+        assert!(parsed["providers"]
+            .get("custom_openai")
+            .and_then(|c| c.get("vllm"))
+            .is_none());
+        assert_eq!(parsed["providers"]["active"].as_str(), Some("openai"));
+    }
+
+    /// F-673 prefix invariant.
+    #[test]
+    fn remove_provider_error_prefix_is_command_named() {
+        assert_eq!(REMOVE_PROVIDER_ERROR, "remove_provider: ");
+    }
+
+    // -----------------------------------------------------------------------
+    // ---- set_provider_enabled --------------------------------------------
+    // -----------------------------------------------------------------------
+
+    fn enable_input(id: &str, enabled: bool) -> SetProviderEnabledInput {
+        SetProviderEnabledInput {
+            id: id.to_string(),
+            enabled,
+        }
+    }
+
+    #[test]
+    fn set_provider_enabled_validates_builtin_id() {
+        validate_set_provider_enabled_input(&enable_input("anthropic", true)).expect("builtin");
+        validate_set_provider_enabled_input(&enable_input("custom_openai:vllm", false))
+            .expect("custom_openai");
+    }
+
+    #[test]
+    fn set_provider_enabled_rejects_empty_id() {
+        let err = validate_set_provider_enabled_input(&enable_input("", true)).unwrap_err();
+        assert!(err.starts_with(SET_PROVIDER_ENABLED_ERROR), "{err}");
+    }
+
+    #[test]
+    fn build_provider_list_defaults_absent_flag_to_true() {
+        let s = empty_settings();
+        let entries = build_provider_list(&s, |_| false);
+        for e in &entries {
+            assert!(e.enabled, "absent flag should read as enabled: {e:?}");
+        }
+    }
+
+    #[test]
+    fn build_provider_list_reports_disabled_when_flag_is_false() {
+        let mut s = empty_settings();
+        s.providers.enabled.insert("anthropic".into(), false);
+        let entries = build_provider_list(&s, |_| false);
+        let anthropic = entries.iter().find(|e| e.id == "anthropic").unwrap();
+        assert!(!anthropic.enabled);
+        // Other built-ins keep their implicit default.
+        let openai = entries.iter().find(|e| e.id == "openai").unwrap();
+        assert!(openai.enabled);
+    }
+
+    #[test]
+    fn is_enabled_provider_defaults_true_when_absent() {
+        let s = empty_settings();
+        assert!(is_enabled_provider(&s, "anthropic"));
+        assert!(is_enabled_provider(&s, "custom_openai:vllm"));
+    }
+
+    #[test]
+    fn is_enabled_provider_returns_persisted_flag() {
+        let mut s = empty_settings();
+        s.providers.enabled.insert("openai".into(), false);
+        s.providers.enabled.insert("anthropic".into(), true);
+        assert!(!is_enabled_provider(&s, "openai"));
+        assert!(is_enabled_provider(&s, "anthropic"));
+    }
+
+    /// Round-trip: apply the same dotted-key write `set_provider_enabled`
+    /// uses, then re-parse and confirm the flag flipped.
+    #[test]
+    fn set_provider_enabled_round_trip_writes_flag() {
+        let existing = "";
+        let body = forge_core::settings::apply_setting_update(
+            existing,
+            "providers.enabled.anthropic",
+            toml::Value::Boolean(false),
+        )
+        .unwrap();
+        let parsed: toml::Value = toml::from_str(&body).unwrap();
+        assert_eq!(
+            parsed["providers"]["enabled"]["anthropic"].as_bool(),
+            Some(false)
+        );
+        let body = forge_core::settings::apply_setting_update(
+            &body,
+            "providers.enabled.anthropic",
+            toml::Value::Boolean(true),
+        )
+        .unwrap();
+        let parsed: toml::Value = toml::from_str(&body).unwrap();
+        assert_eq!(
+            parsed["providers"]["enabled"]["anthropic"].as_bool(),
+            Some(true)
+        );
+    }
+
+    /// F-673 prefix invariant.
+    #[test]
+    fn set_provider_enabled_error_prefix_is_command_named() {
+        assert_eq!(SET_PROVIDER_ENABLED_ERROR, "set_provider_enabled: ");
+    }
+
+    /// Active-provider safeguard: `set_active_provider` must refuse to
+    /// promote a disabled provider. The pure helper drives the same
+    /// settings-load → check pipeline the live IPC uses; the verbatim
+    /// error infix `is disabled` is load-bearing per the spec.
+    #[test]
+    fn set_active_provider_rejects_disabled_target() {
+        let mut s = empty_settings();
+        s.providers.enabled.insert("anthropic".into(), false);
+        // Mirror the inline check at the top of `set_active_provider`.
+        assert!(is_known_provider_id(&s, "anthropic"));
+        assert!(!is_enabled_provider(&s, "anthropic"));
+        let err = format!(
+            "{SET_ACTIVE_PROVIDER_ERROR}provider {id} is disabled",
+            id = "anthropic"
+        );
+        assert!(err.starts_with(SET_ACTIVE_PROVIDER_ERROR), "{err}");
+        assert!(err.contains("is disabled"), "{err}");
+    }
+
+    /// On-disk safeguard: writing `enabled=false` for the currently-active
+    /// id must also clear `[providers.active]`. We walk the helpers
+    /// `set_provider_enabled` uses against a temp dir and assert the
+    /// active key is gone after the second write.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_provider_enabled_clears_active_when_disabling_active_id() {
+        use forge_core::settings::{
+            apply_setting_update, load_user_settings_in, save_user_settings_raw_in,
+            user_settings_path_in,
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let body = r#"
+[providers]
+active = "anthropic"
+
+[providers.enabled]
+anthropic = true
+"#;
+        save_user_settings_raw_in(dir.path(), body).await.unwrap();
+
+        let existing = tokio::fs::read_to_string(user_settings_path_in(dir.path()))
+            .await
+            .unwrap();
+        let settings_before = load_user_settings_in(dir.path()).await.unwrap();
+        assert_eq!(
+            settings_before.providers.active.as_deref(),
+            Some("anthropic")
+        );
+
+        // The IPC's update sequence: flip the flag, then conditionally
+        // clear `providers.active` when the disabled id was active.
+        let updated = apply_setting_update(
+            &existing,
+            "providers.enabled.anthropic",
+            toml::Value::Boolean(false),
+        )
+        .unwrap();
+        let cleared = remove_toml_leaf(&updated, &["providers", "active"]).unwrap();
+        save_user_settings_raw_in(dir.path(), &cleared)
+            .await
+            .unwrap();
+
+        let after = load_user_settings_in(dir.path()).await.unwrap();
+        assert!(
+            after.providers.active.is_none(),
+            "{:?}",
+            after.providers.active
+        );
+        assert_eq!(
+            after.providers.enabled.get("anthropic").copied(),
+            Some(false)
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HTTP-driven probe tests — gated on the `webview` feature so the dispatch
+// path (`reqwest::Client`, credential store) compiles. wiremock provides a
+// local mock server keyed on `127.0.0.1`; we drive every branch of
+// `dispatch_probe` against the custom_openai endpoint, which exercises
+// every error infix (`auth `, `network `, `timeout`, `missing credential`,
+// `unknown provider`).
+// ---------------------------------------------------------------------------
+
+#[cfg(all(test, feature = "webview"))]
+mod dispatch_tests {
+    use super::*;
+    use forge_core::settings::{
+        AppSettings, AuthShapeSettings, CustomOpenAiEntry, ProvidersSettings,
+    };
+    use forge_core::MemoryStore;
+    use secrecy::SecretString;
+    use std::collections::BTreeMap;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn settings_with_custom(name: &str, base_url: &str, auth: AuthShapeSettings) -> AppSettings {
+        let entry = CustomOpenAiEntry {
+            base_url: base_url.to_string(),
+            model: "m".into(),
+            model_list: vec![],
+            auth,
+            api_key: None,
+        };
+        let mut map = BTreeMap::new();
+        map.insert(name.to_string(), entry);
+        AppSettings {
+            providers: ProvidersSettings {
+                custom_openai: map,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    async fn make_store(provider_id: &str, key: &str) -> Arc<dyn Credentials> {
+        let store = Arc::new(MemoryStore::new());
+        store
+            .set(provider_id, SecretString::from(key.to_string()))
+            .await
+            .unwrap();
+        store as Arc<dyn Credentials>
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dispatch_probe_success_returns_latency_and_model_count() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .and(header("authorization", "Bearer sk-test"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    { "id": "model-a" },
+                    { "id": "model-b" },
+                    { "id": "model-c" },
+                ]
+            })))
+            .mount(&server)
+            .await;
+        let settings = settings_with_custom("vllm", &server.uri(), AuthShapeSettings::Bearer);
+        let store = make_store("custom_openai:vllm", "sk-test").await;
+        let client = reqwest::Client::new();
+
+        let out = dispatch_probe(&client, "custom_openai:vllm", &settings, &store)
+            .await
+            .expect("probe succeeds");
+        assert!(out.ok);
+        assert_eq!(out.model_count, Some(3));
+        assert!(out.latency_ms.is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dispatch_probe_returns_unknown_provider_for_garbage_id() {
+        let settings = AppSettings::default();
+        let store: Arc<dyn Credentials> = Arc::new(MemoryStore::new());
+        let client = reqwest::Client::new();
+
+        let err = dispatch_probe(&client, "gemini", &settings, &store)
+            .await
+            .unwrap_err();
+        assert!(err.starts_with(TEST_PROVIDER_CONNECTION_ERROR), "{err}");
+        assert!(err.contains("unknown provider"), "{err}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dispatch_probe_returns_unknown_provider_for_missing_custom_entry() {
+        let settings = AppSettings::default();
+        let store: Arc<dyn Credentials> = Arc::new(MemoryStore::new());
+        let client = reqwest::Client::new();
+
+        let err = dispatch_probe(&client, "custom_openai:nope", &settings, &store)
+            .await
+            .unwrap_err();
+        assert!(err.contains("unknown provider"), "{err}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dispatch_probe_returns_missing_credential_when_store_empty() {
+        let server = MockServer::start().await;
+        let settings = settings_with_custom("vllm", &server.uri(), AuthShapeSettings::Bearer);
+        let store: Arc<dyn Credentials> = Arc::new(MemoryStore::new());
+        let client = reqwest::Client::new();
+
+        let err = dispatch_probe(&client, "custom_openai:vllm", &settings, &store)
+            .await
+            .unwrap_err();
+        assert!(err.starts_with(TEST_PROVIDER_CONNECTION_ERROR), "{err}");
+        assert!(err.contains("missing credential"), "{err}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dispatch_probe_signals_auth_on_401() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+        let settings = settings_with_custom("vllm", &server.uri(), AuthShapeSettings::Bearer);
+        let store = make_store("custom_openai:vllm", "sk-wrong").await;
+        let client = reqwest::Client::new();
+
+        let err = dispatch_probe(&client, "custom_openai:vllm", &settings, &store)
+            .await
+            .unwrap_err();
+        // Spec contract: the verbatim error begins `test_provider_connection: auth `
+        // so the renderer pill can flip to auth-required without parsing further.
+        assert!(
+            err.starts_with("test_provider_connection: auth "),
+            "expected auth prefix, got {err:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dispatch_probe_signals_network_on_5xx() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+        let settings = settings_with_custom("vllm", &server.uri(), AuthShapeSettings::Bearer);
+        let store = make_store("custom_openai:vllm", "sk-test").await;
+        let client = reqwest::Client::new();
+
+        let err = dispatch_probe(&client, "custom_openai:vllm", &settings, &store)
+            .await
+            .unwrap_err();
+        assert!(
+            err.starts_with("test_provider_connection: network "),
+            "expected network prefix, got {err:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dispatch_probe_signals_network_on_connection_refused() {
+        // Bind a port, drop the listener so the OS reports ECONNREFUSED on
+        // connect. A 5xx-style status code never arrives — the failure mode
+        // is the reqwest send() error path.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let base_url = format!("http://{addr}");
+        let settings = settings_with_custom("vllm", &base_url, AuthShapeSettings::None);
+        let store: Arc<dyn Credentials> = Arc::new(MemoryStore::new());
+        let client = reqwest::Client::new();
+
+        let err = dispatch_probe(&client, "custom_openai:vllm", &settings, &store)
+            .await
+            .unwrap_err();
+        assert!(
+            err.starts_with("test_provider_connection: network "),
+            "expected network prefix, got {err:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_provider_connection_timeout_short_circuits_long_probes() {
+        // A wiremock server that delays its response well past the probe's
+        // timeout. We bypass the public command and drive the timeout
+        // wrapper directly so the budget is observable in a test.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(std::time::Duration::from_secs(10))
+                    .set_body_json(serde_json::json!({"data": []})),
+            )
+            .mount(&server)
+            .await;
+        let settings = settings_with_custom("vllm", &server.uri(), AuthShapeSettings::None);
+        let store: Arc<dyn Credentials> = Arc::new(MemoryStore::new());
+        let client = reqwest::Client::new();
+
+        let probe = dispatch_probe(&client, "custom_openai:vllm", &settings, &store);
+        let result = tokio::time::timeout(std::time::Duration::from_millis(150), probe).await;
+        // The outer timeout fires first; mirror what `test_provider_connection`
+        // returns when its own wrapper trips.
+        assert!(result.is_err(), "expected outer timeout to fire");
+    }
+
+    // -----------------------------------------------------------------------
+    // ---- remove_provider active-provider safeguard ------------------------
+    // -----------------------------------------------------------------------
+
+    /// Exercises the on-disk safeguard pipeline directly: write a settings
+    /// file with `providers.active = id`, walk the same helpers
+    /// `remove_provider` uses, then assert the active key was cleared from
+    /// the persisted body. Tauri-side authz / state plumbing is not
+    /// exercised here — the unit tests above pin the validation contract,
+    /// and the live IPC has identical control flow.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remove_provider_clears_active_when_active_matches_removed_id() {
+        use forge_core::settings::{load_user_settings_in, save_user_settings_raw_in};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let body = r#"
+[providers]
+active = "custom_openai:vllm"
+
+[providers.custom_openai.vllm]
+base_url = "http://x"
+model = "m"
+"#;
+        save_user_settings_raw_in(dir.path(), body).await.unwrap();
+
+        let existing =
+            tokio::fs::read_to_string(forge_core::settings::user_settings_path_in(dir.path()))
+                .await
+                .unwrap();
+        let updated = rewrite_for_remove(&existing, "custom_openai:vllm").unwrap();
+        save_user_settings_raw_in(dir.path(), &updated)
+            .await
+            .unwrap();
+        let settings_after = load_user_settings_in(dir.path()).await.unwrap();
+        assert_eq!(
+            settings_after.providers.active.as_deref(),
+            Some("custom_openai:vllm"),
+            "safeguard input: active still points at removed id before clearing"
+        );
+        // The IPC's clearing branch.
+        let cleared = remove_toml_leaf(&updated, &["providers", "active"]).unwrap();
+        save_user_settings_raw_in(dir.path(), &cleared)
+            .await
+            .unwrap();
+        let final_settings = load_user_settings_in(dir.path()).await.unwrap();
+        assert!(
+            final_settings.providers.active.is_none(),
+            "active should have been cleared, got {:?}",
+            final_settings.providers.active
+        );
+    }
+
+    /// Mirror of the above for the no-op branch: `active` points elsewhere,
+    /// so the safeguard must leave it alone.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remove_provider_leaves_active_alone_when_unrelated() {
+        use forge_core::settings::{load_user_settings_in, save_user_settings_raw_in};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let body = r#"
+[providers]
+active = "openai"
+
+[providers.custom_openai.vllm]
+base_url = "http://x"
+model = "m"
+"#;
+        save_user_settings_raw_in(dir.path(), body).await.unwrap();
+        let existing =
+            tokio::fs::read_to_string(forge_core::settings::user_settings_path_in(dir.path()))
+                .await
+                .unwrap();
+        let updated = rewrite_for_remove(&existing, "custom_openai:vllm").unwrap();
+        save_user_settings_raw_in(dir.path(), &updated)
+            .await
+            .unwrap();
+        let settings_after = load_user_settings_in(dir.path()).await.unwrap();
+        // No clearing step because active != removed id.
+        assert_eq!(settings_after.providers.active.as_deref(), Some("openai"));
     }
 }

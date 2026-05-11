@@ -1,0 +1,94 @@
+/* F-733: per-row Enabled toggle on the Providers page.
+ *
+ * Visual matches DESIGN.md §Toggle switch — same 28×16 track / 12px thumb
+ * sibling card uses (EnabledAssetsCard.css). The component lives in its
+ * own class namespace so the Providers page can override spacing without
+ * leaking into the dashboard card.
+ */
+
+.provider-enabled-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-family: var(--font-mono);
+}
+
+.provider-enabled-toggle__state {
+  font-size: var(--type-mono-xxs);
+  letter-spacing: 0.06em;
+  text-transform: lowercase;
+}
+
+.provider-enabled-toggle__state--on {
+  color: var(--color-ember-400);
+}
+
+.provider-enabled-toggle__state--off {
+  color: var(--color-text-tertiary);
+}
+
+.provider-enabled-toggle__switch {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+}
+
+.provider-enabled-toggle__switch[aria-disabled='true'] {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.provider-enabled-toggle__input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.provider-enabled-toggle__track {
+  position: relative;
+  display: inline-block;
+  width: 28px;
+  height: 16px;
+  border-radius: 8px;
+  background: var(--color-border-1);
+  transition: background var(--ease);
+}
+
+.provider-enabled-toggle__thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--color-text-tertiary);
+  transition: left var(--ease), background var(--ease);
+}
+
+.provider-enabled-toggle__input:checked + .provider-enabled-toggle__track {
+  background: var(--color-ember-900);
+}
+
+.provider-enabled-toggle__input:checked + .provider-enabled-toggle__track .provider-enabled-toggle__thumb {
+  left: 14px;
+  background: var(--color-ember-400);
+}
+
+.provider-enabled-toggle__input:focus-visible + .provider-enabled-toggle__track {
+  outline: 2px solid var(--color-ember-300);
+  outline-offset: 2px;
+}
+
+.provider-enabled-toggle__error {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-xxs);
+  color: var(--color-error);
+}

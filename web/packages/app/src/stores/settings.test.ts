@@ -36,7 +36,7 @@ describe('settings store (F-151)', () => {
       seedSettings({
         notifications: { bg_agents: 'both' },
         windows: { session_mode: 'split' },
-        providers: { custom_openai: {} },
+        providers: { enabled: {}, custom_openai: {} },
         catalog: { enabled: {} },
         dashboard: { container_banner_dismissed: false },
         memory: { enabled: {} },
@@ -49,7 +49,7 @@ describe('settings store (F-151)', () => {
       seedSettings({
         notifications: { bg_agents: 'silent' },
         windows: { session_mode: 'split' },
-        providers: { custom_openai: {} },
+        providers: { enabled: {}, custom_openai: {} },
         catalog: { enabled: {} },
         dashboard: { container_banner_dismissed: false },
         memory: { enabled: {} },
@@ -57,7 +57,7 @@ describe('settings store (F-151)', () => {
       seedSettings({
         notifications: { bg_agents: 'os' },
         windows: { session_mode: 'single' },
-        providers: { custom_openai: {} },
+        providers: { enabled: {}, custom_openai: {} },
         catalog: { enabled: {} },
         dashboard: { container_banner_dismissed: false },
         memory: { enabled: {} },

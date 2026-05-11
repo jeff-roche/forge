@@ -4,6 +4,7 @@ import { Dashboard } from './routes/Dashboard';
 import { SessionWindow } from './routes/Session/SessionWindow';
 import { AgentMonitor } from './routes/AgentMonitor';
 import { Catalog } from './routes/Catalog';
+import { ProvidersPage } from './routes/Providers/ProvidersPage';
 import { Usage } from './routes/Usage';
 import { AppShell } from './shell/AppShell';
 
@@ -24,6 +25,9 @@ export const App: Component = () => {
       {/* F-594: Usage view — chart + limits + per-model breakdown over the
           F-593 `usage_summary` IPC. Mounts on the dashboard window. */}
       <Route path="/usage" component={Usage} />
+      {/* F-729: Providers page — full-page editor surface for
+          configured providers. F-730–F-733 fill the per-row actions. */}
+      <Route path="/providers" component={ProvidersPage} />
     </Router>
   );
 };
