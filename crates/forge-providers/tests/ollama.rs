@@ -164,6 +164,72 @@ async fn tool_result_round_trips_into_next_request_body() {
     assert_eq!(parsed, serde_json::json!({"content": "hello world"}));
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn assistant_tool_call_round_trips_as_structured_tool_calls() {
+    // Regression for the PR-896 review finding: a continuation turn that
+    // carries a prior assistant `ChatBlock::ToolCall` must serialize as
+    // Ollama's structured `tool_calls` array on the assistant message,
+    // not as a plaintext `[tool_call:...]` marker the model can't parse.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/chat"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/x-ndjson")
+                .set_body_string(TEXT_ONLY_FIXTURE),
+        )
+        .mount(&server)
+        .await;
+
+    let provider = OllamaProvider::new(server.uri(), "llama3.2");
+    let req = ChatRequest {
+        system: None,
+        messages: vec![
+            ChatMessage {
+                role: ChatRole::User,
+                content: vec![ChatBlock::Text("read hello.txt".into())],
+            },
+            ChatMessage {
+                role: ChatRole::Assistant,
+                content: vec![ChatBlock::ToolCall {
+                    id: "tc-1".into(),
+                    name: "fs.read".into(),
+                    args: serde_json::json!({"path": "hello.txt"}),
+                }],
+            },
+        ],
+        parallel_tool_calls_allowed: false,
+    };
+    let mut stream = provider.chat(req).await.expect("chat ok");
+    while stream.next().await.is_some() {}
+
+    let received = server.received_requests().await.expect("received requests");
+    assert_eq!(received.len(), 1);
+    let body: serde_json::Value = serde_json::from_slice(&received[0].body).expect("json body");
+    let messages = body["messages"].as_array().expect("messages array");
+
+    let assistant_msg = messages
+        .iter()
+        .find(|m| m["role"] == "assistant")
+        .expect("assistant message expected for round-trip");
+    let tcs = assistant_msg["tool_calls"]
+        .as_array()
+        .expect("assistant message must carry a structured tool_calls array");
+    assert_eq!(tcs.len(), 1, "expected exactly one tool_call");
+    assert_eq!(tcs[0]["function"]["name"], "fs.read");
+    assert_eq!(
+        tcs[0]["function"]["arguments"],
+        serde_json::json!({"path": "hello.txt"})
+    );
+
+    // Defensive: the legacy plaintext marker must not appear anywhere.
+    let body_str = serde_json::to_string(&body).unwrap();
+    assert!(
+        !body_str.contains("[tool_call:"),
+        "legacy plaintext tool_call marker leaked into request body: {body_str}"
+    );
+}
+
 /// Manual smoke test against a real local Ollama instance.
 ///
 /// Skipped by default. To run:
