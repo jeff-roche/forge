@@ -1,10 +1,11 @@
 use anyhow::Result;
 use forge_core::Event;
+use forge_providers::ollama::OllamaProvider;
 use forge_providers::MockProvider;
 use forge_session::{
     log_bridge,
     pid_file::OwnedPidFile,
-    provider_spec::{parse_provider_spec, ProviderKind},
+    provider_spec::{resolve_provider_kind, ProviderKind},
     server::{event_log_path, serve_with_session},
     session::Session,
     socket_path::resolve_socket_path,
@@ -17,11 +18,25 @@ async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let auto_approve = args.iter().any(|a| a == "--auto-approve-unsafe");
     let ephemeral = args.iter().any(|a| a == "--ephemeral");
-    let provider_spec = parse_flag(&args, "--provider").or_else(|| {
-        std::env::var("FORGE_PROVIDER")
-            .ok()
-            .filter(|s| !s.is_empty())
-    });
+    let provider_spec = parse_flag(&args, "--provider")
+        .or_else(|| {
+            std::env::var("FORGE_PROVIDER")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
+        // F-743: integration tests across this crate spawn `forged` with
+        // `FORGE_MOCK_SEQUENCE_FILE` pointing at a scripted NDJSON and
+        // previously relied on the implicit Mock fallback. That env var is
+        // never set outside test contexts, so treating its presence as an
+        // explicit `mock` opt-in preserves the existing test surface
+        // without re-introducing a production-path Mock fallback. (The
+        // sequence file is still consumed by `build_mock_provider` below.)
+        .or_else(|| {
+            std::env::var("FORGE_MOCK_SEQUENCE_FILE")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|_| "mock".to_string())
+        });
 
     // Allow the CLI to pre-assign the session ID and socket path so it can
     // print the path before forged starts and can track it for `session kill`.
@@ -113,34 +128,21 @@ async fn main() -> Result<()> {
         .ok()
         .filter(|s| !s.trim().is_empty());
 
-    // Provider selection (F-038):
-    //   1. explicit `--provider <spec>` flag, OR `FORGE_PROVIDER` env, OR
-    //   2. Mock when `FORGE_MOCK_SEQUENCE_FILE` is set, OR
-    //   3. Mock from default path (legacy fallback for ad-hoc runs).
-    // The Provider trait uses `impl Future` (not object-safe), so we cannot
-    // box and dispatch — instead, match here and call `serve_with_session`
-    // with the concrete provider type from each branch.
-    match provider_spec {
-        Some(spec) => match parse_provider_spec(&spec)? {
-            ProviderKind::Mock => {
-                let provider = build_mock_provider().await?;
-                serve_with_session(
-                    &socket_path,
-                    session,
-                    provider,
-                    auto_approve,
-                    ephemeral,
-                    workspace,
-                    Some(session_id),
-                    // F-587: MockProvider is keyless; no credential pull.
-                    None,
-                    // F-601: typed active-agent — `None` here keeps memory off.
-                    active_agent,
-                )
-                .await
-            }
-        },
-        None => {
+    // Provider selection (F-038, F-743):
+    //   1. explicit `--provider <spec>` flag, OR `FORGE_PROVIDER` env.
+    //
+    // F-743: there is no production fallback to `MockProvider` — if neither
+    // flag nor env is set, the resolver returns
+    // `provider_spec_required: ...` and the daemon refuses to start. Tests
+    // that need Mock pass `--provider mock` or `FORGE_PROVIDER=mock`
+    // explicitly.
+    //
+    // The Provider trait uses `impl Future` (not object-safe), so we
+    // cannot box and dispatch — instead, match here and call
+    // `serve_with_session` with the concrete provider type from each
+    // branch.
+    match resolve_provider_kind(provider_spec.as_deref())? {
+        ProviderKind::Mock => {
             let provider = build_mock_provider().await?;
             serve_with_session(
                 &socket_path,
@@ -150,9 +152,25 @@ async fn main() -> Result<()> {
                 ephemeral,
                 workspace,
                 Some(session_id),
-                // F-587: MockProvider is keyless.
+                // F-587: MockProvider is keyless; no credential pull.
                 None,
                 // F-601: typed active-agent — `None` here keeps memory off.
+                active_agent,
+            )
+            .await
+        }
+        ProviderKind::Ollama { base_url, model } => {
+            let provider = Arc::new(OllamaProvider::new(base_url, model));
+            serve_with_session(
+                &socket_path,
+                session,
+                provider,
+                auto_approve,
+                ephemeral,
+                workspace,
+                Some(session_id),
+                // F-743: Ollama is keyless; no credential pull.
+                None,
                 active_agent,
             )
             .await
