@@ -23,15 +23,11 @@ afterEach(() => {
 
 const ENTRY_ORDER = [
   'sessions',
-  'recent',
-  'git',
   'providers',
   'skills',
   'mcp',
   'agents',
-  'containers',
   'usage',
-  'settings',
 ];
 
 function renderAt(path: string, props: Parameters<typeof Sidebar>[0] = {}) {
@@ -53,7 +49,7 @@ describe('Sidebar', () => {
     expect(brand.textContent).toContain('any ai. one editor.');
   });
 
-  it('renders all ten nav entries in spec order', () => {
+  it('renders all nav entries in spec order', () => {
     setInvokeForTesting((async () => undefined) as never);
     const { getAllByTestId } = renderAt('/', { sources: {} });
     const entries = getAllByTestId(/^sidebar-entry-/);
@@ -139,9 +135,7 @@ describe('Sidebar', () => {
   it('omits the badge entirely when no count source is registered for the row', () => {
     setInvokeForTesting((async () => undefined) as never);
     const { queryByTestId } = renderAt('/', { sources: {} });
-    // Settings has no IPC source by design; Git has none today either.
-    expect(queryByTestId('sidebar-badge-settings')).toBeNull();
-    expect(queryByTestId('sidebar-badge-git')).toBeNull();
+    // Usage intentionally omits a badge per spec.
     expect(queryByTestId('sidebar-badge-usage')).toBeNull();
   });
 

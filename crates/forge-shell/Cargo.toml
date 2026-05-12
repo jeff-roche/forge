@@ -75,7 +75,7 @@ url = "2"
 # purely for the outbound Tauri emit path.
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
-tauri = { version = "2", optional = true , features = [] }
+tauri = { version = "2", optional = true , features = ["image-png"] }
 # F-138: `.plugin(tauri_plugin_notification::init())` powers the OS-notification
 # branch of `notifications.bg_agents`. Gated behind `webview` because the plugin
 # pulls the full Tauri runtime; pure-Rust unit tests build without it.
@@ -85,6 +85,17 @@ tauri-plugin-notification = { version = "2", optional = true }
 # branch"). Gated behind `webview` for the same reason as notification — the
 # plugin pulls the full Tauri runtime, and pure-Rust unit tests don't need it.
 tauri-plugin-dialog = { version = "2", optional = true }
+# Bridges this process's `tracing` subscriber output to the webview console
+# in debug builds. Wires next to the notification + dialog plugins under
+# the same `webview` feature gate. Production omits the Webview target so
+# only the file + stderr writers stay active, keeping the cost at "one
+# more dep in the lockfile" for users who never touch dev mode.
+tauri-plugin-log = { version = "2", optional = true }
+# Bridge layer: tracing events → `log::log!` so the plugin's `log`-based
+# capture path sees our `tracing::warn!` / `error!` emissions and forwards
+# them to the webview console via the `Webview` target.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"], optional = true }
+log = { version = "0.4", optional = true }
 tokio = { version = "1", features = ["fs", "net", "io-util", "sync", "time", "rt", "rt-multi-thread", "macros", "process"] }
 # F-151: `set_setting` applies scalar updates against the raw TOML tree of
 # `settings.toml` and round-trips through the canonical serializer to land
@@ -118,7 +129,7 @@ wiremock = "0.6"
 # Disable with `--no-default-features` to run pure-Rust unit tests on a
 # host without WebKitGTK installed.
 default = ["webview"]
-webview = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-notification", "dep:tauri-plugin-dialog"]
+webview = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-notification", "dep:tauri-plugin-dialog", "dep:tauri-plugin-log", "dep:tracing-subscriber", "dep:log"]
 # Opt-in feature that activates Tauri's `test` helpers so integration tests
 # can use `tauri::test::mock_builder`. Implies `webview`. Not on by default
 # so production builds don't pull test scaffolding.

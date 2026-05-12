@@ -11,9 +11,9 @@ Forge follows the [agentskills.io](https://agentskills.io) open standard. A skil
 ## 2. On-disk layout
 
 ```
-<scope_root>/.skills/<skill-id>/SKILL.md
-                                /scripts/    (optional, not loaded by Forge)
-                                /references/ (optional, not loaded by Forge)
+<scope_root>/.agent-skills/<skill-id>/SKILL.md
+                                      /scripts/    (optional, not loaded by Forge)
+                                      /references/ (optional, not loaded by Forge)
 ```
 
 The folder name is the canonical `SkillId`. It must be non-empty, must not contain `/` or `\`, must not start with `.`, and must not contain ASCII whitespace (space, tab, newline). These rules are enforced at parse time — folders that violate them are rejected with a typed error rather than silently mapped to a different id.
@@ -55,13 +55,13 @@ Skills load from two on-disk scopes plus an in-memory session overlay:
 
 | Scope | Path | Mutability |
 |---|---|---|
-| **Workspace** | `<workspace_root>/.skills/<id>/SKILL.md` | Per-project; checked into git by default |
-| **User** | `<user_home>/.skills/<id>/SKILL.md` | Per-user, cross-workspace |
+| **Workspace** | `<workspace_root>/.agent-skills/<id>/SKILL.md` | Per-project; checked into git by default |
+| **User** | `<user_home>/.agent-skills/<id>/SKILL.md` | Per-user, cross-workspace |
 | **Session overlay** | in-memory only | Per-session, applied on top of disk state at session start |
 
-`<user_home>/.skills/` is the universal-standard path described in `docs/architecture/overview.md` §9.2 — *not* `~/.config/forge/skills/`. The intent is that skills written for Forge are also discoverable by any other agentskills.io-compatible tool the user has installed.
+`<user_home>/.agent-skills/` is the universal-standard path described in `docs/architecture/overview.md` §9.2 — *not* `~/.config/forge/skills/`. The intent is that skills written for Forge are also discoverable by any other agentskills.io-compatible tool the user has installed.
 
-> **Discrepancy note.** F-589's spec text reads "workspace (`.forge/skills/`), user (`~/.config/forge/skills/`)". Every other architecture document in the repo (overview.md, persistence.md, core-concepts.md) anchors on `.skills/` and `~/.skills/`, and that's what the agentskills.io standard prescribes. The implementation follows the architecture docs and the standard. If the spec text is later treated as authoritative we will rev the loader, but the standard-aligned path is the preferred convention.
+> **Discrepancy note.** F-589's spec text reads "workspace (`.forge/skills/`), user (`~/.config/forge/skills/`)". Every other architecture document in the repo (overview.md, persistence.md, core-concepts.md) anchors on `.agent-skills/` and `~/.agent-skills/`, and that's what the agentskills.io standard prescribes. The implementation follows the architecture docs and the standard. If the spec text is later treated as authoritative we will rev the loader, but the standard-aligned path is the preferred convention.
 
 ### Precedence
 
@@ -80,7 +80,7 @@ Loader-side errors surface as `forge_agents::Error::Other(anyhow::Error)`. The i
 - **Invalid `SkillId`** (folder name with `/`, `\`, leading `.`, or whitespace) — rejected with a clear message naming the offending folder.
 - **Malformed YAML frontmatter** — the underlying `gray_matter` syntax / type error is wrapped with the offending file path. The skill is not loaded; the entire load aborts with that error so the caller sees the failure rather than a partial roster.
 - **Frontmatter present but un-deserializable** — when the YAML parses but produces a value that doesn't fit the expected shape (e.g. a frontmatter block containing only a comment, which `gray_matter` returns as `Ok` with `data: None`), the loader rejects it explicitly rather than falling back to defaults. Body-only `SKILL.md` files (no `---` block at all) remain valid.
-- **Unreadable directory entry** — a single broken `DirEntry` in `.skills/` (stale NFS, EACCES on one folder) is logged at `warn` and skipped; other skills in the same scope continue to load. This is the one case where the loader is intentionally fault-tolerant.
+- **Unreadable directory entry** — a single broken `DirEntry` in `.agent-skills/` (stale NFS, EACCES on one folder) is logged at `warn` and skipped; other skills in the same scope continue to load. This is the one case where the loader is intentionally fault-tolerant.
 
 All cases emit a `tracing::warn` event under target `forge_agents::skill_loader` so the Agent Monitor can surface them.
 
@@ -144,7 +144,7 @@ forge skill remove planner --scope workspace
 
 | Resolver | Recognized prefixes | Behavior |
 |---|---|---|
-| **Local path** | anything else | Canonicalizes the path, requires `SKILL.md` at the root, parses it, then copies the directory tree into `<scope>/.skills/<id>/`. Side files (`scripts/`, `references/`) come along. |
+| **Local path** | anything else | Canonicalizes the path, requires `SKILL.md` at the root, parses it, then copies the directory tree into `<scope>/.agent-skills/<id>/`. Side files (`scripts/`, `references/`) come along. |
 | **Git** | `https://`, `http://`, `git://`, `ssh://`, `user@host:path` | Shells out to the system `git` binary. Clones to `<cache_root>/<sha256(url)>/`. Cache hits run `git fetch + reset --hard origin/HEAD` so re-installing pulls the latest commit. The repository's root must contain `SKILL.md`. |
 
 The cache root is `~/.cache/forge/skills/`. The cache subdirectory name is the lowercase hex sha256 of the source URL.

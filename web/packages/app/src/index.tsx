@@ -2,6 +2,9 @@
 import { render } from 'solid-js/web';
 import './styles/global.css';
 import { App } from './App';
+import { installDevConsoleErrorListeners } from './lib/devConsoleErrors';
+
+installDevConsoleErrorListeners();
 
 const root = document.getElementById('root');
 if (!root) {

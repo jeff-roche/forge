@@ -8,8 +8,8 @@
 //! `docs/architecture/persistence.md`:
 //!
 //! ```text
-//! <root>/.skills/<name>/SKILL.md     # workspace
-//! <user_home>/.skills/<name>/SKILL.md # user
+//! <root>/.agent-skills/<name>/SKILL.md     # workspace
+//! <user_home>/.agent-skills/<name>/SKILL.md # user
 //! ```
 //!
 //! Loader does not enforce folder side-files (`scripts/`, `references/`);
@@ -28,7 +28,7 @@ use serde::{de::IgnoredAny, Deserialize};
 
 use crate::error::{Error, Result};
 
-/// Filename Forge expects inside each `.skills/<name>/` folder.
+/// Filename Forge expects inside each `.agent-skills/<name>/` folder.
 pub const SKILL_FILENAME: &str = "SKILL.md";
 
 /// YAML frontmatter shape for an agentskills.io `SKILL.md`.
@@ -158,15 +158,15 @@ pub fn parse_skill_file(path: &Path) -> Result<Skill> {
     })
 }
 
-/// Walk `<scope_root>/.skills/<name>/SKILL.md` for every immediate
+/// Walk `<scope_root>/.agent-skills/<name>/SKILL.md` for every immediate
 /// subdirectory and parse each into a [`Skill`].
 ///
 /// `<scope_root>` is the workspace root or the user home directory; the
-/// loader appends `.skills/`. Subdirectories without a `SKILL.md` are
+/// loader appends `.agent-skills/`. Subdirectories without a `SKILL.md` are
 /// skipped silently. Result is sorted by [`SkillId`] for deterministic
 /// output regardless of filesystem readdir order.
 fn load_from_scope(scope_root: &Path) -> Result<Vec<Skill>> {
-    let skills_dir = scope_root.join(".skills");
+    let skills_dir = scope_root.join(".agent-skills");
     if !skills_dir.exists() {
         return Ok(vec![]);
     }
@@ -213,14 +213,14 @@ fn load_from_scope(scope_root: &Path) -> Result<Vec<Skill>> {
     Ok(skills)
 }
 
-/// Load skills from `<workspace_root>/.skills/`, returning an empty vec if
-/// the directory is absent.
+/// Load skills from `<workspace_root>/.agent-skills/`, returning an empty
+/// vec if the directory is absent.
 pub fn load_workspace_skills(workspace_root: &Path) -> Result<Vec<Skill>> {
     load_from_scope(workspace_root)
 }
 
-/// Load skills from `<user_home>/.skills/`, returning an empty vec if the
-/// directory is absent.
+/// Load skills from `<user_home>/.agent-skills/`, returning an empty vec if
+/// the directory is absent.
 pub fn load_user_skills(user_home: &Path) -> Result<Vec<Skill>> {
     load_from_scope(user_home)
 }

@@ -3,10 +3,13 @@
 //! Three commands, all gated on `webview` so non-webview builds compile
 //! without Tauri:
 //!
-//! - [`dashboard_list_providers`] — returns the four built-in provider
-//!   entries (Ollama, Anthropic, OpenAI, Custom OpenAI) plus any
-//!   user-configured `[providers.custom_openai.<name>]` entries, each
-//!   enriched with a credential-presence flag pulled from the shell's
+//! - [`dashboard_list_providers`] — returns one row per provider the user
+//!   has explicitly configured: any built-in (Ollama, Anthropic, OpenAI)
+//!   whose `providers.enabled.<id>` key is present, plus one row per
+//!   `[providers.custom_openai.<name>]` section. A fresh install has no
+//!   providers configured; the Add Provider modal writes the first entry.
+//!   Each row is enriched with a credential-presence flag pulled from the
+//!   shell's
 //!   `Credentials` store. Named with the `dashboard_` prefix to
 //!   disambiguate from F-591's roster catalog `list_providers` (Tauri's
 //!   `generate_handler!` rejects two commands with the same wire name).
@@ -106,12 +109,9 @@ const BUILTIN_PROVIDERS: &[BuiltinDescriptor] = &[
         credential_required: true,
         user_supplied_model: true,
     },
-    BuiltinDescriptor {
-        id: PROVIDER_CUSTOM_OPENAI,
-        display_name: "Custom OpenAI-compat",
-        credential_required: true,
-        user_supplied_model: true,
-    },
+    // `custom_openai` is intentionally absent — it's a kind, not a row.
+    // Concrete OpenAI-spec endpoints render via the `custom_openai:<name>`
+    // loop below; users add new ones through the Add Provider modal.
 ];
 
 /// One row of the `dashboard_list_providers` response — what the dashboard renders
@@ -186,38 +186,41 @@ pub fn build_provider_list(
     settings: &forge_core::settings::AppSettings,
     cred_present: impl Fn(&str) -> bool,
 ) -> Vec<ProviderEntry> {
-    let is_enabled = |id: &str| -> bool {
-        // Absent keys read as `true` so historical configs (pre F-730) that
-        // never wrote `providers.enabled.<id>` keep their built-ins live.
-        settings.providers.enabled.get(id).copied().unwrap_or(true)
-    };
-
+    // A built-in only appears in the list when the user has explicitly
+    // added it — i.e. `providers.enabled.<id>` is present (with any bool
+    // value). Absent means "not configured" and the row is omitted.
+    // Removing a built-in deletes the key, so it stays gone until the
+    // user re-adds it through the Add Provider modal.
     let mut out: Vec<ProviderEntry> = BUILTIN_PROVIDERS
         .iter()
-        .map(|b| ProviderEntry {
-            id: b.id.to_string(),
-            display_name: b.display_name.to_string(),
-            credential_required: b.credential_required,
-            has_credential: if b.credential_required {
-                cred_present(b.id)
-            } else {
-                false
-            },
-            // Built-ins always claim a model is available — the daemon
-            // either ships one (Ollama via env / discovery) or the user
-            // supplies it via the spec / a custom entry.
-            model_available: !b.user_supplied_model,
-            model: None,
-            endpoint: None,
-            api_version: None,
-            enabled: is_enabled(b.id),
+        .filter_map(|b| {
+            let enabled = settings.providers.enabled.get(b.id).copied()?;
+            Some(ProviderEntry {
+                id: b.id.to_string(),
+                display_name: b.display_name.to_string(),
+                credential_required: b.credential_required,
+                has_credential: if b.credential_required {
+                    cred_present(b.id)
+                } else {
+                    false
+                },
+                // Built-ins always claim a model is available — the daemon
+                // either ships one (Ollama via env / discovery) or the user
+                // supplies it via the spec / a custom entry.
+                model_available: !b.user_supplied_model,
+                model: None,
+                endpoint: None,
+                api_version: None,
+                enabled,
+            })
         })
         .collect();
 
-    // User-configured CustomOpenAI entries are reachable both individually
-    // (their credential keyed under `custom_openai:<name>`) and through
-    // the umbrella `custom_openai` builtin. Render each as its own card so
-    // the user can pick one without going through a sub-picker.
+    // User-configured CustomOpenAI entries render as their own rows —
+    // one per `[providers.custom_openai.<name>]` section. Their credential
+    // is keyed under `custom_openai:<name>`. The section's existence is
+    // what makes the entry configured; `providers.enabled.<id>` is just
+    // the on/off toggle (absent = on, the user added but never disabled).
     for (name, entry) in &settings.providers.custom_openai {
         let id = format!("{CUSTOM_OPENAI_PREFIX}{name}");
         let model_available = !entry.model.is_empty();
@@ -236,7 +239,7 @@ pub fn build_provider_list(
             },
             endpoint: Some(entry.base_url.clone()),
             api_version: None,
-            enabled: is_enabled(&id),
+            enabled: is_enabled_provider(settings, &id),
             id,
         });
     }
@@ -244,20 +247,22 @@ pub fn build_provider_list(
     out
 }
 
-/// `true` when `id` is currently enabled per `providers.enabled.<id>`.
-/// Absent keys default to `true` — historical configs that never wrote a
-/// flag keep working. The Providers page toggle is the only writer.
+/// Reads the on/off toggle bool from `providers.enabled.<id>`. Absent
+/// means the user never disabled this provider, so it is reported as on.
+/// This is independent of "configured" — use `is_known_provider_id` to
+/// gate whether the provider actually exists in settings.
 pub fn is_enabled_provider(settings: &forge_core::settings::AppSettings, id: &str) -> bool {
     settings.providers.enabled.get(id).copied().unwrap_or(true)
 }
 
-/// `true` when `id` matches one of the built-in slugs or one of the
-/// user-configured `custom_openai:<name>` entries in `settings`. Pure
-/// helper exposed so `set_active_provider` can validate the id without
-/// going through the credential store.
+/// `true` when `id` is configured in `settings` — either a built-in slug
+/// that the user has added (`providers.enabled.<id>` key present) or a
+/// `custom_openai:<name>` whose section exists. Pure helper exposed so
+/// `set_active_provider` and `set_provider_enabled` can validate the id
+/// without going through the credential store.
 pub fn is_known_provider_id(settings: &forge_core::settings::AppSettings, id: &str) -> bool {
     if BUILTIN_PROVIDERS.iter().any(|b| b.id == id) {
-        return true;
+        return settings.providers.enabled.contains_key(id);
     }
     if let Some(rest) = id.strip_prefix(CUSTOM_OPENAI_PREFIX) {
         return settings.providers.custom_openai.contains_key(rest);
@@ -580,9 +585,11 @@ fn validate_endpoint(raw: &str) -> Result<(), String> {
     }
 }
 
-/// Pure check: `true` when `id` is already configured in `settings` — either
-/// as a built-in flagged enabled in `[providers.enabled]` or as a
-/// `[providers.custom_openai.<name>]` entry. Exposed for unit tests.
+/// Pure check: `true` when `id` is already configured in `settings` —
+/// either as a built-in with a `providers.enabled.<id>` key present (any
+/// bool value: true or false), or as a `[providers.custom_openai.<name>]`
+/// entry. A disabled built-in still counts as configured — the row is
+/// just toggled off, not removed. Exposed for unit tests.
 pub fn provider_already_configured(settings_toml: &str, id: &str) -> Result<bool, String> {
     if let Some(name) = id.strip_prefix(CUSTOM_OPENAI_PREFIX) {
         let tree: toml::Value = if settings_toml.trim().is_empty() {
@@ -605,8 +612,7 @@ pub fn provider_already_configured(settings_toml: &str, id: &str) -> Result<bool
         .get("providers")
         .and_then(|p| p.get("enabled"))
         .and_then(|e| e.get(id))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false))
+        .is_some())
 }
 
 #[cfg(feature = "webview")]
@@ -1173,9 +1179,11 @@ pub async fn remove_provider<R: Runtime>(
 }
 
 /// Pure helper: rewrite the user-settings TOML to drop `id`. For a
-/// `custom_openai:<name>` id the `[providers.custom_openai.<name>]` section
-/// is removed entirely; for a built-in slug the `providers.enabled.<id>`
-/// flag is cleared. Returns an error if the id is not currently configured.
+/// `custom_openai:<name>` id the `[providers.custom_openai.<name>]`
+/// section must exist and is removed entirely. For a built-in slug the
+/// `providers.enabled.<id>` key must be present and is deleted, so the
+/// provider drops off the list until the user re-adds it through the Add
+/// Provider modal. Returns an error if the id is not currently configured.
 pub fn rewrite_for_remove(existing: &str, id: &str) -> Result<String, String> {
     if let Some(name) = id.strip_prefix(CUSTOM_OPENAI_PREFIX) {
         if !custom_openai_section_present(existing, name)
@@ -1318,6 +1326,17 @@ mod tests {
         AppSettings::default()
     }
 
+    /// Returns settings with every built-in marked configured (enabled = true).
+    /// Use whenever a test needs `build_provider_list` to actually emit rows
+    /// for the built-ins — under the new model, absent keys yield no row.
+    fn settings_with_all_builtins_enabled() -> AppSettings {
+        let mut s = AppSettings::default();
+        for id in &[PROVIDER_OLLAMA, PROVIDER_ANTHROPIC, PROVIDER_OPENAI] {
+            s.providers.enabled.insert((*id).to_string(), true);
+        }
+        s
+    }
+
     fn settings_with_custom(name: &str, entry: CustomOpenAiEntry) -> AppSettings {
         let mut entries = BTreeMap::new();
         entries.insert(name.to_string(), entry);
@@ -1331,20 +1350,35 @@ mod tests {
     }
 
     #[test]
-    fn build_provider_list_emits_four_builtins_in_stable_order() {
-        let s = empty_settings();
+    fn build_provider_list_emits_builtins_in_stable_order() {
+        let s = settings_with_all_builtins_enabled();
         let entries = build_provider_list(&s, |_| false);
         let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
         assert_eq!(
             ids,
-            vec!["ollama", "anthropic", "openai", "custom_openai"],
+            vec!["ollama", "anthropic", "openai"],
             "builtin order is the user-facing card order; do not reorder casually"
         );
     }
 
     #[test]
-    fn build_provider_list_marks_ollama_as_keyless() {
+    fn build_provider_list_omits_unconfigured_builtins() {
+        // Fresh install: no `providers.enabled` entries → no rows.
+        // Adding a provider through the Add modal writes the key; only then
+        // does the row appear.
         let s = empty_settings();
+        assert!(build_provider_list(&s, |_| false).is_empty());
+
+        let mut s = empty_settings();
+        s.providers.enabled.insert("anthropic".into(), true);
+        let entries = build_provider_list(&s, |_| false);
+        let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, vec!["anthropic"], "only the added built-in is listed");
+    }
+
+    #[test]
+    fn build_provider_list_marks_ollama_as_keyless() {
+        let s = settings_with_all_builtins_enabled();
         let entries = build_provider_list(&s, |_| false);
         let ollama = entries.iter().find(|e| e.id == "ollama").unwrap();
         assert!(!ollama.credential_required);
@@ -1354,7 +1388,7 @@ mod tests {
 
     #[test]
     fn build_provider_list_marks_anthropic_credential_present_when_store_says_so() {
-        let s = empty_settings();
+        let s = settings_with_all_builtins_enabled();
         let entries = build_provider_list(&s, |id| id == "anthropic");
         let anthropic = entries.iter().find(|e| e.id == "anthropic").unwrap();
         assert!(anthropic.credential_required);
@@ -1364,7 +1398,7 @@ mod tests {
     #[test]
     fn build_provider_list_treats_keyring_failure_as_absent() {
         // Spec: "if the keyring backend is unavailable, treat as `false`".
-        let s = empty_settings();
+        let s = settings_with_all_builtins_enabled();
         let entries = build_provider_list(&s, |_| false);
         for e in &entries {
             if e.credential_required {
@@ -1375,7 +1409,7 @@ mod tests {
 
     #[test]
     fn build_provider_list_appends_custom_openai_entries() {
-        let s = settings_with_custom(
+        let mut s = settings_with_custom(
             "vllm-local",
             CustomOpenAiEntry {
                 base_url: "http://127.0.0.1:8000".into(),
@@ -1385,8 +1419,11 @@ mod tests {
                 api_key: None,
             },
         );
+        for id in &[PROVIDER_OLLAMA, PROVIDER_ANTHROPIC, PROVIDER_OPENAI] {
+            s.providers.enabled.insert((*id).to_string(), true);
+        }
         let entries = build_provider_list(&s, |_| false);
-        assert_eq!(entries.len(), 5);
+        assert_eq!(entries.len(), 4);
         let custom = entries.last().unwrap();
         assert_eq!(custom.id, "custom_openai:vllm-local");
         // `auth = none` ⇒ credential not required.
@@ -1439,10 +1476,29 @@ mod tests {
 
     #[test]
     fn is_known_provider_id_accepts_builtins() {
-        let s = empty_settings();
-        for id in &["ollama", "anthropic", "openai", "custom_openai"] {
+        // Under the "empty by default" model, a built-in is only "known"
+        // once the user has explicitly added it (key present in
+        // `providers.enabled`). Without that, even Anthropic is foreign.
+        let empty = empty_settings();
+        for id in &["ollama", "anthropic", "openai"] {
+            assert!(
+                !is_known_provider_id(&empty, id),
+                "fresh install should treat `{id}` as not yet configured"
+            );
+        }
+
+        let s = settings_with_all_builtins_enabled();
+        for id in &["ollama", "anthropic", "openai"] {
             assert!(is_known_provider_id(&s, id), "expected `{id}` known");
         }
+        // A disabled built-in is still configured (key present, value false).
+        let mut disabled = empty_settings();
+        disabled.providers.enabled.insert("openai".into(), false);
+        assert!(is_known_provider_id(&disabled, "openai"));
+
+        // The bare `custom_openai` umbrella is never a known id — it's a
+        // kind for adding concrete entries, not a row itself.
+        assert!(!is_known_provider_id(&s, "custom_openai"));
     }
 
     #[test]
@@ -1898,9 +1954,29 @@ model = "mixtral"
     }
 
     #[test]
-    fn rewrite_for_remove_errors_when_id_absent() {
+    fn rewrite_for_remove_errors_when_custom_openai_id_absent() {
         let body = "";
         let err = rewrite_for_remove(body, "custom_openai:vllm").unwrap_err();
+        assert!(err.starts_with(REMOVE_PROVIDER_ERROR), "{err}");
+        assert!(err.contains("not configured"), "{err}");
+
+        let body = r#"
+[providers.custom_openai.other]
+base_url = "http://x"
+model = "m"
+"#;
+        let err = rewrite_for_remove(body, "custom_openai:vllm").unwrap_err();
+        assert!(err.contains("not configured"), "{err}");
+    }
+
+    /// Under the "empty by default" model, removal of a built-in whose
+    /// enabled key was never written must fail — there is no listed row to
+    /// remove. Without this gate, the UI would happily "delete" a built-in
+    /// that wasn't there, hiding bugs upstream that try to remove what was
+    /// never added.
+    #[test]
+    fn rewrite_for_remove_errors_when_builtin_flag_absent() {
+        let err = rewrite_for_remove("", "openai").unwrap_err();
         assert!(err.starts_with(REMOVE_PROVIDER_ERROR), "{err}");
         assert!(err.contains("not configured"), "{err}");
 
@@ -1910,6 +1986,25 @@ openai = true
 "#;
         let err = rewrite_for_remove(body, "anthropic").unwrap_err();
         assert!(err.contains("not configured"), "{err}");
+    }
+
+    /// A built-in whose toggle is OFF (key present, value false) is still
+    /// configured; removal must succeed and clear the key entirely so the
+    /// row disappears from the list.
+    #[test]
+    fn rewrite_for_remove_clears_disabled_builtin() {
+        let body = r#"
+[providers.enabled]
+openai = false
+"#;
+        let updated = rewrite_for_remove(body, "openai").unwrap();
+        let parsed: toml::Value = toml::from_str(&updated).unwrap();
+        // The whole `providers.enabled.openai` leaf is gone.
+        let enabled = parsed
+            .get("providers")
+            .and_then(|p| p.get("enabled"))
+            .and_then(|e| e.get("openai"));
+        assert!(enabled.is_none(), "openai key should be cleared: {updated}");
     }
 
     #[test]
@@ -1978,22 +2073,13 @@ model = "m"
     }
 
     #[test]
-    fn build_provider_list_defaults_absent_flag_to_true() {
-        let s = empty_settings();
-        let entries = build_provider_list(&s, |_| false);
-        for e in &entries {
-            assert!(e.enabled, "absent flag should read as enabled: {e:?}");
-        }
-    }
-
-    #[test]
     fn build_provider_list_reports_disabled_when_flag_is_false() {
-        let mut s = empty_settings();
+        let mut s = settings_with_all_builtins_enabled();
         s.providers.enabled.insert("anthropic".into(), false);
         let entries = build_provider_list(&s, |_| false);
         let anthropic = entries.iter().find(|e| e.id == "anthropic").unwrap();
         assert!(!anthropic.enabled);
-        // Other built-ins keep their implicit default.
+        // Other built-ins keep their persisted `true`.
         let openai = entries.iter().find(|e| e.id == "openai").unwrap();
         assert!(openai.enabled);
     }

@@ -11,6 +11,7 @@
   "app": {
     "withGlobalTauri": false,
     "windows": [],
+    "enableGTKAppId": true,
     "security": {
       "csp": "default-src 'self' ipc: http://ipc.localhost; script-src 'self'; style-src-elem 'self'; style-src-attr 'self'; img-src 'self' data: asset: https://asset.localhost; connect-src 'self' ipc: http://ipc.localhost; frame-src 'self'; frame-ancestors 'none'; base-uri 'self'; object-src 'none'"
     }

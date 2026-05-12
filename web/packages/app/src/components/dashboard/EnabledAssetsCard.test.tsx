@@ -259,14 +259,18 @@ describe('<EnabledAssetsCard> (F-724)', () => {
 
   // ---- no-workspace fallback ----
 
-  it('renders the no-workspace empty state when activeWorkspaceRoot is null', async () => {
+  it('renders the no-workspace empty state with an Open workspace CTA when activeWorkspaceRoot is null', async () => {
     setActiveWorkspaceRoot(null);
     setupInvoke();
     const { findByTestId, queryByTestId } = render(() => <EnabledAssetsCard />);
     await flush();
 
     const empty = await findByTestId('enabled-assets-no-workspace');
-    expect(empty.textContent).toBe('No workspace open. Open one to see enabled assets.');
+    // Copy mentions "create" so the user knows the picker supports both
+    // existing folders and creating new ones — single CTA covers both intents.
+    expect(empty.textContent).toContain('No workspace open');
+    expect(empty.textContent).toContain('create a new one');
+    expect(queryByTestId('enabled-assets-open-workspace')).not.toBeNull();
     expect(queryByTestId('enabled-assets-workspace')).toBeNull();
     // No IPCs fire when there's no workspace.
     expect(invokeMock).not.toHaveBeenCalledWith('list_skills', expect.anything());

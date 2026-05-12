@@ -5,7 +5,7 @@ use tempfile::tempdir;
 mod common;
 
 fn write_skill(scope_root: &std::path::Path, id: &str, body: &str) {
-    let dir = scope_root.join(".skills").join(id);
+    let dir = scope_root.join(".agent-skills").join(id);
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("SKILL.md"), body).unwrap();
 }
@@ -62,7 +62,7 @@ fn ignores_unknown_frontmatter_fields() {
 #[test]
 fn skips_folders_without_skill_md() {
     let workspace = tempdir().unwrap();
-    let empty = workspace.path().join(".skills").join("empty");
+    let empty = workspace.path().join(".agent-skills").join("empty");
     fs::create_dir_all(&empty).unwrap();
     write_skill(workspace.path(), "real", "---\nname: Real\n---\nbody");
 
@@ -163,7 +163,7 @@ fn parse_skill_file_directly() {
     write_skill(workspace.path(), "direct", "---\nname: Direct\n---\nbody");
     let path = workspace
         .path()
-        .join(".skills")
+        .join(".agent-skills")
         .join("direct")
         .join("SKILL.md");
 
@@ -299,10 +299,10 @@ fn dir_entry_error_does_not_abort_load() {
     // even when other entries are unusual (a regular file at a position
     // where the loader expected a directory).
     let workspace = tempdir().unwrap();
-    let skills_dir = workspace.path().join(".skills");
+    let skills_dir = workspace.path().join(".agent-skills");
     fs::create_dir_all(&skills_dir).unwrap();
 
-    // Stray regular file in `.skills/` — must not be parsed as a skill.
+    // Stray regular file in `.agent-skills/` — must not be parsed as a skill.
     fs::write(skills_dir.join("not-a-skill.txt"), "stray").unwrap();
     write_skill(workspace.path(), "real", "---\nname: Real\n---\nbody");
 

@@ -25,7 +25,7 @@ pub mod workspaces;
 pub use approvals::{ApprovalConfig, ApprovalEntry};
 pub use credentials::{Credentials, EnvFallbackStore, LayeredStore, MemoryStore};
 pub use error::{ForgeError, Result};
-pub use event::{ApprovalPreview, ApprovalSource, ContextRef, EndReason, Event};
+pub use event::{ApprovalPreview, ApprovalSource, ContextRef, EndReason, Event, LogLineLevel};
 pub use event_log::{read_since, EventLog, MAX_LINE_BYTES};
 pub use event_sink::EventSink;
 pub use ids::{
@@ -33,7 +33,7 @@ pub use ids::{
     WorkspaceId,
 };
 pub use mcp_state::{McpStateEvent, ServerState};
-pub use roster::{McpId, RosterEntry, RosterScope, ScopedRosterEntry};
+pub use roster::{McpId, McpTransport, RosterEntry, RosterScope, RosterTier, ScopedRosterEntry};
 pub use settings::{
     AppSettings, AuthShapeSettings, CustomOpenAiEntry, NotificationMode, NotificationsSettings,
     ProvidersSettings, SessionMode, WindowsSettings,

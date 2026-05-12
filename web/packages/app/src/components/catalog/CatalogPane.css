@@ -293,3 +293,30 @@
   font-size: var(--type-mono-sm);
   color: var(--color-text-secondary);
 }
+
+/* Per-row badge chips. Surface origin (workspace/user), transport
+ * (stdio/http for MCP), and mode (background/foreground for agents)
+ * inline beneath the row name. Tone-driven palette stays inside the
+ * design tokens — no raw hex values. */
+.catalog-row__chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+  margin-top: var(--sp-1);
+}
+
+.catalog-row__chip {
+  display: inline-flex;
+  align-items: center;
+  padding: var(--sp-1) var(--sp-2);
+  border-radius: var(--r-sm);
+  border: 1px solid var(--color-border-2);
+  background: var(--color-surface-3);
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-xxs);
+  line-height: 1;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}

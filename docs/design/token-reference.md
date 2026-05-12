@@ -107,6 +107,7 @@ These tokens should be defined at `:root` and used throughout. Never use raw val
    * Use these in component CSS instead of bare `font-size: Npx`.
    * `--type-mono-xxs` is a 10px Fira Code sub-tier used by dense badge / chip
    * surfaces; not in the documented scale but heavily used and stable. */
+  --type-display-lg: 28px;
   --type-display-md: 22px;
   --type-body-lg: 16px;
   --type-body-md: 14px;

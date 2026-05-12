@@ -128,7 +128,7 @@ fn invoke_err(
 }
 
 fn write_skill(workspace: &std::path::Path, id: &str, name: &str) {
-    let dir = workspace.join(".skills").join(id);
+    let dir = workspace.join(".agent-skills").join(id);
     fs::create_dir_all(&dir).expect("create skill dir");
     let body = format!("---\nname: {name}\n---\n\nbody for {id}\n");
     fs::write(dir.join("SKILL.md"), body).expect("write SKILL.md");

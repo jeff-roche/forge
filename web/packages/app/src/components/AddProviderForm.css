@@ -39,7 +39,37 @@
 }
 
 .add-provider-form__close {
+  /* The `×` text node is hidden via `font-size: 0`; the close glyph is
+   * painted by two `currentColor` bars rotated 45° on ::before/::after.
+   * Pixel-perfect centering regardless of font metrics, and the glyph
+   * picks up hover / disabled color via `currentColor`. */
+  position: relative;
   margin-left: auto;
+  display: inline-flex;
+  width: var(--sp-6);
+  height: var(--sp-6);
+  padding: 0;
+  font-size: 0;
+}
+
+.add-provider-form__close::before,
+.add-provider-form__close::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: var(--sp-3);
+  height: 2px;
+  background: currentColor;
+  border-radius: 1px;
+}
+
+.add-provider-form__close::before {
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+
+.add-provider-form__close::after {
+  transform: translate(-50%, -50%) rotate(-45deg);
 }
 
 .add-provider-form__form {
@@ -75,6 +105,22 @@
   outline: 0;
 }
 
+/* Native <select> ignores CSS `background` on its closed-state chrome
+ * unless `appearance: none` strips the OS look-and-feel. We then redraw
+ * the dropdown chevron via a background SVG and opt the popup into the
+ * dark color scheme so option rows match the form. */
+select.add-provider-form__input {
+  appearance: none;
+  -webkit-appearance: none;
+  color-scheme: dark;
+  padding-right: var(--sp-6);
+  /* Chevron stroke matches `--color-text-secondary` (#8a9aac). Inlined as
+   * a data URI because background-image can't read CSS custom properties. */
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6' fill='none' stroke='%238a9aac' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><path d='M1 1l4 4 4-4'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right var(--sp-3) center;
+}
+
 .add-provider-form__input:hover:not(:disabled) {
   border-color: var(--color-border-2);
 }
@@ -84,7 +130,7 @@
 }
 
 .add-provider-form__input:disabled {
-  background: var(--color-surface-1);
+  background-color: var(--color-surface-1);
   color: var(--color-text-disabled);
   cursor: not-allowed;
 }

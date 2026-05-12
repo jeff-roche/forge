@@ -42,7 +42,35 @@
 }
 
 .attach-session-picker__close {
+  /* See AddProviderForm.css — `×` text hidden, glyph painted via two
+   * rotated pseudo-element bars for pixel-perfect centering. */
+  position: relative;
   margin-left: auto;
+  display: inline-flex;
+  width: var(--sp-6);
+  height: var(--sp-6);
+  padding: 0;
+  font-size: 0;
+}
+
+.attach-session-picker__close::before,
+.attach-session-picker__close::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: var(--sp-3);
+  height: 2px;
+  background: currentColor;
+  border-radius: 1px;
+}
+
+.attach-session-picker__close::before {
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+
+.attach-session-picker__close::after {
+  transform: translate(-50%, -50%) rotate(-45deg);
 }
 
 .attach-session-picker__body {

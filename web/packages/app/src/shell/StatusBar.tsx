@@ -112,9 +112,12 @@ export type ConnectionState =
   | 'ready'
   | 'auth';
 
-/** Subscribe to `provider:changed` Tauri events. */
+/** Subscribe to `provider:changed` Tauri events. The handler receives the
+ * triggering provider id from the payload — listeners that care about the
+ * *new* active provider should re-query `get_active_provider`, since
+ * `remove_provider` emits the removed id, not the new active one. */
 export type ProviderChangedSubscribe = (
-  handler: (providerId: string) => void,
+  handler: (providerId: string) => void | Promise<void>,
 ) => Promise<UnlistenFn>;
 
 const defaultProviderChangedSubscribe: ProviderChangedSubscribe = async (
@@ -123,15 +126,12 @@ const defaultProviderChangedSubscribe: ProviderChangedSubscribe = async (
   listen<{ type: 'provider_changed'; provider_id?: string }>(
     'provider:changed',
     (event) => {
-      const providerId = event.payload?.provider_id;
-      if (typeof providerId === 'string' && providerId.length > 0) {
-        handler(providerId);
-      }
+      const providerId = event.payload?.provider_id ?? '';
+      // Pass the payload id through (even if empty) — handlers decide
+      // whether to act on it directly or refetch the authoritative state.
+      void handler(providerId);
     },
   );
-
-/** Token rendered when a feed has not yielded data. */
-export const UNKNOWN_TOKEN = 'unknown';
 
 // ---------------------------------------------------------------------------
 // Component
@@ -451,8 +451,21 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
       props.subscribeProviderChanged ?? defaultProviderChangedSubscribe;
     void (async () => {
       try {
-        const off = await subscribeProvider((id) => {
-          if (mounted) setProviderId(id);
+        // `provider:changed` fires for set / add / remove. The payload's
+        // `provider_id` carries the *triggering* provider (e.g. the
+        // removed one), not necessarily the new active provider. Re-query
+        // `get_active_provider` instead of trusting the payload so the
+        // segment reflects the authoritative post-change state — and
+        // clears (segment hidden) when removal left no active provider.
+        const off = await subscribeProvider(async () => {
+          if (!mounted) return;
+          try {
+            const id = await getProvider();
+            if (!mounted) return;
+            setProviderId(typeof id === 'string' && id.length > 0 ? id : null);
+          } catch (err) {
+            console.error('get_active_provider after provider:changed failed', err);
+          }
         });
         if (mounted) {
           unlistenProviderChanged = off;
@@ -569,35 +582,36 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
     }
   };
 
-  // F-717: every left/right slot field renders the literal `unknown` token
-  // when its feed has not yielded. `app-shell.md §Status bar` is explicit:
-  // unknown is NOT collapsed, NOT hidden, NOT an em-dash — the token reads
-  // `unknown` so users can audit the missing-feed at a glance.
-  const sessionCountLabel = (): string => {
+  // F-717 follow-up: feeds that haven't yielded (and the stubbed Usage
+  // feed) return `null` — the segment is omitted from the rendered slot
+  // entirely instead of surfacing the literal `unknown` token. The For-
+  // based renderer below intersperses separators only between visible
+  // segments so we don't get dangling `·` glyphs when the first item in
+  // a slot is hidden.
+  const sessionCountLabel = (): string | null => {
     const n = sessionCount();
-    return n === null ? UNKNOWN_TOKEN : `${n} sessions`;
+    return n === null ? null : `${n} sessions`;
   };
-  const providerLabel = (): string => providerId() ?? UNKNOWN_TOKEN;
+  const providerLabel = (): string | null => providerId();
   // F-741: prop override wins so test harnesses can pin the segment; the
   // derived streaming-state otherwise drives the pill from `session:event`.
-  const stateLabel = (): string =>
-    props.connectionState ?? streamingState() ?? UNKNOWN_TOKEN;
-  // F-741: branch comes from the workspace's git `rev-parse HEAD`. Detached
-  // HEAD (`branch: null`) and IPC failures both render the literal token.
-  const branchLabel = (): string => branch() ?? UNKNOWN_TOKEN;
-  // TODO(F-741-followup): wire usage feed (spend + token totals from
-  // forge-usage). Kept stubbed under the same F-741 umbrella — the usage
-  // store is its own follow-up because the segment depends on a daemon
-  // running, not just the dashboard probe.
-  const usageLabel = (): string => UNKNOWN_TOKEN;
+  const stateLabel = (): string | null =>
+    props.connectionState ?? streamingState() ?? null;
+  // F-741: branch comes from the workspace's git `rev-parse HEAD`.
+  // Detached HEAD (`branch: null`) and IPC failures both hide the segment.
+  const branchLabel = (): string | null => branch();
+  // TODO(F-741-followup): wire the usage feed (spend + token totals from
+  // forge-usage). Until then the segment is hidden. Once the store lands,
+  // return `null` only when the feed truly has no data — non-null values
+  // surface the segment automatically.
+  const usageLabel = (): string | null => null;
   // F-741: runtime status from the existing `detect_container_runtime`
-  // probe. `available` renders the tool name + check; every other
-  // variant carries a `tool` field (Missing / Broken / RootlessUnavailable)
-  // and surfaces it with a `down` suffix; `Unknown` and pre-probe both
-  // collapse to the literal token.
-  const runtimeLabel = (): string => {
+  // probe. `available` renders the tool name + check; Missing / Broken /
+  // RootlessUnavailable surface their `tool` with a `down` suffix;
+  // `Unknown` and pre-probe both hide the segment.
+  const runtimeLabel = (): string | null => {
     const status = runtimeStatus();
-    if (status === null) return UNKNOWN_TOKEN;
+    if (status === null) return null;
     switch (status.kind) {
       case 'available':
         // Phase 3 only ships the podman backend; the runtime probe does
@@ -609,64 +623,143 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
       case 'rootless_unavailable':
         return `${status.tool} down`;
       case 'unknown':
-        return UNKNOWN_TOKEN;
+        return null;
     }
+  };
+
+  interface SegmentDef {
+    id: string;
+    label: string;
+    title: string;
+    /** Optional modifier class appended to `status-bar__segment`. */
+    modClass?: string;
+    /** Optional `data-state` attribute (set on the state pill only). */
+    state?: string;
+    /** Optional `data-testid` for fine-grained queries. */
+    testid?: string;
+  }
+
+  const leftSegments = (): SegmentDef[] => {
+    const out: SegmentDef[] = [
+      {
+        id: 'brand',
+        label: 'forge',
+        title: 'Forge — workspace shell',
+        modClass: 'status-bar__brand',
+      },
+    ];
+    const branchValue = branchLabel();
+    if (branchValue !== null) {
+      out.push({
+        id: 'branch',
+        label: branchValue,
+        title: `Git branch · ${branchValue}`,
+        testid: 'status-bar-branch',
+      });
+    }
+    const sessionsValue = sessionCountLabel();
+    if (sessionsValue !== null) {
+      out.push({
+        id: 'sessions',
+        label: sessionsValue,
+        title: `Active sessions in this workspace · ${sessionsValue}`,
+        testid: 'status-bar-sessions',
+      });
+    }
+    const providerValue = providerLabel();
+    if (providerValue !== null) {
+      out.push({
+        id: 'provider',
+        label: providerValue,
+        title: `Active AI provider · ${providerValue}`,
+        testid: 'status-bar-provider',
+      });
+    }
+    const stateValue = stateLabel();
+    if (stateValue !== null) {
+      out.push({
+        id: 'state',
+        label: stateValue,
+        title: `Session state · ${stateValue}`,
+        modClass: 'status-bar__state',
+        state: stateValue,
+        testid: 'status-bar-state',
+      });
+    }
+    return out;
+  };
+
+  const rightSegments = (): SegmentDef[] => {
+    const out: SegmentDef[] = [];
+    const usageValue = usageLabel();
+    if (usageValue !== null) {
+      out.push({
+        id: 'usage',
+        label: usageValue,
+        title: `Provider usage this period — tokens in/out and estimated cost · ${usageValue}`,
+        testid: 'status-bar-usage',
+      });
+    }
+    const runtimeValue = runtimeLabel();
+    if (runtimeValue !== null) {
+      out.push({
+        id: 'runtime',
+        label: runtimeValue,
+        title: `Container runtime (Level-2 sandbox) · ${runtimeValue}`,
+        testid: 'status-bar-runtime',
+      });
+    }
+    return out;
   };
 
   return (
     <footer class="status-bar" aria-label="Status bar" data-testid="status-bar">
       <div class="status-bar__left" data-testid="status-bar-left">
-        <span class="status-bar__segment status-bar__brand">forge</span>
-        <Separator />
-        <span
-          class="status-bar__segment"
-          data-testid="status-bar-branch"
-        >
-          {branchLabel()}
-        </span>
-        <Separator />
-        <span
-          class="status-bar__segment"
-          data-testid="status-bar-sessions"
-        >
-          {sessionCountLabel()}
-        </span>
-        <Separator />
-        <span
-          class="status-bar__segment"
-          data-testid="status-bar-provider"
-        >
-          {providerLabel()}
-        </span>
-        <Separator />
-        <span
-          class="status-bar__segment status-bar__state"
-          data-state={stateLabel()}
-          data-testid="status-bar-state"
-        >
-          {stateLabel()}
-        </span>
+        <For each={leftSegments()}>
+          {(seg, i) => (
+            <>
+              <Show when={i() > 0}>
+                <Separator />
+              </Show>
+              <span
+                class={`status-bar__segment${seg.modClass ? ` ${seg.modClass}` : ''}`}
+                data-testid={seg.testid}
+                data-state={seg.state}
+                title={seg.title}
+              >
+                {seg.label}
+              </span>
+            </>
+          )}
+        </For>
       </div>
       <div class="status-bar__right" data-testid="status-bar-right">
-        <span
-          class="status-bar__segment"
-          data-testid="status-bar-usage"
-        >
-          {usageLabel()}
-        </span>
-        <Separator />
-        <span
-          class="status-bar__segment"
-          data-testid="status-bar-runtime"
-        >
-          {runtimeLabel()}
-        </span>
+        <For each={rightSegments()}>
+          {(seg, i) => (
+            <>
+              <Show when={i() > 0}>
+                <Separator />
+              </Show>
+              <span
+                class={`status-bar__segment${seg.modClass ? ` ${seg.modClass}` : ''}`}
+                data-testid={seg.testid}
+                data-state={seg.state}
+                title={seg.title}
+              >
+                {seg.label}
+              </span>
+            </>
+          )}
+        </For>
         <Show when={badgeCount() > 0}>
           <button
             type="button"
             class="status-bar__bg-badge"
             data-testid="bg-agents-badge"
             aria-label={`${badgeCount()} background agents`}
+            title={`${badgeCount()} background ${
+              badgeCount() === 1 ? 'agent' : 'agents'
+            } running — click to manage`}
             aria-haspopup="menu"
             aria-expanded={popoverOpen()}
             onClick={togglePopover}

@@ -70,15 +70,15 @@ Forge uses the filesystem for everything persistent. No SQLite, no embedded DB.
   workspaces.toml          # known-workspaces registry
   credentials.toml         # keychain references (actual secrets in OS keychain)
 
-~/.agents/<name>.md        # user-global agent definitions
-~/.skills/<name>/SKILL.md  # user-global skills (agentskills.io format)
-~/.mcp.json                # user-global MCP servers (universal standard)
+~/.agents/<name>.md              # user-global agent definitions
+~/.agent-skills/<name>/SKILL.md  # user-global skills (agentskills.io format)
+~/.mcp.json                      # user-global MCP servers (universal standard)
 
 <workspace>/
-  AGENTS.md                # shared workspace instructions (cross-tool convention)
-  .mcp.json                # workspace MCP servers (universal standard)
-  .agents/<name>.md        # workspace agent definitions
-  .skills/<name>/SKILL.md  # workspace skills
+  AGENTS.md                      # shared workspace instructions (cross-tool convention)
+  .mcp.json                      # workspace MCP servers (universal standard)
+  .agents/<name>.md              # workspace agent definitions
+  .agent-skills/<name>/SKILL.md  # workspace skills
   .forge/                  # internal cache, self-gitignored
     sessions/<id>/
       meta.toml            # session metadata (id, agent, persistence, timestamps)
@@ -129,7 +129,7 @@ Forge reads the conventions of the ecosystem it drops into. No `forge.json`. No 
 | `AGENTS.md` | Shared workspace instructions auto-injected into every agent's system prompt | Cross-tool convention (Claude Code, Cursor, Aider) |
 | `.mcp.json` | MCP server declarations, `mcpServers` schema | Proposed universal standard (MCP repo discussion #2218) |
 | `.agents/<name>.md` | Agent definitions, YAML frontmatter + prose | Tool-neutral location |
-| `.skills/<name>/SKILL.md` | Skills, folder-per-skill | [agentskills.io](https://agentskills.io) open standard |
+| `.agent-skills/<name>/SKILL.md` | Skills, folder-per-skill | [agentskills.io](https://agentskills.io) open standard |
 | `.editorconfig`, `.gitignore` | Already respected | Industry standards |
 | `Makefile`, `justfile` | Surfaced in command palette | Industry standards |
 
@@ -139,13 +139,13 @@ Forge reads the conventions of the ecosystem it drops into. No `forge.json`. No 
 |---|---|
 | `~/.mcp.json` | User-global MCP servers |
 | `~/.agents/<name>.md` | User-global agent definitions |
-| `~/.skills/<name>/SKILL.md` | User-global skills |
+| `~/.agent-skills/<name>/SKILL.md` | User-global skills |
 | `~/.config/forge/config.toml` | Forge settings (window mode, notifications, keybinds, etc.) |
 | `~/.config/forge/workspaces.toml` | Known-workspaces registry |
 | `~/.config/forge/credentials.toml` | Keychain references only |
 | `~/.config/forge/memory/<agent>.md` | Opt-in cross-session memory (§10.5) |
 
-The tool-neutral `~/.agents/`, `~/.skills/`, `~/.mcp.json` paths follow the universal-standard proposal and make configuration portable to other agent tools that adopt the same paths. `~/.config/forge/` holds only things that are genuinely Forge-specific.
+The tool-neutral `~/.agents/`, `~/.agent-skills/`, `~/.mcp.json` paths follow the universal-standard proposal and make configuration portable to other agent tools that adopt the same paths. `~/.config/forge/` holds only things that are genuinely Forge-specific.
 
 ### 9.3 `.forge/` is never user-authored
 

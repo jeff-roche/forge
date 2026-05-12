@@ -6,6 +6,46 @@ import { hasCredential } from '../../ipc/credentials';
 import { heroSentence, type HeroState } from './heroSentence';
 import './DashboardHero.css';
 
+/** Adjectives sampled into the hero headline — broad enough that repeat
+ * dashboard visits within a session feel fresh rather than canned. */
+export const FORGE_ADJECTIVES = [
+  'awesome',
+  'remarkable',
+  'inspiring',
+  'legendary',
+  'unique',
+  'creative',
+  'bold',
+  'brilliant',
+  'ambitious',
+  'original',
+  'powerful',
+  'elegant',
+  'daring',
+  'fearless',
+  'visionary',
+  'timeless',
+  'relentless',
+  'ingenious',
+  'radical',
+  'audacious',
+  'masterful',
+  'unstoppable',
+  'pioneering',
+  'fierce',
+  'profound',
+  'iconic',
+  'spectacular',
+  'extraordinary',
+  'magnificent',
+  'exceptional',
+] as const;
+
+export function pickForgeAdjective(): string {
+  const idx = Math.floor(Math.random() * FORGE_ADJECTIVES.length);
+  return FORGE_ADJECTIVES[idx];
+}
+
 export interface DashboardHeroProps {
   /** Click handler for the `Attach to session` ghost CTA. F-727 wires the picker. */
   onAttach?: () => void;
@@ -57,6 +97,9 @@ async function loadHeroState(): Promise<HeroState> {
  */
 export const DashboardHero: Component<DashboardHeroProps> = (props) => {
   const [heroState] = createResource(loadHeroState);
+  // Picked once per mount so the headline stays stable while the user is
+  // on the dashboard but rotates on next visit.
+  const adjective = pickForgeAdjective();
 
   const onAttach = (): void => {
     // TODO(F-727): open the attach picker.
@@ -80,7 +123,7 @@ export const DashboardHero: Component<DashboardHeroProps> = (props) => {
         <h1 class="dashboard-hero__headline">
           Welcome back.
           <br />
-          <em>Forge</em> something.
+          <em>Forge</em> something {adjective}.
         </h1>
         <p class="dashboard-hero__status">{sentence()}</p>
       </div>

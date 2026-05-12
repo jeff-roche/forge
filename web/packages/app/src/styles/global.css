@@ -13,3 +13,10 @@ body {
 #root {
   min-height: 100vh;
 }
+
+/* Native `<select>` elements default to the arrow cursor on most platforms;
+ * override globally so the dropdown affordance reads as a clickable
+ * control, matching every other interactive surface in the app. */
+select:not(:disabled) {
+  cursor: pointer;
+}

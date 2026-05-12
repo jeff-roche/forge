@@ -17,8 +17,11 @@
 //   save-failed   verbatim daemon error rendered with role="alert"; form
 //                 re-enabled, state preserved so the operator can correct
 //
-// Credential entry is intentionally out of scope here — the spec routes it
-// through `login_provider` separately. F-731's update flow chains the two.
+// Credentials: for credentialed kinds (anthropic / openai / mistral /
+// custom_openai) the form also collects an API key and chains a
+// `login_provider` call after `add_provider`/`update_provider` succeeds.
+// Ollama is keyless and the field is hidden. In edit mode the field is
+// optional — blank leaves the existing credential untouched.
 
 import {
   type Component,
@@ -37,6 +40,7 @@ import type {
   UpdateProviderInput,
 } from '@forge/ipc';
 import { invoke } from '../lib/tauri';
+import { loginProvider } from '../ipc/credentials';
 import { useFocusTrap } from '../lib/useFocusTrap';
 import type { ProviderEntry } from '../ipc/dashboard';
 import './AddProviderForm.css';
@@ -50,6 +54,15 @@ type Kind = BuiltinKind | 'custom_openai';
 const BUILTIN_KINDS: BuiltinKind[] = ['anthropic', 'openai', 'ollama', 'mistral'];
 const KINDS: Kind[] = [...BUILTIN_KINDS, 'custom_openai'];
 const CUSTOM_NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
+
+/** Kinds that require an API key — everything except Ollama, which runs
+ * keyless on a local endpoint. */
+const CREDENTIALED_KINDS: ReadonlySet<Kind> = new Set<Kind>([
+  'anthropic',
+  'openai',
+  'mistral',
+  'custom_openai',
+]);
 
 /**
  * Pre-fill payload for `mode = "edit"`. Only `custom_openai:<name>` entries
@@ -80,6 +93,7 @@ interface FieldErrors {
   name?: string;
   endpoint?: string;
   model?: string;
+  apiKey?: string;
 }
 
 const CUSTOM_PREFIX = 'custom_openai:';
@@ -94,11 +108,13 @@ export const AddProviderForm: Component<AddProviderFormProps> = (props) => {
   const [endpoint, setEndpoint] = createSignal('');
   const [model, setModel] = createSignal('');
   const [apiVersion, setApiVersion] = createSignal('');
+  const [apiKey, setApiKey] = createSignal('');
 
   const mode = (): FormMode => props.mode ?? 'add';
   const isEdit = (): boolean => mode() === 'edit';
   const isCustom = (): boolean => kind() === 'custom_openai';
   const isBusy = (): boolean => state() === 'saving';
+  const needsCredential = (): boolean => CREDENTIALED_KINDS.has(kind());
 
   // Reset on reopen so a previous attempt's state doesn't bleed into the
   // next time the modal opens. In edit mode, seed every field from
@@ -116,12 +132,14 @@ export const AddProviderForm: Component<AddProviderFormProps> = (props) => {
       setEndpoint(iv.endpoint);
       setModel(iv.model);
       setApiVersion(iv.api_version ?? '');
+      setApiKey('');
     } else {
       setKind('anthropic');
       setName('');
       setEndpoint('');
       setModel('');
       setApiVersion('');
+      setApiKey('');
     }
   });
 
@@ -157,6 +175,12 @@ export const AddProviderForm: Component<AddProviderFormProps> = (props) => {
       if (model().trim() === '') {
         errs.model = 'Model is required';
       }
+    }
+    // API key is required when adding a credentialed provider. In edit
+    // mode it's optional — blank means "leave the existing credential
+    // untouched"; a value means "overwrite".
+    if (!isEdit() && needsCredential() && apiKey().trim() === '') {
+      errs.apiKey = 'API key is required';
     }
     return errs;
   };
@@ -201,6 +225,18 @@ export const AddProviderForm: Component<AddProviderFormProps> = (props) => {
       const entry = isEdit()
         ? await invoke<ProviderEntry>('update_provider', { input: buildUpdateInput() })
         : await invoke<ProviderEntry>('add_provider', { input: buildAddInput() });
+      // For credentialed kinds, persist the API key after the provider
+      // is registered. Skip when blank in edit mode (= "leave existing
+      // credential alone"). A failure here keeps the registered provider
+      // — the user can retry credential entry from the Credentials
+      // section without re-adding.
+      const trimmedKey = apiKey().trim();
+      if (needsCredential() && trimmedKey !== '') {
+        await loginProvider(entry.id, trimmedKey);
+        // Clear the key from local state immediately per the
+        // credentials.ts "never reveal stored value" contract.
+        setApiKey('');
+      }
       props.onAdded?.(entry);
       props.onClose();
     } catch (err: unknown) {
@@ -253,7 +289,6 @@ export const AddProviderForm: Component<AddProviderFormProps> = (props) => {
             </h2>
             <Button
               variant="ghost"
-              size="sm"
               type="button"
               class="add-provider-form__close"
               data-testid="add-provider-close"
@@ -363,6 +398,38 @@ export const AddProviderForm: Component<AddProviderFormProps> = (props) => {
                   spellcheck={false}
                   onInput={(e) => setApiVersion(e.currentTarget.value)}
                 />
+              </label>
+            </Show>
+
+            <Show when={needsCredential()}>
+              <label class="add-provider-form__field">
+                <span class="add-provider-form__label">
+                  API KEY{isEdit() ? ' (leave blank to keep existing)' : ''}
+                </span>
+                <input
+                  type="password"
+                  class="add-provider-form__input"
+                  data-testid="add-provider-api-key"
+                  value={apiKey()}
+                  disabled={isBusy()}
+                  autocomplete="off"
+                  spellcheck={false}
+                  placeholder="sk-..."
+                  onInput={(e) => setApiKey(e.currentTarget.value)}
+                />
+                <Show when={fieldErrors().apiKey}>
+                  {(msg) => (
+                    <span
+                      class="add-provider-form__field-error"
+                      data-testid="add-provider-api-key-error"
+                    >
+                      {msg()}
+                    </span>
+                  )}
+                </Show>
+                <span class="add-provider-form__hint">
+                  Stored in the OS keychain via login_provider; never written to disk.
+                </span>
               </label>
             </Show>
 

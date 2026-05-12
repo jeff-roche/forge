@@ -23,7 +23,7 @@ use ts_rs::TS;
 ///
 /// Validated to be a non-empty string with no path separators (`/` or `\`)
 /// and no leading dot. Skills are user-named (the parent folder name in
-/// `.skills/<name>/SKILL.md`), unlike random-hex IDs in [`crate::ids`].
+/// `.agent-skills/<name>/SKILL.md`), unlike random-hex IDs in [`crate::ids`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 #[ts(
     export,
@@ -50,7 +50,7 @@ impl SkillId {
     ///
     /// Rejects empty strings, ids containing `/` or `\`, ids starting with
     /// `.`, and ids containing any ASCII whitespace. These constraints
-    /// exist because the id is the directory name on disk under `.skills/` —
+    /// exist because the id is the directory name on disk under `.agent-skills/` —
     /// accepting any of the rejected forms would let a hostile or careless
     /// skill folder traverse out of the scope root, or render confusingly
     /// in CLI/UI surfaces (a trailing space is invisible at a glance).
@@ -99,7 +99,7 @@ impl From<SkillId> for String {
 /// Parsed shape of one `SKILL.md` file.
 ///
 /// `id` is the parent directory name (e.g. `forge-milestone-planner` for
-/// `.skills/forge-milestone-planner/SKILL.md`). `prompt` carries the
+/// `.agent-skills/forge-milestone-planner/SKILL.md`). `prompt` carries the
 /// markdown body with the YAML frontmatter stripped. `tools` is an optional
 /// list of tool-binding hints surfaced from frontmatter; the loader does
 /// not enforce their meaning — agents that consume the skill decide.

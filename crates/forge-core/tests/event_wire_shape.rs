@@ -562,6 +562,28 @@ fn background_agent_completed_wire_shape() {
 }
 
 #[test]
+fn log_line_wire_shape() {
+    // Dev-mode bridge from the daemon's `tracing` subscriber to the
+    // webview console. `level` is the lowercase `tracing::Level` so the
+    // TS adapter can drop it directly into a `console[level]` call.
+    assert_wire_eq(
+        Event::LogLine {
+            at: fixed_time(),
+            level: forge_core::LogLineLevel::Warn,
+            target: "forge_session::compaction".into(),
+            message: "compaction skipped: window already at headroom".into(),
+        },
+        json!({
+            "type": "log_line",
+            "at": "2026-04-18T10:00:00Z",
+            "level": "warn",
+            "target": "forge_session::compaction",
+            "message": "compaction skipped: window already at headroom",
+        }),
+    );
+}
+
+#[test]
 fn usage_tick_wire_shape() {
     // F-155: per-provider token / cost accounting — feeds the usage HUD.
     // F-605: every live tick now carries the originating `session_id` so
@@ -1058,6 +1080,7 @@ fn variant_label(e: &Event) -> &'static str {
         Event::SessionPaused { .. } => "session_paused",
         Event::SessionResumed { .. } => "session_resumed",
         Event::SessionInterrupted { .. } => "session_interrupted",
+        Event::LogLine { .. } => "log_line",
     }
 }
 

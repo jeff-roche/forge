@@ -1,4 +1,5 @@
-import { type Component, createResource, createSignal, For, Show } from 'solid-js';
+import { type Component, createResource, createSignal, For, onMount, Show } from 'solid-js';
+import { useSearchParams } from '@solidjs/router';
 import { Button, Skeleton, StatusPill } from '@forge/design';
 import { listProviders, type ProviderEntry } from '../../ipc/dashboard';
 import { AddProviderForm } from '../../components/AddProviderForm';
@@ -24,6 +25,17 @@ const CUSTOM_PROVIDER_PREFIX = 'custom_openai:';
  */
 export const ProvidersPage: Component = () => {
   const [providers, { refetch }] = createResource<ProviderEntry[]>(listProviders);
+  // F-737 follow-up: the Dashboard's "+ Add provider" CTA routes here with
+  // `?add=1` so landing the user on this page also pops the modal. The
+  // param is cleared on mount so a refresh doesn't reopen the dialog.
+  const [searchParams, setSearchParams] = useSearchParams<{ add?: string }>();
+  const [addOpen, setAddOpen] = createSignal(false);
+  onMount(() => {
+    if (searchParams.add === '1') {
+      setAddOpen(true);
+      setSearchParams({ add: undefined }, { replace: true });
+    }
+  });
 
   const errorDetail = (): string | null => {
     const err = providers.error;
@@ -35,7 +47,15 @@ export const ProvidersPage: Component = () => {
     <main class="providers-page">
       <header class="providers-page__head">
         <h1 class="providers-page__title">Providers</h1>
-        <AddProviderButton onAdded={() => void refetch()} />
+        <AddProviderButton
+          open={addOpen()}
+          onOpen={() => setAddOpen(true)}
+          onClose={() => setAddOpen(false)}
+          onAdded={() => {
+            setAddOpen(false);
+            void refetch();
+          }}
+        />
       </header>
 
       <Show when={providers.loading}>
@@ -177,25 +197,27 @@ const ProviderModelSummary: Component<IdentityProps> = (props) => {
   );
 };
 
-function AddProviderButton(props: { onAdded?: () => void }) {
-  const [open, setOpen] = createSignal(false);
+interface AddProviderButtonProps {
+  open: boolean;
+  onOpen: () => void;
+  onClose: () => void;
+  onAdded?: () => void;
+}
+
+function AddProviderButton(props: AddProviderButtonProps) {
   return (
     <>
       <Button
         variant="primary"
-        size="sm"
         data-testid="add-provider-button"
-        onClick={() => setOpen(true)}
+        onClick={props.onOpen}
       >
         + Add provider
       </Button>
       <AddProviderForm
-        open={open()}
-        onClose={() => setOpen(false)}
-        onAdded={() => {
-          setOpen(false);
-          props.onAdded?.();
-        }}
+        open={props.open}
+        onClose={props.onClose}
+        onAdded={() => props.onAdded?.()}
       />
     </>
   );

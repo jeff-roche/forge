@@ -1,6 +1,8 @@
 use anyhow::Result;
+use forge_core::Event;
 use forge_providers::{ollama::OllamaProvider, MockProvider, RuntimeProvider, SwappableProvider};
 use forge_session::{
+    log_bridge,
     pid_file::OwnedPidFile,
     provider_spec::{parse_provider_spec, ProviderKind},
     server::{event_log_path, serve_with_session, serve_with_session_swappable},
@@ -65,8 +67,40 @@ async fn main() -> Result<()> {
         None
     };
 
+    // Install the tracing → event-channel bridge before creating the
+    // session. The bridge captures warn-or-error tracing events from
+    // anywhere in this process and parks them on an mpsc channel; the
+    // forwarder task spawned below drains it into `Session::emit` so
+    // the shell sees them as `Event::LogLine` and routes them to the
+    // webview console.
+    let log_bridge_rx = log_bridge::install();
+
     let log_path = event_log_path(&session_id, workspace.as_deref());
     let session = Arc::new(Session::create(log_path).await?);
+
+    if let Some(mut rx) = log_bridge_rx {
+        let session_for_logs = Arc::clone(&session);
+        tokio::spawn(async move {
+            while let Some(record) = rx.recv().await {
+                if let Err(err) = session_for_logs
+                    .emit(Event::LogLine {
+                        at: record.at,
+                        level: record.level,
+                        target: record.target,
+                        message: record.message,
+                    })
+                    .await
+                {
+                    // Don't recurse through `tracing` — that would feed
+                    // every emit error back through the bridge. Operator
+                    // stderr is the only place a degraded bridge can
+                    // report itself.
+                    eprintln!("forged: log_bridge forwarder dropping record: {err}");
+                    break;
+                }
+            }
+        });
+    }
 
     // F-601: the daemon binary still accepts `FORGE_ACTIVE_AGENT` as the
     // way an operator (or the Tauri shell launcher) names the agent this

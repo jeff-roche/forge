@@ -46,6 +46,47 @@ function warnDrop(type: string, reason: string): void {
 }
 
 // ---------------------------------------------------------------------------
+// LogLine routing
+// ---------------------------------------------------------------------------
+
+const LOG_LINE_LEVELS = ['error', 'warn', 'info', 'debug', 'trace'] as const;
+type LogLineLevelStr = (typeof LOG_LINE_LEVELS)[number];
+
+/**
+ * In dev builds, surface daemon `tracing::warn!` / `error!` events in the
+ * webview console. The daemon's `log_bridge` emits `forge_core::Event::LogLine`
+ * for each warn-or-error tracing event; the shell forwards them on the
+ * session event channel; this routes them to the matching `console.*` call.
+ *
+ * Returns `true` if the payload was a LogLine (so callers can skip the
+ * default per-session store update — these aren't session UX state).
+ */
+export function routeLogLineToConsole(rustEvent: unknown): boolean {
+  if (!import.meta.env.DEV) return false;
+  if (typeof rustEvent !== 'object' || rustEvent === null) return false;
+  const ev = rustEvent as Record<string, unknown>;
+  if (ev['type'] !== 'log_line') return false;
+  const level = ev['level'];
+  const message = ev['message'];
+  const target = ev['target'];
+  if (!isString(level) || !isString(message) || !isString(target)) {
+    warnDrop('log_line', 'level/message/target missing or not strings');
+    return true; // still consumed — don't fall through to the store
+  }
+  const safeLevel: LogLineLevelStr = (
+    LOG_LINE_LEVELS as readonly string[]
+  ).includes(level)
+    ? (level as LogLineLevelStr)
+    : 'info';
+  // The `forged:` prefix mirrors `forge-shell`'s `tauri-plugin-log`
+  // output, so the user can tell shell-side logs from daemon-side logs
+  // at a glance.
+  // eslint-disable-next-line no-console
+  console[safeLevel](`[forged ${target}] ${message}`);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Adapter
 // ---------------------------------------------------------------------------
 

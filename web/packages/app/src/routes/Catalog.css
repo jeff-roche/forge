@@ -42,3 +42,15 @@
 .catalog-route__hint code {
   color: var(--color-ember-300);
 }
+
+.catalog-route__missing > .forge-button {
+  align-self: flex-start;
+  margin-top: var(--sp-2);
+}
+
+.catalog-route__error {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-sm);
+  color: var(--color-error, var(--color-text-primary));
+}

@@ -13,6 +13,7 @@ import type { ProviderEntry } from '../ipc/dashboard';
 interface StubOptions {
   addProvider?: (input: unknown) => Promise<unknown>;
   updateProvider?: (input: unknown) => Promise<unknown>;
+  loginProvider?: (args: unknown) => Promise<unknown>;
 }
 
 const SAMPLE_ENTRY: ProviderEntry = {
@@ -23,6 +24,8 @@ const SAMPLE_ENTRY: ProviderEntry = {
   model_available: true,
 };
 
+const TEST_API_KEY = 'sk-test-1234';
+
 function installInvokeStub(opts: StubOptions = {}): {
   calls: Array<{ cmd: string; args: Record<string, unknown> | undefined }>;
 } {
@@ -31,6 +34,7 @@ function installInvokeStub(opts: StubOptions = {}): {
     opts.addProvider ?? (async () => SAMPLE_ENTRY satisfies ProviderEntry);
   const updateProvider =
     opts.updateProvider ?? (async () => SAMPLE_ENTRY satisfies ProviderEntry);
+  const loginProvider = opts.loginProvider ?? (async () => undefined);
   setInvokeForTesting(
     (async (cmd: string, args?: Record<string, unknown>) => {
       calls.push({ cmd, args });
@@ -39,12 +43,21 @@ function installInvokeStub(opts: StubOptions = {}): {
           return addProvider(args?.['input']);
         case 'update_provider':
           return updateProvider(args?.['input']);
+        case 'login_provider':
+          return loginProvider(args);
         default:
           return undefined;
       }
     }) as never,
   );
   return { calls };
+}
+
+/** Fill in the API key field so credentialed-kind submission passes
+ * validation. Use in every test that exercises the submit path against a
+ * credentialed kind (anthropic / openai / mistral / custom_openai). */
+function fillApiKey(getByTestId: (id: string) => HTMLElement, key = TEST_API_KEY): void {
+  fireEvent.input(getByTestId('add-provider-api-key'), { target: { value: key } });
 }
 
 function renderForm(props: {
@@ -124,11 +137,28 @@ describe('AddProviderForm submit', () => {
   it('invokes add_provider with the kind id for a built-in', async () => {
     const { calls } = installInvokeStub();
     const { getByTestId } = renderForm();
+    fillApiKey(getByTestId);
     fireEvent.click(getByTestId('add-provider-submit'));
     await waitFor(() => {
       const add = calls.find((c) => c.cmd === 'add_provider');
       expect(add?.args).toEqual({ input: { id: 'anthropic' } });
     });
+  });
+
+  it('chains login_provider with the api key after a successful add', async () => {
+    const { calls } = installInvokeStub();
+    const { getByTestId } = renderForm();
+    fillApiKey(getByTestId, 'sk-ant-xyz');
+    fireEvent.click(getByTestId('add-provider-submit'));
+    await waitFor(() => {
+      const login = calls.find((c) => c.cmd === 'login_provider');
+      expect(login?.args).toEqual({ providerId: 'anthropic', key: 'sk-ant-xyz' });
+    });
+    // Ordering: add_provider must precede login_provider.
+    const addIdx = calls.findIndex((c) => c.cmd === 'add_provider');
+    const loginIdx = calls.findIndex((c) => c.cmd === 'login_provider');
+    expect(addIdx).toBeGreaterThanOrEqual(0);
+    expect(loginIdx).toBeGreaterThan(addIdx);
   });
 
   it('invokes add_provider with the custom_openai payload', async () => {
@@ -147,6 +177,7 @@ describe('AddProviderForm submit', () => {
     fireEvent.input(getByTestId('add-provider-api-version'), {
       target: { value: '2025-01' },
     });
+    fillApiKey(getByTestId);
 
     fireEvent.click(getByTestId('add-provider-submit'));
 
@@ -177,6 +208,7 @@ describe('AddProviderForm submit', () => {
       target: { value: 'https://api.example.com' },
     });
     fireEvent.input(getByTestId('add-provider-model'), { target: { value: 'qwen2' } });
+    fillApiKey(getByTestId);
 
     fireEvent.click(getByTestId('add-provider-submit'));
 
@@ -281,6 +313,7 @@ describe('AddProviderForm saving state', () => {
     });
     installInvokeStub({ addProvider: () => pending });
     const { getByTestId } = renderForm();
+    fillApiKey(getByTestId);
     fireEvent.click(getByTestId('add-provider-submit'));
 
     await waitFor(() => {
@@ -307,6 +340,7 @@ describe('AddProviderForm success path', () => {
     const onClose = vi.fn();
     const onAdded = vi.fn();
     const { getByTestId } = renderForm({ onClose, onAdded });
+    fillApiKey(getByTestId);
 
     fireEvent.click(getByTestId('add-provider-submit'));
 
@@ -329,6 +363,7 @@ describe('AddProviderForm save-failed state', () => {
     });
     const onClose = vi.fn();
     const { getByTestId } = renderForm({ onClose });
+    fillApiKey(getByTestId);
 
     fireEvent.click(getByTestId('add-provider-submit'));
 
@@ -367,6 +402,7 @@ describe('AddProviderForm save-failed state', () => {
       target: { value: 'https://api.example.com' },
     });
     fireEvent.input(getByTestId('add-provider-model'), { target: { value: 'qwen2' } });
+    fillApiKey(getByTestId);
 
     fireEvent.click(getByTestId('add-provider-submit'));
     await waitFor(() => expect(getByTestId('add-provider-error')).toBeInTheDocument());

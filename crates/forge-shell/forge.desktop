@@ -11,4 +11,4 @@ Type=Application
 {{#if mime_type}}
 MimeType={{mime_type}}
 {{/if}}
-StartupWMClass=Forge
+StartupWMClass=dev.forge-ide.forge

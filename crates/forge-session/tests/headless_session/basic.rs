@@ -189,7 +189,8 @@ async fn full_headless_turn_emits_correct_event_sequence() {
             Event::StepStarted { .. }
             | Event::StepFinished { .. }
             | Event::ToolInvoked { .. }
-            | Event::ToolReturned { .. } => None,
+            | Event::ToolReturned { .. }
+            | Event::LogLine { .. } => None,
             _ => Some("Other"),
         })
         .collect();

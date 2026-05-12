@@ -41,10 +41,13 @@ describe('FirstRunBanner (F-737)', () => {
     expect(getByRole('button', { name: '+ Add provider' })).toBeTruthy();
   });
 
-  it('wraps the CTA in a link to /providers', () => {
+  it('wraps the CTA in a link to /providers?add=1', () => {
+    // The query param signals the providers page to pop the Add Provider
+    // modal on mount, so the CTA lands the user mid-flow rather than on
+    // a static page they have to click through again.
     const { getByRole } = renderBanner(true);
     const link = getByRole('link', { name: '+ Add provider' });
-    expect(link.getAttribute('href')).toBe('/providers');
+    expect(link.getAttribute('href')).toBe('/providers?add=1');
   });
 
   it('marks the region with an accessible label', () => {

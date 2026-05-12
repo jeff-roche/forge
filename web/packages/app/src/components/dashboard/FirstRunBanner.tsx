@@ -31,7 +31,7 @@ export const FirstRunBanner: Component<FirstRunBannerProps> = (props) => {
         <p class="first-run-banner__subtitle">
           Add your first provider to start a session.
         </p>
-        <A class="first-run-banner__cta" href="/providers">
+        <A class="first-run-banner__cta" href="/providers?add=1">
           <Button variant="primary">+ Add provider</Button>
         </A>
       </section>

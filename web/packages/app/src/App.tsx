@@ -19,9 +19,11 @@ export const App: Component = () => {
       <Route path="/agents" component={AgentMonitor} />
       <Route path="/agents/:id" component={AgentMonitor} />
       {/* F-592: Catalog route. `?ws=<workspace_root>` selects the workspace;
-          missing parameter renders a friendly "open from a session" notice
-          rather than calling list_* with an empty path. */}
-      <Route path="/catalog" component={Catalog} />
+          missing parameter falls back to the active workspace, then to a
+          friendly empty state. The optional `:kind` segment lets the
+          sidebar nav rows (`/catalog/skills`, `/catalog/mcp`,
+          `/catalog/agents`) land on the matching tab pre-selected. */}
+      <Route path="/catalog/:kind?" component={Catalog} />
       {/* F-594: Usage view — chart + limits + per-model breakdown over the
           F-593 `usage_summary` IPC. Mounts on the dashboard window. */}
       <Route path="/usage" component={Usage} />

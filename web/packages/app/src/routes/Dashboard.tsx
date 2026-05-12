@@ -26,20 +26,30 @@ import { getSettings, setSetting } from '../ipc/session';
 import './Dashboard.css';
 
 /**
- * F-588: surface a first-run banner when the active provider has no stored
- * credential. Phase 3 ships two credential-bearing providers
- * (`anthropic`, `openai`); without an explicit "active provider" signal
- * yet, the banner picks the first such provider that lacks a credential
- * so the user has a concrete target to add.
+ * F-588: surface a first-run banner when a configured credential-bearing
+ * provider has no stored credential. Only considers providers the user has
+ * actually added (`dashboard_list_providers` rows) — otherwise a fresh
+ * install would surface "Anthropic has no stored credential" even when
+ * the user never added Anthropic in the first place.
  *
  * Probe failure on a single provider is treated as "stored for that
- * provider only" — the loop `continue`s so a broken probe on Anthropic
- * does not silently suppress the banner that would otherwise call out a
- * missing OpenAI key. The per-row indicator inside `<CredentialsSection>`
- * surfaces the underlying probe error to the user.
+ * provider only" — the loop `continue`s so a broken probe on one
+ * provider does not silently suppress the banner that would otherwise
+ * call out a missing key on another. The per-row indicator inside
+ * `<CredentialsSection>` surfaces the underlying probe error to the user.
  */
 async function firstMissingCredential(): Promise<{ id: string; label: string } | null> {
+  let configured: Set<string>;
+  try {
+    const list = await listProviders();
+    configured = new Set(list.map((p) => p.id));
+  } catch {
+    // Without a reliable provider list we can't decide whom to nag about;
+    // suppress rather than guess.
+    return null;
+  }
   for (const provider of CREDENTIAL_PROVIDERS) {
+    if (!configured.has(provider.id as unknown as string)) continue;
     try {
       const stored = await hasCredential(provider.id);
       if (!stored) return { id: provider.id as unknown as string, label: provider.label };

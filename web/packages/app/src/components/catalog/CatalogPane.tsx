@@ -10,22 +10,26 @@
 // the user can toggle.
 
 import {
+  createEffect,
   createMemo,
   createResource,
   createSignal,
   For,
   Show,
+  untrack,
   type Component,
 } from 'solid-js';
 import { Button, Skeleton, Tab, Tabs } from '@forge/design';
-import type { RosterEntry, ScopedRosterEntry } from '@forge/ipc';
+import type { RosterEntry, ScopedRosterEntry, ServerState } from '@forge/ipc';
 import {
   listAgents,
   listMcpServers,
   listSkills,
+  sessionListMcpServers,
   SESSION_WIDE_SCOPE,
 } from '../../ipc/catalog';
 import { settings } from '../../stores/settings';
+import { activeSessionId } from '../../stores/session';
 import { AddMcpServerForm } from '../AddMcpServerForm';
 import { CatalogEnabledToggle } from './CatalogEnabledToggle';
 import './CatalogPane.css';
@@ -34,6 +38,10 @@ export type CatalogKind = 'skills' | 'mcp' | 'agents';
 
 export interface CatalogPaneProps {
   workspaceRoot: string;
+  /** Tab to surface on first render. Defaults to `'skills'`. The sidebar
+   * passes this so `/catalog/mcp` lands on the MCP tab pre-selected
+   * without requiring user clicks. */
+  initialKind?: CatalogKind | undefined;
 }
 
 interface KindConfig {
@@ -51,7 +59,7 @@ const KINDS: KindConfig[] = [
     label: 'Skills',
     fetch: (ws) => listSkills(ws, SESSION_WIDE_SCOPE),
     emptyTitle: 'No skills installed',
-    emptyHint: 'Drop a SKILL.md under .skills/<name>/ in your workspace or ~/.skills/.',
+    emptyHint: 'Drop a SKILL.md under .agent-skills/<name>/ in your workspace or ~/.agent-skills/.',
   },
   {
     id: 'mcp',
@@ -147,40 +155,27 @@ function toRow(kind: CatalogKind, scoped: ScopedRosterEntry): CatalogRow {
     scope: scoped.scope,
     providerColor:
       scoped.entry.type === 'Provider' ? providerColorId(scoped.entry.id) : null,
-    tier: readTier(scoped.scope),
+    tier: scoped.tier ?? undefined,
     transport: readTransport(scoped.entry),
   };
 }
 
 /**
- * F-736: extract the file-tier from a roster scope. The generated `RosterScope`
- * union doesn't carry a `tier` field today; the catalog list_* commands will
- * grow one as the loader differentiates workspace vs user roots. Read it via
- * an unchecked property access so the filter predicates work the moment the
- * backend stamps it in, without round-tripping through the IPC type-gen.
- */
-function readTier(scope: ScopedRosterEntry['scope']): CatalogTier | undefined {
-  const value = (scope as { tier?: unknown }).tier;
-  return value === 'workspace' || value === 'user' ? value : undefined;
-}
-
-/**
- * F-736: extract the transport (`stdio`/`http`) from an MCP roster entry.
- * The generated `RosterEntry::Mcp` variant carries only `{ type, id }`
- * today; the loader will surface the transport tag alongside it. Until then,
- * predicates that key off `transport` return false, which mirrors the spec
- * intent (the chip "filters to rows whose transport is X").
+ * Extract the transport (`stdio`/`http`) from an MCP roster entry. Non-MCP
+ * variants always return `undefined`.
  */
 function readTransport(entry: ScopedRosterEntry['entry']): McpTransport | undefined {
   if (entry.type !== 'Mcp') return undefined;
-  const value = (entry as { transport?: unknown }).transport;
-  return value === 'stdio' || value === 'http' ? value : undefined;
+  return entry.transport ?? undefined;
 }
 
 function scopeLabel(scope: ScopedRosterEntry['scope']): string {
   switch (scope.type) {
     case 'SessionWide':
-      return 'Session-wide';
+      // No label: SessionWide is the only scope today, so a header above
+      // the row list would just add noise. Tier (workspace/user) is the
+      // axis users actually care about and is shown on each row.
+      return '';
     case 'Agent':
       return `Agent · ${scope.id}`;
     case 'Provider':
@@ -291,7 +286,9 @@ function chipPredicate(chip: FilterChip): (row: CatalogRow) => boolean {
 }
 
 export const CatalogPane: Component<CatalogPaneProps> = (props) => {
-  const [activeKind, setActiveKindSignal] = createSignal<CatalogKind>('skills');
+  const [activeKind, setActiveKindSignal] = createSignal<CatalogKind>(
+    props.initialKind ?? 'skills',
+  );
   const [search, setSearch] = createSignal('');
   const [toggleError, setToggleError] = createSignal<string | null>(null);
   // F-736: filter chip selection. Route-local; defaults to `'all'`. Switching
@@ -305,6 +302,13 @@ export const CatalogPane: Component<CatalogPaneProps> = (props) => {
       setActiveChip('all');
     }
   };
+  // Sync the active tab with `initialKind` when the route param changes.
+  // `activeKind()` is read inside `untrack` so user-driven tab clicks don't
+  // re-trigger this effect and ping-pong the signal back to the URL value.
+  createEffect(() => {
+    const next = props.initialKind;
+    if (next && next !== untrack(activeKind)) setActiveKindSignal(next);
+  });
   // F-734: Catalog `+ Add MCP server` modal. Mounted at the pane level so
   // the dialog can refetch the MCP resource on success without re-rendering
   // the tab panel. The button itself lives in the MCP tab header block
@@ -317,6 +321,31 @@ export const CatalogPane: Component<CatalogPaneProps> = (props) => {
   const skillsRes = createResource(() => props.workspaceRoot, KINDS[0]!.fetch);
   const mcpRes = createResource(() => props.workspaceRoot, KINDS[1]!.fetch);
   const agentsRes = createResource(() => props.workspaceRoot, KINDS[2]!.fetch);
+
+  // Runtime MCP server states (Starting / Healthy / Degraded / Failed /
+  // Disabled). State lives in the session daemon's MCP manager, so this
+  // resource only fires when a session is active. Without one, the chip
+  // simply doesn't render — there's no daemon-level state aggregation IPC
+  // today. Resource keyed on `activeSessionId` so opening / closing a
+  // session reactively refetches.
+  const [mcpStatesRes] = createResource(activeSessionId, async (sessionId) => {
+    if (!sessionId) return [] as { name: string; state: ServerState }[];
+    try {
+      return await sessionListMcpServers(sessionId);
+    } catch {
+      // The daemon may reject if the session has no MCP manager
+      // (`.mcp.json` missing or unparseable). Treat that as "no live
+      // states" rather than a hard failure — the static catalog rows
+      // still render.
+      return [] as { name: string; state: ServerState }[];
+    }
+  });
+  const mcpStatesByName = createMemo<Map<string, ServerState>>(() => {
+    const rows = mcpStatesRes() ?? [];
+    const map = new Map<string, ServerState>();
+    for (const row of rows) map.set(row.name, row.state);
+    return map;
+  });
 
   const resourceFor = (kind: CatalogKind) => {
     switch (kind) {
@@ -456,7 +485,14 @@ export const CatalogPane: Component<CatalogPaneProps> = (props) => {
                   same region; structure as a flex row so chips can sit
                   alongside the button without further surgery.
                 */}
-                <Show when={kind.id === 'mcp'}>
+                {/* The Add MCP server form writes to either a workspace
+                  * `.mcp.json` or `~/.mcp.json`. The catalog opens it with
+                  * `scope="workspace"` hardcoded; without a workspace
+                  * that form has no valid target, so we hide the button
+                  * until one is open. The catalog's read path still works
+                  * fine without a workspace — only the write affordance
+                  * is gated. */}
+                <Show when={kind.id === 'mcp' && props.workspaceRoot.length > 0}>
                   <div class="catalog__mcp-tab-header" data-testid="mcp-tab-header">
                     <Button
                       variant="primary"
@@ -558,7 +594,15 @@ export const CatalogPane: Component<CatalogPaneProps> = (props) => {
                               class="catalog__group"
                               data-provider={group.providerColor ?? undefined}
                             >
-                              <h3 class="catalog__group-label">{group.label}</h3>
+                              {/* Suppress the group header for SessionWide
+                                  rows — the only scope used by today's
+                                  loaders, and "Session-wide" reads as
+                                  redundant noise above the row list. Agent
+                                  and Provider groups still render their
+                                  label once those scopes start landing. */}
+                              <Show when={group.label.length > 0}>
+                                <h3 class="catalog__group-label">{group.label}</h3>
+                              </Show>
                               <ul class="catalog__rows">
                                 <For each={group.rows}>
                                   {(row) => (
@@ -566,6 +610,11 @@ export const CatalogPane: Component<CatalogPaneProps> = (props) => {
                                       row={row}
                                       enabled={isEnabled(row.kind, row.id)}
                                       workspaceRoot={props.workspaceRoot}
+                                      mcpState={
+                                        row.kind === 'mcp'
+                                          ? mcpStatesByName().get(row.id)
+                                          : undefined
+                                      }
                                       onError={handleToggleError}
                                       onToggled={handleToggleSuccess}
                                     />
@@ -612,11 +661,101 @@ interface CatalogRowViewProps {
   row: CatalogRow;
   enabled: boolean;
   workspaceRoot: string;
+  mcpState: ServerState | undefined;
   onError: (detail: string) => void;
   onToggled: (enabled: boolean) => void;
 }
 
+interface RowChip {
+  label: string;
+  title: string;
+  tone: 'tier' | 'transport' | 'meta' | 'state';
+  testid: string;
+}
+
+function stateChip(state: ServerState): RowChip {
+  switch (state.type) {
+    case 'healthy':
+      return {
+        label: 'Connected',
+        title: 'Server is connected and responding to health checks',
+        tone: 'state',
+        testid: 'catalog-row-chip-state-healthy',
+      };
+    case 'starting':
+      return {
+        label: 'Starting',
+        title: 'Server is spawning and finishing the MCP initialize handshake',
+        tone: 'state',
+        testid: 'catalog-row-chip-state-starting',
+      };
+    case 'degraded':
+      return {
+        label: 'Degraded',
+        title: `Last health check failed — manager will restart. Reason: ${state.reason}`,
+        tone: 'state',
+        testid: 'catalog-row-chip-state-degraded',
+      };
+    case 'failed':
+      return {
+        label: 'Disconnected',
+        title: `Server is not connected. Reason: ${state.reason}`,
+        tone: 'state',
+        testid: 'catalog-row-chip-state-failed',
+      };
+    case 'disabled':
+      return {
+        label: 'Disabled',
+        title: `Server is disabled. Reason: ${state.reason}`,
+        tone: 'state',
+        testid: 'catalog-row-chip-state-disabled',
+      };
+  }
+}
+
+function rowChips(row: CatalogRow, mcpState: ServerState | undefined): RowChip[] {
+  const chips: RowChip[] = [];
+  if (row.tier) {
+    chips.push({
+      label: row.tier === 'workspace' ? 'Workspace' : 'User',
+      title:
+        row.tier === 'workspace'
+          ? 'Configured in this workspace (.agent-skills / .mcp.json / .agents)'
+          : 'Configured in your home directory (~/.agent-skills, ~/.mcp.json, ~/.agents)',
+      tone: 'tier',
+      testid: `catalog-row-chip-tier-${row.tier}`,
+    });
+  }
+  if (row.transport) {
+    chips.push({
+      label: row.transport === 'http' ? 'HTTP' : 'stdio',
+      title:
+        row.transport === 'http'
+          ? 'Server is reached over HTTP at the URL declared in .mcp.json'
+          : 'Server runs as a local subprocess; the manager pipes JSON-RPC over stdio',
+      tone: 'transport',
+      testid: `catalog-row-chip-transport-${row.transport}`,
+    });
+  }
+  if (row.kind === 'mcp' && mcpState) {
+    chips.push(stateChip(mcpState));
+  }
+  if (row.kind === 'agents' && row.meta) {
+    chips.push({
+      label: row.meta === 'background' ? 'Background' : 'Foreground',
+      title:
+        row.meta === 'background'
+          ? 'Agent runs as a background sub-process; surfaces in the Agent Monitor'
+          : 'Agent runs inline in the active session',
+      tone: 'meta',
+      testid: `catalog-row-chip-mode-${row.meta}`,
+    });
+  }
+  return chips;
+}
+
 const CatalogRowView: Component<CatalogRowViewProps> = (props) => {
+  const chips = createMemo(() => rowChips(props.row, props.mcpState));
   return (
     <li
       class="catalog-row"
@@ -626,7 +765,23 @@ const CatalogRowView: Component<CatalogRowViewProps> = (props) => {
     >
       <div class="catalog-row__body">
         <span class="catalog-row__name">{props.row.name}</span>
-        <Show when={props.row.meta}>
+        <Show when={chips().length > 0}>
+          <span class="catalog-row__chips" data-testid={`catalog-row-chips-${props.row.kind}-${props.row.id}`}>
+            <For each={chips()}>
+              {(chip) => (
+                <span
+                  class="catalog-row__chip"
+                  data-tone={chip.tone}
+                  data-testid={chip.testid}
+                  title={chip.title}
+                >
+                  {chip.label}
+                </span>
+              )}
+            </For>
+          </span>
+        </Show>
+        <Show when={props.row.kind === 'providers' && props.row.meta}>
           <span class="catalog-row__meta">{props.row.meta}</span>
         </Show>
       </div>

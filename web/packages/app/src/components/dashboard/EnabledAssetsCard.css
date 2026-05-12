@@ -51,6 +51,14 @@
   font-size: var(--type-mono-sm);
   color: var(--color-text-tertiary);
   letter-spacing: 0.05em;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-3);
+}
+
+.enabled-assets__empty-text {
+  margin: 0;
 }
 
 .enabled-assets__error,

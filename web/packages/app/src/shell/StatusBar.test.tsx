@@ -718,8 +718,8 @@ describe('StatusBar — left slot (F-717)', () => {
     expect(left).toHaveTextContent('forge');
   });
 
-  it('branch segment renders the literal `unknown` token (F-741 stub)', async () => {
-    const { findByTestId } = render(() => (
+  it('branch segment is hidden when no git_branch feed is wired', async () => {
+    const { findByTestId, queryByTestId } = render(() => (
       <StatusBar
         listBackgroundAgents={vi.fn().mockResolvedValue([])}
         subscribe={bgBusStub().subscribe}
@@ -727,12 +727,13 @@ describe('StatusBar — left slot (F-717)', () => {
         getActiveProvider={vi.fn().mockResolvedValue(null)}
       />
     ));
-    expect(await findByTestId('status-bar-branch')).toHaveTextContent('unknown');
+    await findByTestId('status-bar');
+    expect(queryByTestId('status-bar-branch')).toBeNull();
   });
 
-  it('sessions segment: loading → `unknown`, ready → `<N> sessions`', async () => {
+  it('sessions segment: hidden while pending, then renders `<N> sessions`', async () => {
     const d = deferred<{ id: string }[]>();
-    const { findByTestId, getByTestId } = render(() => (
+    const { findByTestId, getByTestId, queryByTestId } = render(() => (
       <StatusBar
         listBackgroundAgents={vi.fn().mockResolvedValue([])}
         subscribe={bgBusStub().subscribe}
@@ -740,10 +741,9 @@ describe('StatusBar — left slot (F-717)', () => {
         getActiveProvider={vi.fn().mockResolvedValue(null)}
       />
     ));
+    await findByTestId('status-bar');
     // Loading frame — the session_list promise is still pending.
-    expect(await findByTestId('status-bar-sessions')).toHaveTextContent(
-      'unknown',
-    );
+    expect(queryByTestId('status-bar-sessions')).toBeNull();
 
     d.resolve([{ id: 'a' }, { id: 'b' }, { id: 'c' }]);
     await waitFor(() => {
@@ -753,9 +753,9 @@ describe('StatusBar — left slot (F-717)', () => {
     });
   });
 
-  it('sessions segment renders `unknown` when session_list rejects', async () => {
+  it('sessions segment is hidden when session_list rejects', async () => {
     const sessionList = vi.fn().mockRejectedValue(new Error('boom'));
-    const { findByTestId } = render(() => (
+    const { queryByTestId } = render(() => (
       <StatusBar
         listBackgroundAgents={vi.fn().mockResolvedValue([])}
         subscribe={bgBusStub().subscribe}
@@ -766,14 +766,12 @@ describe('StatusBar — left slot (F-717)', () => {
     await waitFor(() => {
       expect(sessionList).toHaveBeenCalled();
     });
-    expect(await findByTestId('status-bar-sessions')).toHaveTextContent(
-      'unknown',
-    );
+    expect(queryByTestId('status-bar-sessions')).toBeNull();
   });
 
-  it('provider segment: loading → `unknown`, ready → provider id', async () => {
+  it('provider segment: hidden while pending, then renders the provider id', async () => {
     const d = deferred<string | null>();
-    const { findByTestId, getByTestId } = render(() => (
+    const { findByTestId, getByTestId, queryByTestId } = render(() => (
       <StatusBar
         listBackgroundAgents={vi.fn().mockResolvedValue([])}
         subscribe={bgBusStub().subscribe}
@@ -781,18 +779,17 @@ describe('StatusBar — left slot (F-717)', () => {
         getActiveProvider={(() => d.promise) as never}
       />
     ));
-    expect(await findByTestId('status-bar-provider')).toHaveTextContent(
-      'unknown',
-    );
+    await findByTestId('status-bar');
+    expect(queryByTestId('status-bar-provider')).toBeNull();
     d.resolve('anthropic');
     await waitFor(() => {
       expect(getByTestId('status-bar-provider')).toHaveTextContent('anthropic');
     });
   });
 
-  it('provider segment renders `unknown` when get_active_provider returns null', async () => {
+  it('provider segment is hidden when get_active_provider returns null', async () => {
     const getProvider = vi.fn().mockResolvedValue(null);
-    const { findByTestId } = render(() => (
+    const { queryByTestId } = render(() => (
       <StatusBar
         listBackgroundAgents={vi.fn().mockResolvedValue([])}
         subscribe={bgBusStub().subscribe}
@@ -803,23 +800,28 @@ describe('StatusBar — left slot (F-717)', () => {
     await waitFor(() => {
       expect(getProvider).toHaveBeenCalled();
     });
-    expect(await findByTestId('status-bar-provider')).toHaveTextContent(
-      'unknown',
-    );
+    expect(queryByTestId('status-bar-provider')).toBeNull();
   });
 
-  it('provider segment updates when provider:changed fires', async () => {
-    let onChange: ((id: string) => void) | null = null;
+  it('provider segment refetches get_active_provider when provider:changed fires', async () => {
+    // The handler ignores the event payload's provider_id and consults
+    // `get_active_provider` for the authoritative post-change state.
+    // This pattern is required because `remove_provider` emits the
+    // *removed* id; without the refetch the bar would stick on a stale
+    // (or even just-deleted) provider.
+    let onChange: ((id: string) => void | Promise<void>) | null = null;
     const subscribeProviderChanged: ProviderChangedSubscribe = async (h) => {
       onChange = h;
       return () => undefined;
     };
+    let current = 'ollama';
+    const getProvider = vi.fn(async () => current);
     const { findByTestId, getByTestId } = render(() => (
       <StatusBar
         listBackgroundAgents={vi.fn().mockResolvedValue([])}
         subscribe={bgBusStub().subscribe}
         sessionList={vi.fn().mockResolvedValue([])}
-        getActiveProvider={vi.fn().mockResolvedValue('ollama')}
+        getActiveProvider={getProvider}
         subscribeProviderChanged={subscribeProviderChanged}
       />
     ));
@@ -829,16 +831,50 @@ describe('StatusBar — left slot (F-717)', () => {
     await waitFor(() => {
       expect(onChange).not.toBeNull();
     });
-    onChange!('anthropic');
+    // Simulate a provider swap on the backend; the handler refetches.
+    current = 'anthropic';
+    await onChange!('anthropic');
     await waitFor(() => {
       expect(getByTestId('status-bar-provider')).toHaveTextContent('anthropic');
     });
-    // Touch findByTestId to keep the destructure used.
     expect(await findByTestId('status-bar-provider')).toBeTruthy();
   });
 
-  it('state segment: no prop → `unknown`; explicit value → that value', async () => {
-    const unknown = render(() => (
+  it('provider segment clears when remove_provider leaves no active provider', async () => {
+    // remove_provider emits `provider:changed` carrying the removed id;
+    // when the removed provider was active, `get_active_provider` now
+    // returns null. The segment must hide rather than retain the
+    // pre-removal label.
+    let onChange: ((id: string) => void | Promise<void>) | null = null;
+    const subscribeProviderChanged: ProviderChangedSubscribe = async (h) => {
+      onChange = h;
+      return () => undefined;
+    };
+    let current: string | null = 'anthropic';
+    const getProvider = vi.fn(async () => current);
+    const { getByTestId, queryByTestId } = render(() => (
+      <StatusBar
+        listBackgroundAgents={vi.fn().mockResolvedValue([])}
+        subscribe={bgBusStub().subscribe}
+        sessionList={vi.fn().mockResolvedValue([])}
+        getActiveProvider={getProvider}
+        subscribeProviderChanged={subscribeProviderChanged}
+      />
+    ));
+    await waitFor(() => {
+      expect(getByTestId('status-bar-provider')).toHaveTextContent('anthropic');
+    });
+    await waitFor(() => expect(onChange).not.toBeNull());
+    // Removal on the backend → no active provider.
+    current = null;
+    await onChange!('anthropic');
+    await waitFor(() => {
+      expect(queryByTestId('status-bar-provider')).toBeNull();
+    });
+  });
+
+  it('state segment: hidden when no prop and no session:event; explicit value → that value', async () => {
+    const hidden = render(() => (
       <StatusBar
         listBackgroundAgents={vi.fn().mockResolvedValue([])}
         subscribe={bgBusStub().subscribe}
@@ -846,10 +882,9 @@ describe('StatusBar — left slot (F-717)', () => {
         getActiveProvider={vi.fn().mockResolvedValue(null)}
       />
     ));
-    expect(await unknown.findByTestId('status-bar-state')).toHaveTextContent(
-      'unknown',
-    );
-    unknown.unmount();
+    await hidden.findByTestId('status-bar');
+    expect(hidden.queryByTestId('status-bar-state')).toBeNull();
+    hidden.unmount();
 
     const ready = render(() => (
       <StatusBar
@@ -865,7 +900,38 @@ describe('StatusBar — left slot (F-717)', () => {
     );
   });
 
-  it('renders `·` separators between left-slot segments', async () => {
+  it('renders `·` separators only between visible left-slot segments', async () => {
+    // Wire every feed so all five left segments render (forge brand,
+    // branch, sessions, provider, state). With all five present there
+    // are four separators; if any feed went null the separator count
+    // would drop in lockstep — the renderer intersperses on visible
+    // segments, never on hidden ones.
+    setActiveWorkspaceRoot('/ws');
+    const { findByTestId } = render(() => (
+      <StatusBar
+        listBackgroundAgents={vi.fn().mockResolvedValue([])}
+        subscribe={bgBusStub().subscribe}
+        sessionList={vi.fn().mockResolvedValue([{ id: 'a' }])}
+        getActiveProvider={vi.fn().mockResolvedValue('anthropic')}
+        gitBranch={vi.fn().mockResolvedValue('main')}
+        connectionState={'idle' as ConnectionState}
+      />
+    ));
+    const left = await findByTestId('status-bar-left');
+    await waitFor(() => {
+      expect(left.querySelectorAll('.status-bar__segment').length).toBe(5);
+    });
+    const dots = left.querySelectorAll('.status-bar__separator');
+    expect(dots.length).toBe(4);
+    dots.forEach((d) => expect(d.textContent).toBe('·'));
+    setActiveWorkspaceRoot(null);
+  });
+
+  it('omits separators next to hidden segments', async () => {
+    // No feeds yield real values ⇒ branch / provider / state stay hidden;
+    // only the brand and the `0 sessions` segment render ⇒ exactly one
+    // separator between them, regardless of which downstream feeds are
+    // wired. The renderer never produces a dangling `·`.
     const { findByTestId } = render(() => (
       <StatusBar
         listBackgroundAgents={vi.fn().mockResolvedValue([])}
@@ -875,17 +941,19 @@ describe('StatusBar — left slot (F-717)', () => {
       />
     ));
     const left = await findByTestId('status-bar-left');
-    // Four separators between five segments (forge · branch · sessions ·
-    // provider · state).
-    const dots = left.querySelectorAll('.status-bar__separator');
-    expect(dots.length).toBe(4);
-    dots.forEach((d) => expect(d.textContent).toBe('·'));
+    await waitFor(() => {
+      expect(left.querySelectorAll('.status-bar__segment').length).toBe(2);
+    });
+    expect(left.querySelectorAll('.status-bar__separator').length).toBe(1);
   });
 });
 
 describe('StatusBar — right slot (F-717)', () => {
-  it('usage badge stubbed to `unknown` (F-741-followup)', async () => {
-    const { findByTestId } = render(() => (
+  it('usage segment is hidden while the feed is still stubbed (F-741-followup)', async () => {
+    // The usage feed isn't wired yet (`usageLabel` returns null), so the
+    // segment is omitted entirely instead of rendering an `unknown`
+    // placeholder. When the feed lands it surfaces automatically.
+    const { findByTestId, queryByTestId } = render(() => (
       <StatusBar
         listBackgroundAgents={vi.fn().mockResolvedValue([])}
         subscribe={bgBusStub().subscribe}
@@ -893,7 +961,8 @@ describe('StatusBar — right slot (F-717)', () => {
         getActiveProvider={vi.fn().mockResolvedValue(null)}
       />
     ));
-    expect(await findByTestId('status-bar-usage')).toHaveTextContent('unknown');
+    await findByTestId('status-bar');
+    expect(queryByTestId('status-bar-usage')).toBeNull();
   });
 
   it('keeps the bg-agents badge as the last right-slot element', async () => {
@@ -922,9 +991,9 @@ describe('StatusBar — right slot (F-717)', () => {
 describe('StatusBar — branch feed (F-741)', () => {
   const WS = '/home/user/acme-api';
 
-  it('renders `unknown` while the git_branch invoke is pending', async () => {
+  it('keeps the branch segment hidden while the git_branch invoke is pending', async () => {
     const d = deferred<string | null>();
-    const { findByTestId } = render(() => (
+    const { findByTestId, queryByTestId } = render(() => (
       <StatusBar
         listBackgroundAgents={vi.fn().mockResolvedValue([])}
         subscribe={bgBusStub().subscribe}
@@ -934,9 +1003,8 @@ describe('StatusBar — branch feed (F-741)', () => {
         gitBranch={(() => d.promise) as never}
       />
     ));
-    expect(await findByTestId('status-bar-branch')).toHaveTextContent(
-      'unknown',
-    );
+    await findByTestId('status-bar');
+    expect(queryByTestId('status-bar-branch')).toBeNull();
     // Resolve so the cleanup path doesn't leak the unresolved promise.
     d.resolve(null);
   });
@@ -962,9 +1030,9 @@ describe('StatusBar — branch feed (F-741)', () => {
     });
   });
 
-  it('renders `unknown` when git_branch returns null (detached HEAD)', async () => {
+  it('hides the branch segment when git_branch returns null (detached HEAD)', async () => {
     const gitBranch = vi.fn().mockResolvedValue(null);
-    const { findByTestId } = render(() => (
+    const { queryByTestId } = render(() => (
       <StatusBar
         listBackgroundAgents={vi.fn().mockResolvedValue([])}
         subscribe={bgBusStub().subscribe}
@@ -977,14 +1045,12 @@ describe('StatusBar — branch feed (F-741)', () => {
     await waitFor(() => {
       expect(gitBranch).toHaveBeenCalled();
     });
-    expect(await findByTestId('status-bar-branch')).toHaveTextContent(
-      'unknown',
-    );
+    expect(queryByTestId('status-bar-branch')).toBeNull();
   });
 
-  it('renders `unknown` when git_branch rejects', async () => {
+  it('hides the branch segment when git_branch rejects', async () => {
     const gitBranch = vi.fn().mockRejectedValue(new Error('boom'));
-    const { findByTestId } = render(() => (
+    const { queryByTestId } = render(() => (
       <StatusBar
         listBackgroundAgents={vi.fn().mockResolvedValue([])}
         subscribe={bgBusStub().subscribe}
@@ -997,9 +1063,7 @@ describe('StatusBar — branch feed (F-741)', () => {
     await waitFor(() => {
       expect(gitBranch).toHaveBeenCalled();
     });
-    expect(await findByTestId('status-bar-branch')).toHaveTextContent(
-      'unknown',
-    );
+    expect(queryByTestId('status-bar-branch')).toBeNull();
   });
 
   it('skips the invoke entirely when no workspace root is available', async () => {
@@ -1014,7 +1078,7 @@ describe('StatusBar — branch feed (F-741)', () => {
         gitBranch={gitBranch}
       />
     ));
-    await findByTestId('status-bar-branch');
+    await findByTestId('status-bar');
     // Give pending microtasks a chance to settle.
     await Promise.resolve();
     await Promise.resolve();
@@ -1044,8 +1108,8 @@ describe('StatusBar — branch feed (F-741)', () => {
 });
 
 describe('StatusBar — streaming-state feed (F-741)', () => {
-  it('renders `unknown` before any session:event arrives', async () => {
-    const { findByTestId } = render(() => (
+  it('hides the state segment before any session:event arrives', async () => {
+    const { findByTestId, queryByTestId } = render(() => (
       <StatusBar
         listBackgroundAgents={vi.fn().mockResolvedValue([])}
         subscribe={bgBusStub().subscribe}
@@ -1053,7 +1117,8 @@ describe('StatusBar — streaming-state feed (F-741)', () => {
         getActiveProvider={vi.fn().mockResolvedValue(null)}
       />
     ));
-    expect(await findByTestId('status-bar-state')).toHaveTextContent('unknown');
+    await findByTestId('status-bar');
+    expect(queryByTestId('status-bar-state')).toBeNull();
   });
 
   it('flips to `streaming` on StreamingStarted and `idle` on StreamingStopped', async () => {
@@ -1066,7 +1131,7 @@ describe('StatusBar — streaming-state feed (F-741)', () => {
         getActiveProvider={vi.fn().mockResolvedValue(null)}
       />
     ));
-    await findByTestId('status-bar-state');
+    await findByTestId('status-bar');
 
     bus.emit({
       session_id: SID,
@@ -1097,7 +1162,7 @@ describe('StatusBar — streaming-state feed (F-741)', () => {
         getActiveProvider={vi.fn().mockResolvedValue(null)}
       />
     ));
-    await findByTestId('status-bar-state');
+    await findByTestId('status-bar');
     bus.emit({
       session_id: SID,
       seq: 1,
@@ -1108,9 +1173,9 @@ describe('StatusBar — streaming-state feed (F-741)', () => {
     });
   });
 
-  it('ignores streaming events for other sessions', async () => {
+  it('ignores streaming events for other sessions (state segment stays hidden)', async () => {
     const bus = fakeBus();
-    const { findByTestId, getByTestId } = render(() => (
+    const { findByTestId, queryByTestId } = render(() => (
       <StatusBar
         listBackgroundAgents={vi.fn().mockResolvedValue([])}
         subscribe={bus.subscribe}
@@ -1118,14 +1183,14 @@ describe('StatusBar — streaming-state feed (F-741)', () => {
         getActiveProvider={vi.fn().mockResolvedValue(null)}
       />
     ));
-    await findByTestId('status-bar-state');
+    await findByTestId('status-bar');
     bus.emit({
       session_id: 'other-session',
       seq: 1,
       event: { kind: 'StreamingStarted' },
     });
     await Promise.resolve();
-    expect(getByTestId('status-bar-state')).toHaveTextContent('unknown');
+    expect(queryByTestId('status-bar-state')).toBeNull();
   });
 
   it('explicit `connectionState` prop overrides the derived signal', async () => {
@@ -1162,9 +1227,9 @@ describe('StatusBar — streaming-state feed (F-741)', () => {
 });
 
 describe('StatusBar — runtime feed (F-741)', () => {
-  it('renders `unknown` while the runtime probe is pending', async () => {
+  it('hides the runtime segment while the probe is pending', async () => {
     const d = deferred<unknown>();
-    const { findByTestId } = render(() => (
+    const { findByTestId, queryByTestId } = render(() => (
       <StatusBar
         listBackgroundAgents={vi.fn().mockResolvedValue([])}
         subscribe={bgBusStub().subscribe}
@@ -1173,9 +1238,8 @@ describe('StatusBar — runtime feed (F-741)', () => {
         detectContainerRuntime={(() => d.promise) as never}
       />
     ));
-    expect(await findByTestId('status-bar-runtime')).toHaveTextContent(
-      'unknown',
-    );
+    await findByTestId('status-bar');
+    expect(queryByTestId('status-bar-runtime')).toBeNull();
     d.resolve({ kind: 'unknown', reason: 'cleanup' });
   });
 
@@ -1190,7 +1254,7 @@ describe('StatusBar — runtime feed (F-741)', () => {
         detectContainerRuntime={probe}
       />
     ));
-    await findByTestId('status-bar-runtime');
+    await findByTestId('status-bar');
     await waitFor(() => {
       expect(probe).toHaveBeenCalled();
     });
@@ -1212,7 +1276,7 @@ describe('StatusBar — runtime feed (F-741)', () => {
         detectContainerRuntime={probe}
       />
     ));
-    await findByTestId('status-bar-runtime');
+    await findByTestId('status-bar');
     await waitFor(() => {
       expect(getByTestId('status-bar-runtime')).toHaveTextContent(
         'podman down',
@@ -1220,9 +1284,9 @@ describe('StatusBar — runtime feed (F-741)', () => {
     });
   });
 
-  it('renders `unknown` when the probe rejects', async () => {
+  it('hides the runtime segment when the probe rejects', async () => {
     const probe = vi.fn().mockRejectedValue(new Error('boom'));
-    const { findByTestId } = render(() => (
+    const { queryByTestId } = render(() => (
       <StatusBar
         listBackgroundAgents={vi.fn().mockResolvedValue([])}
         subscribe={bgBusStub().subscribe}
@@ -1234,16 +1298,14 @@ describe('StatusBar — runtime feed (F-741)', () => {
     await waitFor(() => {
       expect(probe).toHaveBeenCalled();
     });
-    expect(await findByTestId('status-bar-runtime')).toHaveTextContent(
-      'unknown',
-    );
+    expect(queryByTestId('status-bar-runtime')).toBeNull();
   });
 
-  it('renders `unknown` when the probe reports the `unknown` variant', async () => {
+  it('hides the runtime segment when the probe reports the `unknown` variant', async () => {
     const probe = vi
       .fn()
       .mockResolvedValue({ kind: 'unknown', reason: 'probe drifted' });
-    const { findByTestId } = render(() => (
+    const { queryByTestId } = render(() => (
       <StatusBar
         listBackgroundAgents={vi.fn().mockResolvedValue([])}
         subscribe={bgBusStub().subscribe}
@@ -1255,8 +1317,6 @@ describe('StatusBar — runtime feed (F-741)', () => {
     await waitFor(() => {
       expect(probe).toHaveBeenCalled();
     });
-    expect(await findByTestId('status-bar-runtime')).toHaveTextContent(
-      'unknown',
-    );
+    expect(queryByTestId('status-bar-runtime')).toBeNull();
   });
 });

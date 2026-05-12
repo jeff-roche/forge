@@ -20,18 +20,18 @@ Forge has no embedded database. All persistent state is on disk as plain files.
   memory/
     <agent-name>.md        # opt-in cross-session memory
 
-~/.agents/<name>.md        # user-global agent definitions
-~/.skills/<name>/          # user-global skills (agentskills.io folders)
+~/.agents/<name>.md              # user-global agent definitions
+~/.agent-skills/<name>/          # user-global skills (agentskills.io folders)
   SKILL.md
   scripts/
   references/
-~/.mcp.json                # user-global MCP servers
+~/.mcp.json                      # user-global MCP servers
 
 <workspace>/
-  AGENTS.md                # shared workspace instructions
-  .mcp.json                # workspace MCP servers
-  .agents/<name>.md        # workspace agent definitions
-  .skills/<name>/SKILL.md  # workspace skills
+  AGENTS.md                      # shared workspace instructions
+  .mcp.json                      # workspace MCP servers
+  .agents/<name>.md              # workspace agent definitions
+  .agent-skills/<name>/SKILL.md  # workspace skills
   .forge/                  # internal, self-gitignored
     .gitignore             # contents: *
     approvals.toml         # persistent approval whitelist (workspace tier) — §7.7

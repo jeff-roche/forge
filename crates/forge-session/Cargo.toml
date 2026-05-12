@@ -41,6 +41,13 @@ thiserror = "1"
 # F-371: structured tracing across daemon-side emit failures, turn errors,
 # and MCP lifecycle. Emission only — no subscriber is installed in `forged`.
 tracing = "0.1"
+# Runtime subscriber for the `tracing -> Event::LogLine` bridge in main.rs.
+# Production `forged` previously installed nothing; we install only a
+# minimal registry + custom Layer that captures warn+ events and forwards
+# them through the session's event channel so the UI sees daemon errors
+# in the webview devtools console. `default-features = false` keeps the
+# fmt writer out of the binary — the bridge is the only consumer.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
 tokio = { version = "1", features = ["net", "io-util", "fs", "rt-multi-thread", "macros", "sync", "process", "time", "signal"] }
 # F-587: orchestrator-side credential pull. `SecretString` is the at-boundary
 # type for every credential value; `ExposeSecret` is the deliberate-exposure

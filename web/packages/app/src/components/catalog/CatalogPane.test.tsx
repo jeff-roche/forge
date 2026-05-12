@@ -125,7 +125,6 @@ describe('<CatalogPane> (F-592)', () => {
 
     expect(await findByText('typescript-review')).toBeTruthy();
     expect(await findByText('postgres-schemata')).toBeTruthy();
-    expect(await findByText('Session-wide')).toBeTruthy();
   });
 
   it('shows kind-specific empty copy when a tab returns zero entries', async () => {
@@ -681,7 +680,8 @@ describe('<CatalogPane> toggle per-kind coverage (F-735)', () => {
 describe('<CatalogPane> filter chips (F-736)', () => {
   const skillIn = (id: string, tier?: 'workspace' | 'user'): ScopedRosterEntry => ({
     entry: { type: 'Skill', id },
-    scope: { type: 'SessionWide', ...(tier ? { tier } : {}) } as never,
+    scope: { type: 'SessionWide' },
+    ...(tier ? { tier } : {}),
   });
 
   const mcpIn = (
@@ -693,7 +693,8 @@ describe('<CatalogPane> filter chips (F-736)', () => {
       id,
       ...(opts.transport ? { transport: opts.transport } : {}),
     } as never,
-    scope: { type: 'SessionWide', ...(opts.tier ? { tier: opts.tier } : {}) } as never,
+    scope: { type: 'SessionWide' },
+    ...(opts.tier ? { tier: opts.tier } : {}),
   });
 
   const switchToTab = async (

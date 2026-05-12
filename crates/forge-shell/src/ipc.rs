@@ -3637,74 +3637,156 @@ fn validate_roster_scope(scope: &forge_core::RosterScope) -> Result<(), String> 
     }
 }
 
-/// F-591: load every workspace + user-home skill and tag each as a session-
-/// wide roster entry.
+/// F-591: load every workspace + user-home skill and tag each with the tier
+/// it came from. Workspace shadows user on id collision so the catalog
+/// shows one row per id, attributed to the more-specific tier.
 ///
-/// Skill discovery walks `<workspace_root>/.skills/` and `<user_home>/.skills/`
-/// via `forge_agents::skill_loader::load_skills`. The loader merges the two
-/// scopes (workspace shadows user) so a skill id appears at most once.
+/// Skill discovery walks `<workspace_root>/.agent-skills/` and
+/// `<user_home>/.agent-skills/` via `forge_agents::skill_loader`.
 fn collect_skills(
-    workspace_root: &std::path::Path,
+    workspace_root: Option<&std::path::Path>,
     user_home: &std::path::Path,
 ) -> Result<Vec<forge_core::ScopedRosterEntry>, String> {
-    let skills = forge_agents::skill_loader::load_skills(workspace_root, user_home)
+    let workspace_skills = match workspace_root {
+        Some(ws) => forge_agents::skill_loader::load_workspace_skills(ws)
+            .map_err(|e| format!("load skills: {e}"))?,
+        None => Vec::new(),
+    };
+    let user_skills = forge_agents::skill_loader::load_user_skills(user_home)
         .map_err(|e| format!("load skills: {e}"))?;
-    Ok(skills
-        .into_iter()
-        .map(|s| {
-            forge_core::ScopedRosterEntry::new(
-                forge_core::RosterEntry::Skill { id: s.id },
-                forge_core::RosterScope::SessionWide,
-            )
-        })
-        .collect())
+
+    let workspace_ids: std::collections::HashSet<_> =
+        workspace_skills.iter().map(|s| s.id.clone()).collect();
+
+    let mut entries: Vec<forge_core::ScopedRosterEntry> = Vec::new();
+    for s in workspace_skills {
+        entries.push(forge_core::ScopedRosterEntry::with_tier(
+            forge_core::RosterEntry::Skill { id: s.id },
+            forge_core::RosterScope::SessionWide,
+            forge_core::RosterTier::Workspace,
+        ));
+    }
+    for s in user_skills {
+        if workspace_ids.contains(&s.id) {
+            continue;
+        }
+        entries.push(forge_core::ScopedRosterEntry::with_tier(
+            forge_core::RosterEntry::Skill { id: s.id },
+            forge_core::RosterScope::SessionWide,
+            forge_core::RosterTier::User,
+        ));
+    }
+    Ok(entries)
 }
 
-/// F-591: load every workspace + user-home agent definition and tag each as
-/// a session-wide roster entry.
+/// F-591: load every workspace + user-home agent definition and tag each
+/// with its tier. Workspace shadows user on name collision.
 fn collect_agents(
-    workspace_root: &std::path::Path,
+    workspace_root: Option<&std::path::Path>,
     user_home: &std::path::Path,
 ) -> Result<Vec<forge_core::ScopedRosterEntry>, String> {
-    let defs = forge_agents::load_agents(workspace_root, user_home)
+    let workspace_defs = match workspace_root {
+        Some(ws) => forge_agents::load_workspace_agents(ws)
+            .map_err(|e| format!("load agents: {e}"))?,
+        None => Vec::new(),
+    };
+    let user_defs = forge_agents::load_user_agents(user_home)
         .map_err(|e| format!("load agents: {e}"))?;
-    Ok(defs
-        .into_iter()
-        .map(|def| {
-            forge_core::ScopedRosterEntry::new(
-                forge_core::RosterEntry::Agent {
-                    id: forge_core::AgentId::from_string(def.name),
-                    background: false,
-                },
-                forge_core::RosterScope::SessionWide,
-            )
-        })
-        .collect())
+
+    let workspace_names: std::collections::HashSet<String> =
+        workspace_defs.iter().map(|d| d.name.clone()).collect();
+
+    let mut entries: Vec<forge_core::ScopedRosterEntry> = Vec::new();
+    for def in workspace_defs {
+        entries.push(forge_core::ScopedRosterEntry::with_tier(
+            forge_core::RosterEntry::Agent {
+                id: forge_core::AgentId::from_string(def.name),
+                background: false,
+            },
+            forge_core::RosterScope::SessionWide,
+            forge_core::RosterTier::Workspace,
+        ));
+    }
+    for def in user_defs {
+        if workspace_names.contains(&def.name) {
+            continue;
+        }
+        entries.push(forge_core::ScopedRosterEntry::with_tier(
+            forge_core::RosterEntry::Agent {
+                id: forge_core::AgentId::from_string(def.name),
+                background: false,
+            },
+            forge_core::RosterScope::SessionWide,
+            forge_core::RosterTier::User,
+        ));
+    }
+    Ok(entries)
 }
 
 /// F-591: load every workspace + user-home MCP server declaration from
-/// `.mcp.json` and tag each as a session-wide roster entry.
+/// `.mcp.json` and tag each with its tier. Workspace shadows user on name
+/// collision.
 ///
 /// Distinct from the F-132 `session_list_mcp_servers` which talks to the
 /// running session daemon's authoritative manager — this one reads the
 /// on-disk catalog so the catalog UI works even with no session open.
+///
+/// A malformed `.mcp.json` in either tier is logged at `warn` and treated
+/// as an empty map for that tier. The catalog must not vanish because the
+/// user typed a stray comma in one config; the operator sees the parse
+/// failure in the devtools console via the LogLine bridge.
 fn collect_mcp_servers(
-    workspace_root: &std::path::Path,
+    workspace_root: Option<&std::path::Path>,
     user_home: &std::path::Path,
 ) -> Result<Vec<forge_core::ScopedRosterEntry>, String> {
-    let merged = forge_mcp::config::load_merged(workspace_root, user_home)
-        .map_err(|e| format!("load mcp servers: {e}"))?;
-    Ok(merged
-        .into_keys()
-        .map(|name| {
-            forge_core::ScopedRosterEntry::new(
-                forge_core::RosterEntry::Mcp {
-                    id: forge_core::McpId::from(name),
-                },
-                forge_core::RosterScope::SessionWide,
-            )
-        })
-        .collect())
+    let workspace_servers = match workspace_root {
+        Some(ws) => forge_mcp::config::load_workspace(ws).unwrap_or_else(|e| {
+            tracing::warn!(
+                target: "forge_shell::ipc",
+                "skipping workspace .mcp.json: {e:#}",
+            );
+            std::collections::BTreeMap::new()
+        }),
+        None => std::collections::BTreeMap::new(),
+    };
+    let user_servers = forge_mcp::config::load_user_from(user_home).unwrap_or_else(|e| {
+        tracing::warn!(
+            target: "forge_shell::ipc",
+            "skipping user .mcp.json: {e:#}",
+        );
+        std::collections::BTreeMap::new()
+    });
+
+    let transport_for = |spec: &forge_mcp::McpServerSpec| match &spec.kind {
+        forge_mcp::ServerKind::Stdio { .. } => forge_core::McpTransport::Stdio,
+        forge_mcp::ServerKind::Http { .. } => forge_core::McpTransport::Http,
+    };
+
+    let mut entries: Vec<forge_core::ScopedRosterEntry> = Vec::new();
+    for (name, spec) in &workspace_servers {
+        entries.push(forge_core::ScopedRosterEntry::with_tier(
+            forge_core::RosterEntry::Mcp {
+                id: forge_core::McpId::from(name.clone()),
+                transport: Some(transport_for(spec)),
+            },
+            forge_core::RosterScope::SessionWide,
+            forge_core::RosterTier::Workspace,
+        ));
+    }
+    for (name, spec) in &user_servers {
+        if workspace_servers.contains_key(name) {
+            continue;
+        }
+        entries.push(forge_core::ScopedRosterEntry::with_tier(
+            forge_core::RosterEntry::Mcp {
+                id: forge_core::McpId::from(name.clone()),
+                transport: Some(transport_for(spec)),
+            },
+            forge_core::RosterScope::SessionWide,
+            forge_core::RosterTier::User,
+        ));
+    }
+    Ok(entries)
 }
 
 /// F-591: emit one [`forge_core::RosterEntry::Provider`] per built-in
@@ -3770,10 +3852,13 @@ pub async fn list_skills<R: Runtime>(
         MAX_ROSTER_WORKSPACE_ROOT_BYTES,
     )?;
     validate_roster_scope(&scope)?;
-    let workspace_path =
-        resolve_workspace_root_for_command(webview.label(), &workspace_root, &state).await?;
+    let workspace_path = if workspace_root.is_empty() {
+        None
+    } else {
+        Some(resolve_workspace_root_for_command(webview.label(), &workspace_root, &state).await?)
+    };
     let user_home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
-    let entries = collect_skills(&workspace_path, &user_home)?;
+    let entries = collect_skills(workspace_path.as_deref(), &user_home)?;
     Ok(entries.into_iter().filter(|e| e.matches(&scope)).collect())
 }
 
@@ -3798,10 +3883,13 @@ pub async fn list_mcp_servers<R: Runtime>(
         MAX_ROSTER_WORKSPACE_ROOT_BYTES,
     )?;
     validate_roster_scope(&scope)?;
-    let workspace_path =
-        resolve_workspace_root_for_command(webview.label(), &workspace_root, &state).await?;
+    let workspace_path = if workspace_root.is_empty() {
+        None
+    } else {
+        Some(resolve_workspace_root_for_command(webview.label(), &workspace_root, &state).await?)
+    };
     let user_home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
-    let entries = collect_mcp_servers(&workspace_path, &user_home)?;
+    let entries = collect_mcp_servers(workspace_path.as_deref(), &user_home)?;
     Ok(entries.into_iter().filter(|e| e.matches(&scope)).collect())
 }
 
@@ -3826,10 +3914,13 @@ pub async fn list_agents<R: Runtime>(
         MAX_ROSTER_WORKSPACE_ROOT_BYTES,
     )?;
     validate_roster_scope(&scope)?;
-    let workspace_path =
-        resolve_workspace_root_for_command(webview.label(), &workspace_root, &state).await?;
+    let workspace_path = if workspace_root.is_empty() {
+        None
+    } else {
+        Some(resolve_workspace_root_for_command(webview.label(), &workspace_root, &state).await?)
+    };
     let user_home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
-    let entries = collect_agents(&workspace_path, &user_home)?;
+    let entries = collect_agents(workspace_path.as_deref(), &user_home)?;
     Ok(entries.into_iter().filter(|e| e.matches(&scope)).collect())
 }
 

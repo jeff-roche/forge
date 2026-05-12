@@ -1,6 +1,7 @@
 import { createSignal } from 'solid-js';
 import { createStore } from 'solid-js/store';
 import type { SessionId, SessionState } from '@forge/ipc';
+import { routeLogLineToConsole } from '../ipc/events';
 import {
   onSessionEvent,
   type SessionEventPayload,
@@ -57,6 +58,11 @@ export const [sessionEvents, setSessionEvents] = createStore<
  */
 export async function initSessionEventPump(): Promise<UnlistenFn> {
   return onSessionEvent((payload: SessionEventPayload) => {
+    // Daemon `tracing::warn!`/`error!` records arrive here as
+    // `Event::LogLine`. In dev, route them straight to `console.*` and
+    // skip the store update — they aren't session UX state, just chrome
+    // for the developer console.
+    if (routeLogLineToConsole(payload.event)) return;
     setSessionEvents(payload.session_id, {
       lastSeq: payload.seq,
       lastEvent: payload.event,

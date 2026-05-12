@@ -91,6 +91,18 @@ pub enum RosterScope {
     Provider { id: ProviderId },
 }
 
+/// Transport an MCP server uses. Mirrors the two `ServerKind` variants in
+/// `forge_mcp` (stdio child process vs. HTTP endpoint). Surfaced on
+/// [`RosterEntry::Mcp`] so the catalog UI can render transport chips and
+/// filter by transport without re-reading `.mcp.json`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+pub enum McpTransport {
+    Stdio,
+    Http,
+}
+
 /// One discoverable entry in a roster.
 ///
 /// Each variant carries the minimum payload needed to identify and label the
@@ -111,11 +123,28 @@ pub enum RosterEntry {
     },
     Mcp {
         id: McpId,
+        /// Transport this server uses (stdio or http). Absent when the
+        /// catalog hasn't resolved the underlying `.mcp.json` entry yet
+        /// (e.g. fixture-only roster entries in tests).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transport: Option<McpTransport>,
     },
     Agent {
         id: AgentId,
         background: bool,
     },
+}
+
+/// File-system tier an entry was loaded from. Drives the catalog's
+/// `Workspace` / `User` filter chips and any UI that wants to indicate
+/// origin alongside the scope. `None` for provider rows and other entries
+/// that have no on-disk tier (built-in providers, in-memory overlays).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+pub enum RosterTier {
+    Workspace,
+    User,
 }
 
 /// One [`RosterEntry`] paired with the [`RosterScope`] it loaded under.
@@ -128,12 +157,31 @@ pub enum RosterEntry {
 pub struct ScopedRosterEntry {
     pub entry: RosterEntry,
     pub scope: RosterScope,
+    /// File-system tier (workspace or user) this entry was loaded from.
+    /// Absent for entries that have no on-disk tier (e.g. built-in
+    /// providers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<RosterTier>,
 }
 
 impl ScopedRosterEntry {
-    /// Construct a new scoped roster entry.
+    /// Construct a new scoped roster entry with no on-disk tier.
     pub fn new(entry: RosterEntry, scope: RosterScope) -> Self {
-        Self { entry, scope }
+        Self {
+            entry,
+            scope,
+            tier: None,
+        }
+    }
+
+    /// Construct a scoped roster entry tagged with the file-system tier it
+    /// was loaded from.
+    pub fn with_tier(entry: RosterEntry, scope: RosterScope, tier: RosterTier) -> Self {
+        Self {
+            entry,
+            scope,
+            tier: Some(tier),
+        }
     }
 
     /// Return `true` when this entry should be returned for `filter`.
@@ -254,9 +302,22 @@ mod tests {
     fn roster_entry_mcp_wire_shape() {
         let entry = RosterEntry::Mcp {
             id: McpId::new("github"),
+            transport: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert_eq!(json, "{\"type\":\"Mcp\",\"id\":\"github\"}");
+        let back: RosterEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, entry);
+    }
+
+    #[test]
+    fn roster_entry_mcp_with_transport_wire_shape() {
+        let entry = RosterEntry::Mcp {
+            id: McpId::new("remote"),
+            transport: Some(McpTransport::Http),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert_eq!(json, "{\"type\":\"Mcp\",\"id\":\"remote\",\"transport\":\"http\"}");
         let back: RosterEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(back, entry);
     }

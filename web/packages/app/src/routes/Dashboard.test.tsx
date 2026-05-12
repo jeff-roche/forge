@@ -79,12 +79,16 @@ describe('Dashboard', () => {
     ));
   }
 
-  // F-719: the dashboard hero owns the page heading. Verbatim per the
-  // mock — `Welcome back. Forge something.` rendered across two lines.
+  // F-719: the dashboard hero owns the page heading. The second line ends
+  // with a random adjective from `FORGE_ADJECTIVES`; assert the shape
+  // rather than the verbatim text and leave the adjective-list pinning to
+  // DashboardHero.test.tsx.
   it('renders the F-719 hero headline', () => {
     const { getByRole } = renderDashboard();
     const heading = getByRole('heading', { level: 1 });
-    expect(heading.textContent).toBe('Welcome back.Forge something.');
+    expect(heading.textContent).toMatch(
+      /^Welcome back\.Forge something [a-z]+\.$/,
+    );
   });
 
   // F-409: spec dashboard.md §D.1 mandates a single flat surface — no tab
@@ -139,9 +143,11 @@ describe('Dashboard', () => {
     });
   });
 
-  // F-588: when at least one credential-bearing provider has no key, the
-  // banner names the first such provider.
-  it('renders the credential banner when a provider has no stored key', async () => {
+  // F-588: when a configured credential-bearing provider has no key, the
+  // banner names the first such provider. Anthropic and OpenAI must
+  // appear in the configured-providers list — under the "empty by
+  // default" model, the banner ignores providers the user hasn't added.
+  it('renders the credential banner when a configured provider has no stored key', async () => {
     setInvokeForTesting(
       (async (cmd: string, args?: Record<string, unknown>) => {
         if (cmd === 'provider_status') {
@@ -153,7 +159,12 @@ describe('Dashboard', () => {
           };
         }
         if (cmd === 'session_list') return [];
-        if (cmd === 'dashboard_list_providers') return [];
+        if (cmd === 'dashboard_list_providers') {
+          return [
+            { id: 'anthropic', display_name: 'Anthropic', credential_required: true, has_credential: false, model_available: false, enabled: true },
+            { id: 'openai', display_name: 'OpenAI', credential_required: true, has_credential: true, model_available: true, enabled: true },
+          ];
+        }
         if (cmd === 'get_active_provider') return null;
         if (cmd === 'has_credential') {
           // Anthropic missing, OpenAI present — banner should name Anthropic.
@@ -166,6 +177,40 @@ describe('Dashboard', () => {
     const { findByTestId } = renderDashboard();
     const banner = await findByTestId('credential-banner');
     expect(banner.textContent).toContain('Anthropic');
+  });
+
+  // F-588 regression: with no providers configured (fresh install), the
+  // credential banner must stay hidden even when credentials are absent.
+  it('does not render the credential banner when no providers are configured', async () => {
+    setInvokeForTesting(
+      (async (cmd: string) => {
+        if (cmd === 'provider_status') {
+          return {
+            reachable: true,
+            base_url: 'http://127.0.0.1:11434',
+            models: [],
+            last_checked: '2026-04-18T00:00:00Z',
+          };
+        }
+        if (cmd === 'session_list') return [];
+        if (cmd === 'dashboard_list_providers') return [];
+        if (cmd === 'has_credential') return false;
+        if (cmd === 'get_settings') {
+          return {
+            notifications: { bg_agents: 'toast' },
+            windows: { session_mode: 'single' },
+            providers: { custom_openai: {} },
+            dashboard: { container_banner_dismissed: false },
+          };
+        }
+        return undefined;
+      }) as never,
+    );
+
+    const { queryByTestId } = renderDashboard();
+    await waitFor(() => {
+      expect(queryByTestId('credential-banner')).toBeNull();
+    });
   });
 
   // F-597: persisted "Don't show again" preference survives a restart —
@@ -292,7 +337,9 @@ describe('Dashboard', () => {
       'Add your first provider to start a session.',
     );
     const cta = banner.querySelector('a');
-    expect(cta?.getAttribute('href')).toBe('/providers');
+    // `?add=1` signals the Providers page to pop the Add Provider modal
+    // on mount, so this CTA lands the user mid-flow.
+    expect(cta?.getAttribute('href')).toBe('/providers?add=1');
   });
 
   // F-737: as soon as a provider is configured, the first-run banner
@@ -426,7 +473,12 @@ describe('Dashboard', () => {
           };
         }
         if (cmd === 'session_list') return [];
-        if (cmd === 'dashboard_list_providers') return [];
+        if (cmd === 'dashboard_list_providers') {
+          return [
+            { id: 'anthropic', display_name: 'Anthropic', credential_required: true, has_credential: false, model_available: false, enabled: true },
+            { id: 'openai', display_name: 'OpenAI', credential_required: true, has_credential: false, model_available: false, enabled: true },
+          ];
+        }
         if (cmd === 'get_active_provider') return null;
         if (cmd === 'has_credential') {
           if (args?.['providerId'] === 'anthropic') {

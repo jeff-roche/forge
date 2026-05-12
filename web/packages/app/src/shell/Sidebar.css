@@ -25,9 +25,11 @@
 }
 
 .sidebar__brand-mark {
-  color: var(--color-ember-400);
-  font-family: var(--font-mono);
-  font-size: var(--type-mono-md);
+  width: 1.5em;
+  height: 1.5em;
+  flex-shrink: 0;
+  align-self: center;
+  display: block;
 }
 
 .sidebar__brand-name {

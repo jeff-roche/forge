@@ -14,6 +14,7 @@ import {
   Show,
   type Component,
 } from 'solid-js';
+import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { Button, Skeleton } from '@forge/design';
 import type { ScopedRosterEntry } from '@forge/ipc';
 import {
@@ -22,7 +23,7 @@ import {
   listSkills,
   SESSION_WIDE_SCOPE,
 } from '../../ipc/catalog';
-import { activeWorkspaceRoot } from '../../stores/session';
+import { activeWorkspaceRoot, setActiveWorkspaceRoot } from '../../stores/session';
 import { settings, setSetting } from '../../stores/settings';
 import './EnabledAssetsCard.css';
 
@@ -166,9 +167,13 @@ export const EnabledAssetsCard: Component = () => {
       <Show
         when={workspaceRoot()}
         fallback={
-          <p class="enabled-assets__empty" data-testid="enabled-assets-no-workspace">
-            No workspace open. Open one to see enabled assets.
-          </p>
+          <NoWorkspaceEmpty
+            onOpened={(picked) => {
+              setActiveWorkspaceRoot(picked);
+              setToggleError(null);
+            }}
+            onError={(detail) => setToggleError(detail)}
+          />
         }
       >
         <Show when={loading()}>
@@ -303,5 +308,62 @@ const ToggleRow: Component<ToggleRowProps> = (props) => {
         </span>
       </label>
     </li>
+  );
+};
+
+interface NoWorkspaceEmptyProps {
+  onOpened: (workspaceRoot: string) => void;
+  onError: (detail: string) => void;
+}
+
+/**
+ * Empty-state fallback when no workspace is associated with the dashboard.
+ * Renders the explanation copy plus a single "Open workspace" CTA that
+ * launches the native directory picker — the same `@tauri-apps/plugin-dialog`
+ * call NewSessionDialog uses for its `Browse` action. The picker lets the
+ * user select an existing folder OR create a new one inline via its
+ * platform-native "new folder" affordance, so one button covers both
+ * intents the user asked about.
+ */
+const NoWorkspaceEmpty: Component<NoWorkspaceEmptyProps> = (props) => {
+  const [busy, setBusy] = createSignal(false);
+
+  const onOpen = async (): Promise<void> => {
+    if (busy()) return;
+    setBusy(true);
+    try {
+      const picked = await openDialog({
+        directory: true,
+        multiple: false,
+        title: 'Open a workspace',
+      });
+      if (typeof picked === 'string' && picked.length > 0) {
+        props.onOpened(picked);
+      }
+    } catch (err: unknown) {
+      props.onError(
+        `workspace picker failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div class="enabled-assets__empty" data-testid="enabled-assets-no-workspace">
+      <p class="enabled-assets__empty-text">
+        No workspace open. Pick a folder — or create a new one from the
+        picker — to see and toggle its enabled assets.
+      </p>
+      <Button
+        variant="primary"
+        data-testid="enabled-assets-open-workspace"
+        loading={busy()}
+        disabled={busy()}
+        onClick={() => void onOpen()}
+      >
+        Open workspace
+      </Button>
+    </div>
   );
 };

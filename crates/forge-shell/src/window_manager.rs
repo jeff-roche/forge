@@ -7,11 +7,16 @@
 
 use anyhow::{Context, Result};
 use tauri::{
-    AppHandle, Manager, RunEvent, Runtime, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
+    image::Image, AppHandle, Manager, RunEvent, Runtime, WebviewUrl, WebviewWindow,
+    WebviewWindowBuilder,
 };
 
 use crate::dashboard::{self, ProviderStatusCache, CACHE_TTL};
 use crate::window_spec::WindowSpec;
+
+/// Raw bytes of the canonical forge mark, embedded at compile time so the
+/// dev binary doesn't need the bundle's icon directory present at runtime.
+const FORGE_ICON_PNG: &[u8] = include_bytes!("../icons/icon.png");
 
 /// Opens and manages Forge windows on a live `AppHandle`.
 pub struct WindowManager<R: Runtime> {
@@ -54,6 +59,15 @@ impl<R: Runtime> WindowManager<R> {
         if spec.center {
             builder = builder.center();
         }
+        // `tauri.conf.json`'s `bundle.icon` is only consumed by the bundler.
+        // In dev (`cargo tauri dev`) and any unbundled runtime, the window
+        // chrome / taskbar / dock fall back to the platform default unless
+        // the icon is set explicitly on the builder.
+        let icon =
+            Image::from_bytes(FORGE_ICON_PNG).context("decode embedded forge window icon")?;
+        builder = builder
+            .icon(icon)
+            .with_context(|| format!("set window icon for `{}`", spec.label))?;
         builder
             .build()
             .with_context(|| format!("build window `{}`", spec.label))
@@ -63,7 +77,56 @@ impl<R: Runtime> WindowManager<R> {
 /// Entry point invoked from `main`. Builds the Tauri app, registers the
 /// session IPC bridge + dashboard commands, and opens the Dashboard on setup.
 pub fn run() -> Result<()> {
-    tauri::Builder::default()
+    // Debug-only: write a one-shot XDG `.desktop` entry so the Linux
+    // compositor can resolve the running app's icon. No-op on macOS,
+    // Windows, and release builds (where the installed bundle owns the
+    // desktop integration).
+    #[cfg(target_os = "linux")]
+    crate::dev_desktop_entry::ensure();
+
+    // Debug-only: install the tracing→log bridge so `tracing::*` calls in
+    // this process flow to `tauri-plugin-log`'s Webview target and land in
+    // the browser devtools console. The bridge subscriber must be set
+    // **before** the plugin's `build()` (which registers the global logger)
+    // so the first events the plugin would format aren't dropped.
+    #[cfg(debug_assertions)]
+    {
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+        // `try_init` (not `init`) so `cargo test` runs that already
+        // installed a subscriber don't panic on a second registration.
+        let _ = tracing_subscriber::registry()
+            .with(crate::dev_log_bridge::LogBridge)
+            .try_init();
+    }
+
+    let mut builder = tauri::Builder::default();
+
+    // Debug-only: forward `log::*` records (now fed by the `LogBridge`
+    // above) to the webview console + stdout. In release builds we keep
+    // the historical "no logger" posture so production users don't see a
+    // chatty stdout or a plugin-registered global logger they didn't ask
+    // for.
+    #[cfg(debug_assertions)]
+    {
+        use tauri_plugin_log::{Target, TargetKind};
+        builder = builder.plugin(
+            tauri_plugin_log::Builder::default()
+                .level(log::LevelFilter::Debug)
+                // Forge's own crates: keep at debug. Third-party noisy
+                // crates can be filtered tighter as needed.
+                .level_for("hyper", log::LevelFilter::Info)
+                .level_for("h2", log::LevelFilter::Info)
+                .level_for("rustls", log::LevelFilter::Info)
+                .targets([
+                    Target::new(TargetKind::Stdout),
+                    Target::new(TargetKind::Webview),
+                ])
+                .build(),
+        );
+    }
+
+    builder
         // F-138: OS-notification branch of `notifications.bg_agents`.
         // `.plugin(init())` registers `plugin:notification|*` commands that
         // the webview calls via `@tauri-apps/plugin-notification`. The

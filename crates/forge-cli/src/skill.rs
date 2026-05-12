@@ -14,8 +14,8 @@
 //!
 //! # Scopes
 //!
-//! - `user` (default): `<home>/.skills/<id>/` — cross-workspace.
-//! - `workspace`: `<cwd>/.skills/<id>/` — per-project, checked into git.
+//! - `user` (default): `<home>/.agent-skills/<id>/` — cross-workspace.
+//! - `workspace`: `<cwd>/.agent-skills/<id>/` — per-project, checked into git.
 //!
 //! Scopes match the layout in `docs/architecture/skills.md`.
 //!
@@ -52,22 +52,23 @@ use forge_core::Skill;
 /// Where an installed skill should land.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkillScope {
-    /// `<home>/.skills/<id>/` — visible across every workspace.
+    /// `<home>/.agent-skills/<id>/` — visible across every workspace.
     User,
-    /// `<cwd>/.skills/<id>/` — per-project, checked into git.
+    /// `<cwd>/.agent-skills/<id>/` — per-project, checked into git.
     Workspace,
 }
 
 impl SkillScope {
-    /// Path that the F-589 loader expects: the *parent* of `.skills/`, not
-    /// the `.skills/` directory itself. `load_user_skills` and
-    /// `load_workspace_skills` both append `.skills/` internally — passing
-    /// them a path that already ends in `.skills` would make them look for
-    /// `.skills/.skills/` and silently return empty.
+    /// Path that the F-589 loader expects: the *parent* of `.agent-skills/`,
+    /// not the `.agent-skills/` directory itself. `load_user_skills` and
+    /// `load_workspace_skills` both append `.agent-skills/` internally —
+    /// passing them a path that already ends in `.agent-skills` would make
+    /// them look for `.agent-skills/.agent-skills/` and silently return
+    /// empty.
     ///
     /// Pinning this contract by name: if you need the *directory containing
     /// the installed skill folders* (where each skill lives at
-    /// `<scope_root>/.skills/<id>/SKILL.md`), call [`Self::skills_dir`]
+    /// `<scope_root>/.agent-skills/<id>/SKILL.md`), call [`Self::skills_dir`]
     /// instead.
     fn scope_root(&self, workspace_root: &Path, home: &Path) -> PathBuf {
         match self {
@@ -76,12 +77,12 @@ impl SkillScope {
         }
     }
 
-    /// `<scope_root>/.skills/` — the directory whose immediate children are
-    /// per-skill folders. Used by install/remove which write directly under
-    /// `.skills/`. Distinct from [`Self::scope_root`], which is what the
-    /// F-589 loader expects.
+    /// `<scope_root>/.agent-skills/` — the directory whose immediate children
+    /// are per-skill folders. Used by install/remove which write directly
+    /// under `.agent-skills/`. Distinct from [`Self::scope_root`], which is
+    /// what the F-589 loader expects.
     fn skills_dir(&self, workspace_root: &Path, home: &Path) -> PathBuf {
-        self.scope_root(workspace_root, home).join(".skills")
+        self.scope_root(workspace_root, home).join(".agent-skills")
     }
 
     fn label(&self) -> &'static str {
@@ -1183,7 +1184,7 @@ mod tests {
         );
 
         // Nothing leaked into the user scope.
-        let installed_root = home.path().join(".skills").join("evil");
+        let installed_root = home.path().join(".agent-skills").join("evil");
         assert!(
             !installed_root.exists(),
             "install must be transactional or refuse cleanly; nothing should be copied",
@@ -1291,7 +1292,7 @@ mod tests {
 
         // Acceptable outcomes: refuse loudly, or install the originally-
         // validated tree. Installing the attacker tree is the regression.
-        let installed_root = home.path().join(".skills").join("planner");
+        let installed_root = home.path().join(".agent-skills").join("planner");
         match result {
             Err(err) => {
                 let msg = format!("{err:#}").to_lowercase();
@@ -1349,7 +1350,7 @@ mod tests {
 
         let result = install_resolved(&resolved, SkillScope::User, workspace.path(), home.path());
 
-        let installed_root = home.path().join(".skills").join("planner");
+        let installed_root = home.path().join(".agent-skills").join("planner");
         match result {
             Err(_) => {
                 assert!(
@@ -1435,7 +1436,7 @@ mod tests {
             // Drop the swap symlink/leftover regardless of state.
             let _ = fs::remove_file(src.path().join("racer.stash"));
 
-            let installed_root = home.path().join(".skills").join("racer");
+            let installed_root = home.path().join(".agent-skills").join("racer");
             match result {
                 Ok(_) => {
                     let installed_note =
@@ -1582,14 +1583,14 @@ mod tests {
                 name: "Alpha".into(),
                 version: Some("0.1.0".into()),
                 scope: SkillScope::User,
-                source_path: PathBuf::from("/u/.skills/alpha/SKILL.md"),
+                source_path: PathBuf::from("/u/.agent-skills/alpha/SKILL.md"),
             },
             InstalledSkillRow {
                 id: "beta".into(),
                 name: "Beta".into(),
                 version: None,
                 scope: SkillScope::Workspace,
-                source_path: PathBuf::from("/w/.skills/beta/SKILL.md"),
+                source_path: PathBuf::from("/w/.agent-skills/beta/SKILL.md"),
             },
         ];
         let mut out = Vec::new();

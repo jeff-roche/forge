@@ -90,3 +90,14 @@ pub mod window_spec;
 pub mod ipc;
 #[cfg(feature = "webview")]
 pub mod window_manager;
+
+// Linux-only XDG desktop integration so `cargo tauri dev` shows the
+// proper dock/taskbar icon. No-op on macOS and Windows.
+#[cfg(all(feature = "webview", target_os = "linux"))]
+mod dev_desktop_entry;
+
+// Debug-only `tracing` → `log` bridge so `tauri-plugin-log`'s Webview
+// target receives forge-shell's tracing emissions and the user sees
+// backend warns/errors in the browser devtools console.
+#[cfg(feature = "webview")]
+mod dev_log_bridge;

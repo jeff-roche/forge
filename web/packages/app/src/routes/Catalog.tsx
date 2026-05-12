@@ -11,35 +11,39 @@
 // workspace roots, so silently passing an empty string would only surface
 // as a confusing IPC error.
 
-import { type Component, Show } from 'solid-js';
-import { useSearchParams } from '@solidjs/router';
-import { CatalogPane } from '../components/catalog/CatalogPane';
+import { type Component } from 'solid-js';
+import { useParams, useSearchParams } from '@solidjs/router';
+import { CatalogPane, type CatalogKind } from '../components/catalog/CatalogPane';
+import { activeWorkspaceRoot } from '../stores/session';
 import './Catalog.css';
+
+const KIND_VALUES: readonly CatalogKind[] = ['skills', 'mcp', 'agents'];
+
+function parseKind(raw: string | undefined): CatalogKind | undefined {
+  return KIND_VALUES.find((k) => k === raw);
+}
 
 export const Catalog: Component = () => {
   const [searchParams] = useSearchParams<{ ws?: string }>();
-  const workspaceRoot = (): string | null => {
+  const params = useParams<{ kind?: string }>();
+  const initialKind = (): CatalogKind | undefined => parseKind(params.kind);
+
+  // Workspace resolution: explicit `?ws=` wins (matches the old behaviour
+  // when the user opens the catalog from a session window), otherwise fall
+  // back to the dashboard's active workspace. When neither is set we pass
+  // an empty string — the backend treats that as "user-tier only" and
+  // returns globally-installed skills/MCP/agents from `~/.agent-skills`,
+  // `~/.mcp.json`, `~/.agents`. The catalog always renders; per-kind
+  // empty hints handle the truly-no-entries case.
+  const workspaceRoot = (): string => {
     const raw = searchParams.ws;
-    if (!raw) return null;
-    return raw.trim().length === 0 ? null : raw;
+    if (raw && raw.trim().length > 0) return raw;
+    return activeWorkspaceRoot() ?? '';
   };
 
   return (
     <main class="catalog-route">
-      <Show
-        when={workspaceRoot()}
-        fallback={
-          <section class="catalog-route__missing" aria-label="Catalog requires a workspace">
-            <h1 class="catalog-route__title">Catalog</h1>
-            <p class="catalog-route__hint">
-              Open the catalog from a session window or pass a registered
-              workspace path via the <code>?ws=</code> query parameter.
-            </p>
-          </section>
-        }
-      >
-        {(ws) => <CatalogPane workspaceRoot={ws()} />}
-      </Show>
+      <CatalogPane workspaceRoot={workspaceRoot()} initialKind={initialKind()} />
     </main>
   );
 };

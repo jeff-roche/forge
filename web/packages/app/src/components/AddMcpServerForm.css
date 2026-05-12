@@ -39,7 +39,35 @@
 }
 
 .add-mcp-server-form__close {
+  /* See AddProviderForm.css — `×` text hidden, glyph painted via two
+   * rotated pseudo-element bars for pixel-perfect centering. */
+  position: relative;
   margin-left: auto;
+  display: inline-flex;
+  width: var(--sp-6);
+  height: var(--sp-6);
+  padding: 0;
+  font-size: 0;
+}
+
+.add-mcp-server-form__close::before,
+.add-mcp-server-form__close::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: var(--sp-3);
+  height: 2px;
+  background: currentColor;
+  border-radius: 1px;
+}
+
+.add-mcp-server-form__close::before {
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+
+.add-mcp-server-form__close::after {
+  transform: translate(-50%, -50%) rotate(-45deg);
 }
 
 .add-mcp-server-form__form {

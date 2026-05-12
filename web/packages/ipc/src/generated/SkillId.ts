@@ -5,6 +5,6 @@
  *
  * Validated to be a non-empty string with no path separators (`/` or `\`)
  * and no leading dot. Skills are user-named (the parent folder name in
- * `.skills/<name>/SKILL.md`), unlike random-hex IDs in [`crate::ids`].
+ * `.agent-skills/<name>/SKILL.md`), unlike random-hex IDs in [`crate::ids`].
  */
 export type SkillId = string;

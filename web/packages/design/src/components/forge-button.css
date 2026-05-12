@@ -53,7 +53,7 @@
 }
 
 .forge-button--sm {
-  padding: 0 var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
   font-size: var(--type-mono-xxs);
 }
 

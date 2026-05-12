@@ -142,13 +142,33 @@ impl ContainerRuntime for PodmanRuntime {
                 source,
             })?;
         if !info.success() {
+            let stderr_text = String::from_utf8_lossy(&info.stderr).to_string();
+            // SELinux fallback: on enforcing hosts (notably Fedora 44 +
+            // COSMIC + rootless podman) the `podman info` collector touches
+            // cgroup paths that `pasta_t` is not allowed to read. The probe
+            // exits non-zero with an `avc: denied` / `permission denied`
+            // / cgroup-shaped stderr even though the runtime is otherwise
+            // healthy — `--version` already passed, image pulls and
+            // container creates work. Demote to a warning and treat the
+            // runtime as available; if a real op fails later the caller
+            // will see the genuine error in context. Mis-classifying this
+            // as `RuntimeBroken` would fire the dashboard banner on every
+            // launch for users whose podman is functionally fine.
+            if looks_like_selinux_blockage(&stderr_text) {
+                tracing::warn!(
+                    target: "forge_oci::podman",
+                    stderr = %stderr_text.trim(),
+                    "podman info failed with SELinux-pattern stderr; treating runtime as available based on `podman --version`",
+                );
+                return Ok(());
+            }
             // podman is installed but its runtime environment is broken.
             // Do NOT collapse this into RootlessUnavailable — that would tell
             // callers "configure rootless" when the real issue is podman
-            // itself can't function (cgroup delegation, newuidmap, SELinux).
+            // itself can't function (cgroup delegation, missing newuidmap).
             return Err(OciError::RuntimeBroken {
                 tool: PODMAN,
-                stderr: String::from_utf8_lossy(&info.stderr).to_string(),
+                stderr: stderr_text,
             });
         }
 
@@ -555,6 +575,43 @@ fn extract_rootless(parsed: &serde_json::Value) -> Result<bool, String> {
     })
 }
 
+/// `true` when stderr from a failed `podman info` invocation looks like
+/// an SELinux-policy block rather than a genuine runtime misconfiguration.
+/// Matches the well-known marker strings the audit subsystem and recent
+/// rootless-podman releases emit when `pasta_t` (or another sandboxed
+/// helper) is denied a cgroup read. Case-insensitive substring match —
+/// the same stderr line can carry the marker in either an `avc: denied`
+/// audit dump or a plain `permission denied` libc error depending on
+/// kernel version and locale.
+///
+/// The matcher is intentionally narrow. It does NOT short-circuit on a
+/// generic `permission denied` alone — that pattern fires on legitimate
+/// problems too (missing newuidmap binary, wrong file permissions on the
+/// rootless graph driver, etc.). We require the SELinux fingerprint
+/// (`avc: denied`, `selinux`) OR a cgroup-shaped permission-denied path
+/// so we only suppress the banner for the actual SELinux-blocking case.
+pub(crate) fn looks_like_selinux_blockage(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    if lower.contains("avc: denied") {
+        return true;
+    }
+    if lower.contains("selinux") && lower.contains("denied") {
+        return true;
+    }
+    // Cgroup memory.high read failures map onto a pasta SELinux denial
+    // on Fedora-shaped policies; podman echoes the failure back through
+    // its info collector.
+    if lower.contains("permission denied") && lower.contains("cgroup") {
+        return true;
+    }
+    if lower.contains("memory.high")
+        && (lower.contains("permission denied") || lower.contains("read"))
+    {
+        return true;
+    }
+    false
+}
+
 /// Validate a podman container id from `podman create` stdout. Real
 /// podman emits exactly 64 lowercase hex characters (the truncated form
 /// `--format '{{.ID}}'` would surface 12 chars, but our argv passes no
@@ -813,6 +870,70 @@ mod tests {
             matches!(err, OciError::RuntimeBroken { tool: "podman", .. }),
             "expected RuntimeBroken, got {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn detect_treats_selinux_avc_denial_as_available() {
+        // SELinux fallback: `podman info` fails because the audit
+        // subsystem dumped an `avc: denied` for `pasta_t` reading a
+        // cgroup file. `--version` already passed, so podman itself is
+        // installed and callable. Demote the info failure to a warning
+        // and treat the runtime as available — surfacing this case as
+        // `RuntimeBroken` would fire the dashboard banner on every
+        // launch on hosts where rootless podman is functionally fine.
+        let runner = RecordingRunner::new();
+        runner.push(StubResponse::ok_stdout(b"podman version 5.0\n".to_vec()));
+        runner.push(StubResponse::err(
+            b"type=AVC msg=audit(...): avc: denied { read } for pasta\n".to_vec(),
+        ));
+
+        rt(runner)
+            .detect()
+            .await
+            .expect("SELinux blockage falls back to Ok");
+    }
+
+    #[tokio::test]
+    async fn detect_treats_cgroup_permission_denied_as_available() {
+        // The other shape the same denial takes when libc + glibc render
+        // the EACCES instead of the audit-subsystem dump.
+        let runner = RecordingRunner::new();
+        runner.push(StubResponse::ok_stdout(b"podman version 5.0\n".to_vec()));
+        runner.push(StubResponse::err(
+            b"failed to read /sys/fs/cgroup/user.slice/.../memory.high: permission denied\n"
+                .to_vec(),
+        ));
+
+        rt(runner)
+            .detect()
+            .await
+            .expect("cgroup EACCES falls back to Ok");
+    }
+
+    #[tokio::test]
+    async fn looks_like_selinux_blockage_rejects_generic_permission_denied() {
+        // Generic `permission denied` without a cgroup / SELinux fingerprint
+        // must NOT trigger the fallback — it could be missing newuidmap or a
+        // bad storage driver, both of which still need the banner.
+        assert!(!looks_like_selinux_blockage(
+            "permission denied: /usr/bin/newuidmap",
+        ));
+        assert!(!looks_like_selinux_blockage(""));
+        assert!(!looks_like_selinux_blockage("some other failure"));
+    }
+
+    #[tokio::test]
+    async fn looks_like_selinux_blockage_matches_avc_and_cgroup_shapes() {
+        assert!(looks_like_selinux_blockage("avc: denied { read }"));
+        assert!(looks_like_selinux_blockage(
+            "SELinux is preventing the operation: denied",
+        ));
+        assert!(looks_like_selinux_blockage(
+            "open /sys/fs/cgroup/foo: permission denied",
+        ));
+        assert!(looks_like_selinux_blockage(
+            "could not read memory.high: permission denied",
+        ));
     }
 
     #[tokio::test]

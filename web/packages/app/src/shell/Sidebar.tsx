@@ -27,17 +27,11 @@ import {
   createMemo,
   createResource,
   onCleanup,
-  onMount,
 } from 'solid-js';
 import { useMatch } from '@solidjs/router';
 import { listProviders, sessionList } from '../ipc/dashboard';
 import { listAgents, listMcpServers, listSkills } from '../ipc/catalog';
-import {
-  CONTAINERS_CHANGED_EVENT,
-  listActiveContainers,
-} from '../ipc/containers';
 import { activeWorkspaceRoot } from '../stores/session';
-import { listen } from '@tauri-apps/api/event';
 import './Sidebar.css';
 
 // ---------------------------------------------------------------------------
@@ -93,22 +87,6 @@ const NAV: NavEntry[] = [
     icon: Icon('M4 5h16v4H4zM4 11h16v4H4zM4 17h16v2H4z'),
   },
   {
-    id: 'recent',
-    group: 'workspace',
-    label: 'Recent',
-    route: '/recent',
-    placeholderTicket: 'F-XXX',
-    icon: Icon('M12 8v5l3 2M21 12a9 9 0 1 1-9-9'),
-  },
-  {
-    id: 'git',
-    group: 'workspace',
-    label: 'Git',
-    route: '/git',
-    placeholderTicket: 'F-XXX',
-    icon: Icon('M5 3v10a4 4 0 0 0 4 4h6M5 7a2 2 0 1 0 0-4 2 2 0 0 0 0 4zm14 14a2 2 0 1 0 0-4 2 2 0 0 0 0 4z'),
-  },
-  {
     id: 'providers',
     group: 'ai',
     label: 'Providers',
@@ -141,27 +119,11 @@ const NAV: NavEntry[] = [
     icon: Icon('M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 21a8 8 0 0 1 16 0'),
   },
   {
-    id: 'containers',
-    group: 'system',
-    label: 'Containers',
-    route: '/containers',
-    placeholderTicket: 'F-XXX',
-    icon: Icon('M3 8h18v10H3zM3 8l3-4h12l3 4M8 12h2M14 12h2'),
-  },
-  {
     id: 'usage',
     group: 'system',
     label: 'Usage',
     route: '/usage',
     icon: Icon('M4 19V5M9 19V9M14 19v-6M19 19V3'),
-  },
-  {
-    id: 'settings',
-    group: 'system',
-    label: 'Settings',
-    route: '/settings',
-    placeholderTicket: 'F-XXX',
-    icon: Icon('M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM19 12l2 1-1 3-2-.5-1.5 1.5.5 2-3 1-1-2h-2l-1 2-3-1 .5-2L6.5 16.5 4.5 17 3.5 14l2-1v-2l-2-1L4.5 7l2 .5 1.5-1.5-.5-2 3-1 1 2h2l1-2 3 1-.5 2L18 7.5l2-.5 1 3-2 1z'),
   },
 ];
 
@@ -179,15 +141,10 @@ export interface SidebarProps {
   sources?: CountSources;
 }
 
-const RECENT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
-
 function buildDefaultSources(): {
   sources: CountSources;
   cleanup: () => void;
 } {
-  // Sessions list — drives both "Sessions" (active count) and "Recent"
-  // (last-7-day count). Re-fetched once on mount; downstream tickets can
-  // wire `session:list_changed` once that event exists.
   const [sessions] = createResource(async () => {
     try {
       return await sessionList();
@@ -223,41 +180,6 @@ function buildDefaultSources(): {
   const mcps = catalogFetcher(listMcpServers);
   const agents = catalogFetcher(listAgents);
 
-  // Containers — list_active_containers is gated to the dashboard window
-  // label. On non-dashboard windows the call rejects and the badge stays
-  // hidden, which matches the spec's per-badge fail-silent rule.
-  const [containers, { refetch: refetchContainers }] = createResource(
-    async () => {
-      try {
-        const rows = await listActiveContainers();
-        return rows.filter((r) => !r.stopped).length;
-      } catch {
-        return undefined;
-      }
-    },
-  );
-
-  let unlistenContainers: (() => void) | null = null;
-  void (async () => {
-    try {
-      unlistenContainers = await listen(CONTAINERS_CHANGED_EVENT, () => {
-        void refetchContainers();
-      });
-    } catch {
-      unlistenContainers = null;
-    }
-  })();
-
-  const recentCount = (): CountResult => {
-    const rows = sessions();
-    if (!rows) return undefined;
-    const cutoff = Date.now() - RECENT_WINDOW_MS;
-    return rows.filter((r) => {
-      const t = Date.parse(r.lastEventAt);
-      return Number.isFinite(t) && t >= cutoff;
-    }).length;
-  };
-
   const activeSessionCount = (): CountResult => {
     const rows = sessions();
     if (!rows) return undefined;
@@ -267,18 +189,13 @@ function buildDefaultSources(): {
   return {
     sources: {
       sessions: activeSessionCount,
-      recent: recentCount,
-      // Git: no IPC source exists for changed-file count today.
       providers: () => providers()?.length,
       skills: () => skills(),
       mcp: () => mcps(),
       agents: () => agents(),
-      containers: () => containers(),
-      // Usage / Settings intentionally omit a badge per spec.
+      // Usage intentionally omits a badge per spec.
     },
-    cleanup: () => {
-      if (unlistenContainers) unlistenContainers();
-    },
+    cleanup: () => {},
   };
 }
 
@@ -311,7 +228,7 @@ export const Sidebar: Component<SidebarProps> = (props) => {
       data-testid="sidebar"
     >
       <header class="sidebar__brand" data-testid="sidebar-brand">
-        <span class="sidebar__brand-mark" aria-hidden="true">{'▲'}</span>
+        <ForgeBrandMark />
         <span class="sidebar__brand-name">Forge</span>
         <span class="sidebar__brand-tag">any ai. one editor.</span>
       </header>
@@ -330,6 +247,28 @@ export const Sidebar: Component<SidebarProps> = (props) => {
     </nav>
   );
 };
+
+/** Inline forge mark — mirrors `crates/forge-shell/icons/forge-mark.svg`.
+ * The webview can't reach files outside the bundled web assets, so the
+ * canonical SVG is reproduced here. Keep the two in sync if either side
+ * changes shape. */
+const ForgeBrandMark: Component = () => (
+  <svg
+    class="sidebar__brand-mark"
+    viewBox="0 0 512 512"
+    aria-hidden="true"
+    focusable="false"
+  >
+    <rect x="0" y="0" width="512" height="512" rx="72" ry="72" fill="#2a0800" />
+    <g fill="#ff4a12">
+      <rect x="144" y="96" width="72" height="320" />
+      <rect x="144" y="96" width="240" height="72" />
+      <rect x="144" y="224" width="176" height="64" />
+      <rect x="96" y="384" width="240" height="48" rx="6" ry="6" />
+    </g>
+    <circle cx="408" cy="120" r="20" fill="#ffaa33" />
+  </svg>
+);
 
 interface SidebarRowProps {
   entry: NavEntry;

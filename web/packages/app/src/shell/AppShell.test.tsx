@@ -1,9 +1,9 @@
 // F-716: AppShell route-mount tests. AppShell wraps every top-level route
-// and supplies the ActivityBar + StatusBar on all routes plus a
-// session-scoped FilesSidebar slot. These tests pin the route-agnostic
-// contract: the chrome is always present; FilesSidebar mounts only on the
-// session route and only when its bridge (activeWorkspaceRoot + an
-// activeOpenFile callback) is wired.
+// and supplies the StatusBar on all routes plus a session-scoped
+// ActivityBar + FilesSidebar pair. These tests pin the contract: StatusBar
+// is route-agnostic; ActivityBar + FilesSidebar mount only on the session
+// route (FilesSidebar additionally requires activeWorkspaceRoot + an
+// activeOpenFile callback).
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, waitFor } from '@solidjs/testing-library';
@@ -63,10 +63,10 @@ describe('AppShell', () => {
     cleanup();
   });
 
-  it('renders the ActivityBar on the Dashboard route', async () => {
-    const { findByTestId } = renderAt('/');
-    expect(await findByTestId('activity-bar')).toBeInTheDocument();
+  it('hides the ActivityBar on the Dashboard route', async () => {
+    const { findByTestId, queryByTestId } = renderAt('/');
     expect(await findByTestId(DASHBOARD_TESTID)).toBeInTheDocument();
+    expect(queryByTestId('activity-bar')).toBeNull();
   });
 
   it('renders the StatusBar on the Dashboard route', async () => {
@@ -81,11 +81,11 @@ describe('AppShell', () => {
     expect(await findByTestId(SESSION_TESTID)).toBeInTheDocument();
   });
 
-  it('renders the ActivityBar and StatusBar on the Usage route', async () => {
-    const { findByTestId } = renderAt('/usage');
-    expect(await findByTestId('activity-bar')).toBeInTheDocument();
+  it('hides the ActivityBar on the Usage route', async () => {
+    const { findByTestId, queryByTestId } = renderAt('/usage');
     expect(await findByTestId('status-bar')).toBeInTheDocument();
     expect(await findByTestId(USAGE_TESTID)).toBeInTheDocument();
+    expect(queryByTestId('activity-bar')).toBeNull();
   });
 
   it('renders the matched route content inside the shell', async () => {
@@ -98,7 +98,7 @@ describe('AppShell', () => {
   it('does not mount FilesSidebar on non-session routes', async () => {
     setActiveWorkspaceRoot('/ws');
     const { findByTestId, queryByTestId } = renderAt('/');
-    await findByTestId('activity-bar');
+    await findByTestId('app-shell');
     // FilesSidebar is workspace chrome — it must not appear on Dashboard
     // even when the workspace bridge happens to be populated from a
     // previous session.
@@ -160,13 +160,13 @@ describe('AppShell', () => {
     await waitFor(() => expect(queryByTestId('files-sidebar')).toBeNull());
   });
 
-  it('does not surface FilesSidebar on the dashboard even with Files selected', async () => {
+  it('does not surface FilesSidebar on the dashboard since the ActivityBar is not mounted there', async () => {
     setActiveWorkspaceRoot('/ws');
     const { findByTestId, queryByTestId } = renderAt('/');
-    const filesBtn = await findByTestId('activity-bar-files');
-    filesBtn.click();
-    // FilesSidebar is gated behind `isSessionRoute()` — selecting the
-    // activity on a non-session route must not mount the workspace tree.
+    await findByTestId('app-shell');
+    // ActivityBar is gated behind `isSessionRoute()` — there is no Files
+    // toggle on Dashboard, so the workspace tree cannot mount.
+    expect(queryByTestId('activity-bar-files')).toBeNull();
     expect(queryByTestId('files-sidebar')).toBeNull();
   });
 });

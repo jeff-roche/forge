@@ -23,7 +23,7 @@ const sample = (over: Partial<ProviderEntry> = {}): ProviderEntry => ({
   ...over,
 });
 
-const FOUR_BUILTINS: ProviderEntry[] = [
+const BUILTINS: ProviderEntry[] = [
   sample({ id: 'ollama', display_name: 'Ollama', model: 'llama-3.3' }),
   sample({
     id: 'anthropic',
@@ -40,13 +40,6 @@ const FOUR_BUILTINS: ProviderEntry[] = [
     model_available: true,
     model: 'gpt-4o',
   }),
-  sample({
-    id: 'custom_openai',
-    display_name: 'Custom OpenAI-compat',
-    credential_required: true,
-    has_credential: false,
-    model_available: false,
-  }),
 ];
 
 function setupInvokeMock(opts: {
@@ -59,7 +52,7 @@ function setupInvokeMock(opts: {
   invokeMock.mockImplementation((cmd: string) => {
     switch (cmd) {
       case 'dashboard_list_providers':
-        return Promise.resolve(opts.entries ?? FOUR_BUILTINS);
+        return Promise.resolve(opts.entries ?? BUILTINS);
       case 'get_active_provider':
         return Promise.resolve(opts.active ?? null);
       case 'set_active_provider':
@@ -167,12 +160,11 @@ describe('ProvidersSection (F-721)', () => {
     expect(group.getAttribute('aria-label')).toBe('Active provider');
 
     const rows = await findAllByRole('radio');
-    expect(rows.length).toBe(4);
+    expect(rows.length).toBe(3);
     const labels = rows.map((r) => r.textContent ?? '');
     expect(labels.some((l) => l.includes('Ollama'))).toBe(true);
     expect(labels.some((l) => l.includes('Anthropic'))).toBe(true);
     expect(labels.some((l) => l.includes('OpenAI'))).toBe(true);
-    expect(labels.some((l) => l.includes('Custom OpenAI-compat'))).toBe(true);
   });
 
   // F-733: disabled providers (per the Providers page Enabled toggle) must
@@ -222,12 +214,10 @@ describe('ProvidersSection (F-721)', () => {
     const anthropic = rows.find((r) => r.textContent?.includes('Anthropic'))!;
     const openai = rows.find((r) => r.textContent?.includes('OpenAI'))!;
     const ollama = rows.find((r) => r.textContent?.includes('Ollama'))!;
-    const custom = rows.find((r) => r.textContent?.includes('Custom OpenAI-compat'))!;
 
     expect(anthropic.getAttribute('data-brand')).toBe('anthropic');
     expect(openai.getAttribute('data-brand')).toBe('openai');
     expect(ollama.getAttribute('data-brand')).toBe('local');
-    expect(custom.getAttribute('data-brand')).toBe('custom');
 
     // Each row carries a single brand dot.
     for (const row of rows) {
@@ -346,7 +336,7 @@ describe('ProvidersSection (F-721)', () => {
     invokeMock.mockImplementation((cmd: string, args?: Record<string, unknown>) => {
       switch (cmd) {
         case 'dashboard_list_providers':
-          return Promise.resolve(FOUR_BUILTINS);
+          return Promise.resolve(BUILTINS);
         case 'get_active_provider':
           return Promise.resolve(activeAfterSet);
         case 'set_active_provider':
@@ -405,7 +395,7 @@ describe('ProvidersSection (F-721)', () => {
     invokeMock.mockImplementation((cmd: string) => {
       switch (cmd) {
         case 'dashboard_list_providers':
-          return Promise.resolve(FOUR_BUILTINS);
+          return Promise.resolve(BUILTINS);
         case 'get_active_provider':
           return Promise.resolve(null);
         case 'set_active_provider':
@@ -458,7 +448,7 @@ describe('ProvidersSection (F-721)', () => {
     invokeMock.mockImplementation((cmd: string) => {
       switch (cmd) {
         case 'dashboard_list_providers':
-          return Promise.resolve(FOUR_BUILTINS);
+          return Promise.resolve(BUILTINS);
         case 'get_active_provider':
           return Promise.resolve(null);
         case 'set_active_provider':
@@ -538,9 +528,8 @@ describe('ProvidersSection (F-721)', () => {
       const { findByTestId } = renderSection();
       await waitForFetch();
 
-      // Fixture has anthropic + custom_openai both missing credentials.
+      // Fixture has anthropic missing credentials.
       await findByTestId('provider-cta-add-credential-anthropic');
-      await findByTestId('provider-cta-add-credential-custom_openai');
     });
 
     it('`Add credential` click does not also promote its row to active', async () => {

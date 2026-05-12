@@ -6,7 +6,15 @@
 .app-shell {
   display: flex;
   flex-direction: column;
-  min-height: 100vh;
+  /* Clamp to the viewport so the trailing StatusBar stays pinned at the
+   * bottom edge regardless of how tall the route's content is. Several
+   * route stylesheets (Dashboard, Catalog, Usage, AgentMonitor) declare
+   * `min-height: 100vh` for the content surface — without a clamp at the
+   * shell level those routes would push the StatusBar below the fold and
+   * require the user to scroll to see it. `height: 100vh` + the inner
+   * `overflow: auto` slot below contains route overflow without losing
+   * the StatusBar. */
+  height: 100vh;
   background: var(--color-bg);
   color: var(--color-text-primary);
   font-family: var(--font-body);
@@ -24,4 +32,9 @@
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
+  /* Route content scrolls inside this slot rather than pushing the
+   * StatusBar off-screen. AgentMonitor has its own inner scroll regions
+   * (already in `AgentMonitor.css`); that nesting works fine — the inner
+   * regions stop the scroll chain before it bubbles here. */
+  overflow: auto;
 }

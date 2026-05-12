@@ -290,10 +290,27 @@ mod tests {
 
     #[test]
     fn provider_lookup_accepts_builtins() {
-        let settings = AppSettings::default();
-        for id in &["anthropic", "openai", "ollama", "custom_openai"] {
+        // Under the "empty by default" model, a built-in is only known once
+        // the user has added it (key present in `providers.enabled`).
+        let empty = AppSettings::default();
+        for id in &["anthropic", "openai", "ollama"] {
+            assert!(
+                !provider_is_known(&empty, id),
+                "fresh install should treat `{id}` as unconfigured"
+            );
+        }
+
+        let mut settings = AppSettings::default();
+        for id in &["anthropic", "openai", "ollama"] {
+            settings.providers.enabled.insert((*id).into(), true);
+        }
+        for id in &["anthropic", "openai", "ollama"] {
             assert!(provider_is_known(&settings, id), "expected `{id}` known");
         }
+
+        // The bare `custom_openai` slug is a kind, not a row — concrete
+        // entries arrive as `custom_openai:<name>`.
+        assert!(!provider_is_known(&settings, "custom_openai"));
     }
 
     /// Unknown-agent rejection: pointing the loader at an empty workspace

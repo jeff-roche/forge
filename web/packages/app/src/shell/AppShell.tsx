@@ -78,10 +78,12 @@ export const AppShell: Component<{ children?: JSX.Element }> = (props) => {
   return (
     <div class="app-shell" data-testid="app-shell">
       <div class="app-shell__body">
-        <ActivityBar
-          active={activeActivity()}
-          onSelect={onActivitySelect}
-        />
+        <Show when={isSessionRoute()}>
+          <ActivityBar
+            active={activeActivity()}
+            onSelect={onActivitySelect}
+          />
+        </Show>
         <Sidebar />
         <Show when={showFilesSidebar()}>
           <FilesSidebar

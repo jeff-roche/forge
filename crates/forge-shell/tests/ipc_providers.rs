@@ -127,12 +127,33 @@ fn invoke_err(
     }
 }
 
+/// Seed `<user_cfg_dir>/forge/settings.toml` with `[providers.enabled]`
+/// entries for the three built-ins. Tests that want a "user already added
+/// every built-in" baseline call this — under the "empty by default"
+/// model, `dashboard_list_providers` would otherwise return nothing.
+async fn seed_user_settings(user_cfg_dir: &std::path::Path, body: &str) {
+    let dir = user_cfg_dir.join("forge");
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+    tokio::fs::write(dir.join("settings.toml"), body)
+        .await
+        .unwrap();
+}
+
+const BUILTINS_ENABLED_TOML: &str = r#"
+[providers.enabled]
+ollama = true
+anthropic = true
+openai = true
+"#;
+
 // ---------------------------------------------------------------------------
 // list_providers
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
-async fn list_providers_returns_four_builtins_when_no_custom_entries() {
+async fn list_providers_returns_empty_on_fresh_install() {
+    // Under the "empty by default" model, no providers are surfaced until
+    // the user adds one through the Add Provider modal.
     let workspace = TempDir::new().unwrap();
     let user_cfg_dir = TempDir::new().unwrap();
     let creds: Arc<dyn Credentials> = Arc::new(MemoryStore::new());
@@ -142,9 +163,24 @@ async fn list_providers_returns_four_builtins_when_no_custom_entries() {
 
     let result = invoke_ok(&window, "dashboard_list_providers", serde_json::json!({}));
     let entries = result.as_array().expect("list");
-    assert_eq!(entries.len(), 4);
+    assert!(entries.is_empty(), "expected no providers, got: {result}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn list_providers_returns_added_builtins() {
+    let workspace = TempDir::new().unwrap();
+    let user_cfg_dir = TempDir::new().unwrap();
+    let creds: Arc<dyn Credentials> = Arc::new(MemoryStore::new());
+    seed_user_settings(user_cfg_dir.path(), BUILTINS_ENABLED_TOML).await;
+
+    let (app, _registry) = make_app(&[workspace.path()], user_cfg_dir.path(), creds).await;
+    let window = make_dashboard_window(&app);
+
+    let result = invoke_ok(&window, "dashboard_list_providers", serde_json::json!({}));
+    let entries = result.as_array().expect("list");
+    assert_eq!(entries.len(), 3);
     let ids: Vec<&str> = entries.iter().map(|e| e["id"].as_str().unwrap()).collect();
-    assert_eq!(ids, vec!["ollama", "anthropic", "openai", "custom_openai"]);
+    assert_eq!(ids, vec!["ollama", "anthropic", "openai"]);
 
     // Ollama is keyless ⇒ credential_required false.
     assert_eq!(entries[0]["credential_required"], false);
@@ -163,6 +199,7 @@ async fn list_providers_reflects_credential_store_presence() {
         .await
         .unwrap();
     let creds: Arc<dyn Credentials> = store;
+    seed_user_settings(user_cfg_dir.path(), BUILTINS_ENABLED_TOML).await;
 
     let (app, _registry) = make_app(&[workspace.path()], user_cfg_dir.path(), creds).await;
     let window = make_dashboard_window(&app);
@@ -184,28 +221,29 @@ async fn list_providers_appends_user_configured_custom_openai_entries() {
     let user_cfg_dir = TempDir::new().unwrap();
     let creds: Arc<dyn Credentials> = Arc::new(MemoryStore::new());
 
-    // Seed user settings with a custom_openai entry.
-    let user_settings_dir = user_cfg_dir.path().join("forge");
-    tokio::fs::create_dir_all(&user_settings_dir).await.unwrap();
-    let user_settings_path = user_settings_dir.join("settings.toml");
-    tokio::fs::write(
-        &user_settings_path,
+    // Seed user settings with the built-ins enabled and a custom_openai entry.
+    seed_user_settings(
+        user_cfg_dir.path(),
         r#"
+[providers.enabled]
+ollama = true
+anthropic = true
+openai = true
+
 [providers.custom_openai.vllm-local]
 base_url = "http://127.0.0.1:8000"
 model = "Qwen2"
 auth = { shape = "none" }
 "#,
     )
-    .await
-    .unwrap();
+    .await;
 
     let (app, _registry) = make_app(&[workspace.path()], user_cfg_dir.path(), creds).await;
     let window = make_dashboard_window(&app);
 
     let result = invoke_ok(&window, "dashboard_list_providers", serde_json::json!({}));
     let entries = result.as_array().expect("list");
-    assert_eq!(entries.len(), 5);
+    assert_eq!(entries.len(), 4);
     let custom = entries.last().unwrap();
     assert_eq!(custom["id"], "custom_openai:vllm-local");
     // `auth = none` ⇒ credential not required.
@@ -282,6 +320,7 @@ async fn set_active_provider_persists_known_builtin() {
     let workspace = TempDir::new().unwrap();
     let user_cfg_dir = TempDir::new().unwrap();
     let creds: Arc<dyn Credentials> = Arc::new(MemoryStore::new());
+    seed_user_settings(user_cfg_dir.path(), BUILTINS_ENABLED_TOML).await;
 
     let (app, _registry) = make_app(&[workspace.path()], user_cfg_dir.path(), creds).await;
     let window = make_dashboard_window(&app);
@@ -394,6 +433,7 @@ async fn set_active_provider_then_list_reflects_choice_through_credential_store_
         .await
         .unwrap();
     let creds: Arc<dyn Credentials> = store;
+    seed_user_settings(user_cfg_dir.path(), BUILTINS_ENABLED_TOML).await;
 
     let (app, _registry) = make_app(&[workspace.path()], user_cfg_dir.path(), creds).await;
     let window = make_dashboard_window(&app);
@@ -433,6 +473,7 @@ async fn rapid_set_active_provider_calls_leave_settings_in_a_known_state() {
     let workspace = TempDir::new().unwrap();
     let user_cfg_dir = TempDir::new().unwrap();
     let creds: Arc<dyn Credentials> = Arc::new(MemoryStore::new());
+    seed_user_settings(user_cfg_dir.path(), BUILTINS_ENABLED_TOML).await;
     let (app, _registry) = make_app(&[workspace.path()], user_cfg_dir.path(), creds).await;
     let window = make_dashboard_window(&app);
 

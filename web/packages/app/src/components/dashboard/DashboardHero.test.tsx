@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, waitFor } from '@solidjs/testing-library';
-import { DashboardHero } from './DashboardHero';
+import { DashboardHero, FORGE_ADJECTIVES } from './DashboardHero';
 import { setInvokeForTesting } from '../../lib/tauri';
 
 describe('DashboardHero (F-719 / F-728)', () => {
@@ -21,15 +21,25 @@ describe('DashboardHero (F-719 / F-728)', () => {
     cleanup();
   });
 
-  it('renders the verbatim headline `Welcome back. Forge something.`', () => {
+  it('renders the headline with a random Forge adjective', () => {
     const { getByRole } = render(() => <DashboardHero />);
     const heading = getByRole('heading', { level: 1 });
     // The headline is split across a `<br>` for layout; the accessible
-    // text concatenates the two lines.
-    expect(heading.textContent).toBe('Welcome back.Forge something.');
+    // text concatenates the two lines. The adjective is picked from
+    // FORGE_ADJECTIVES at mount, so test against the full set.
+    const pattern = new RegExp(
+      `^Welcome back\\.Forge something (${FORGE_ADJECTIVES.join('|')})\\.$`,
+    );
+    expect(heading.textContent).toMatch(pattern);
     // The brand word paints via an inline <em> so the ember override
     // hooks cleanly without splitting the text node.
     expect(heading.querySelector('em')?.textContent).toBe('Forge');
+  });
+
+  it('ships at least 25 adjectives so repeat visits feel fresh', () => {
+    expect(FORGE_ADJECTIVES.length).toBeGreaterThanOrEqual(25);
+    // No duplicates — would skew the random distribution.
+    expect(new Set(FORGE_ADJECTIVES).size).toBe(FORGE_ADJECTIVES.length);
   });
 
   it('renders both CTA buttons with the verbatim labels', () => {

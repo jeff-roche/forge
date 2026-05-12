@@ -108,8 +108,9 @@ export function isProviderEnabled(entry: ProviderEntry): boolean {
 }
 
 /**
- * List the four built-in providers plus any user-configured custom_openai
- * entries. Wraps the `dashboard_list_providers` Tauri command — the
+ * List the three built-in providers (Ollama, Anthropic, OpenAI) plus one
+ * row per user-configured `custom_openai:<name>` entry. Wraps the
+ * `dashboard_list_providers` Tauri command — the
  * `dashboard_` prefix disambiguates from F-591's planned roster catalog
  * `list_providers` command (Tauri rejects duplicate command names).
  */

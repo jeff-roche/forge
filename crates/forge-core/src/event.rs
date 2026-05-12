@@ -453,4 +453,36 @@ pub enum Event {
     /// The same string is what `Credentials::has_credential` keys on, and
     /// what `[providers.active]` now persists.
     ProviderChanged { provider_id: String },
+
+    /// Free-form log line bridged from the daemon's `tracing` subscriber to
+    /// the webview console. Dev-mode visibility for backend warnings and
+    /// errors that would otherwise live only in the per-session
+    /// `events.jsonl`. The TS adapter routes the payload to the matching
+    /// `console.<level>` call so the user sees daemon errors in devtools
+    /// alongside frontend ones.
+    ///
+    /// Field shape mirrors `tracing::Event` minimally:
+    /// - `level` — coarse severity bucket
+    /// - `target` — emitting module path (`forge_session::compaction`, etc.)
+    /// - `message` — rendered display message
+    /// - `at` — emit timestamp
+    LogLine {
+        at: DateTime<Utc>,
+        level: LogLineLevel,
+        target: String,
+        message: String,
+    },
+}
+
+/// Severity bucket for [`Event::LogLine`]. Wire shape is the lowercase
+/// `tracing::Level` name so the TS adapter can drop it straight into a
+/// `console[level]` indexed call without a translation table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogLineLevel {
+    Error,
+    Warn,
+    Info,
+    Debug,
+    Trace,
 }
