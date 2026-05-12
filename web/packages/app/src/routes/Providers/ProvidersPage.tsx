@@ -1,6 +1,6 @@
 import { type Component, createResource, createSignal, For, onMount, Show } from 'solid-js';
 import { useSearchParams } from '@solidjs/router';
-import { Button, Skeleton, StatusPill } from '@forge/design';
+import { Button, IconButton, Skeleton, StatusPill } from '@forge/design';
 import {
   getActiveProvider,
   listProviders,
@@ -423,19 +423,18 @@ function EditProviderSlot(props: {
       : `No editable fields for ${props.provider.id} yet`;
   return (
     <>
-      <button
-        type="button"
+      <IconButton
+        variant="ghost"
+        size="sm"
         class="edit-provider__trigger"
         data-testid={`edit-provider-trigger-${props.provider.id}`}
-        title={tooltip()}
-        aria-label={tooltip()}
+        label={tooltip()}
         disabled={!isCustom()}
         onClick={() => {
           if (isCustom()) setOpen(true);
         }}
-      >
-        <PencilIcon />
-      </button>
+        icon={<PencilIcon />}
+      />
       <Show when={isCustom()}>
         <AddProviderForm
           mode="edit"

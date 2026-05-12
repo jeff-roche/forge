@@ -95,36 +95,9 @@
   gap: var(--sp-3);
 }
 
-/* Icon-only Remove trigger. Sits in the row's terminal action cluster as
- * a destructive affordance; the verbose confirmation lives behind the
- * dialog so the row UI itself stays tight. Hover lifts the glyph to
- * the error color so the destructive intent is obvious before click. */
-.remove-provider__trigger {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: var(--sp-6);
-  height: var(--sp-6);
-  padding: 0;
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: var(--r-sm);
-  color: var(--color-text-secondary);
-  cursor: pointer;
-  transition: var(--ease);
-}
-
-.remove-provider__trigger:hover {
-  color: var(--color-error);
-  border-color: var(--color-error-border);
-  background: var(--color-error-bg);
-}
-
-.remove-provider__trigger:focus-visible {
-  outline: 2px solid var(--color-ember-400);
-  outline-offset: 2px;
-}
-
+/* Icon glyph inside the IconButton trigger. The trigger itself is the
+ * `@forge/design` IconButton `danger` variant — error-tinted hover + 1px
+ * lift come from the primitive baseline. */
 .remove-provider__icon {
   flex-shrink: 0;
 }
