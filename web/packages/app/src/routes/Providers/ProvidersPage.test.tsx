@@ -24,12 +24,13 @@ const SAMPLE_ROWS: ProviderEntry[] = [
     enabled: true,
   },
   {
-    id: 'ollama',
-    display_name: 'Ollama',
-    credential_required: false,
+    id: 'custom_openai:ollama',
+    display_name: 'custom_openai — ollama',
+    credential_required: true,
     has_credential: false,
     model_available: true,
-    model: 'llama3:8b',
+    model: 'llama3.2',
+    endpoint: 'http://127.0.0.1:11434/v1',
     enabled: false,
   },
   {
@@ -44,8 +45,8 @@ const SAMPLE_ROWS: ProviderEntry[] = [
   },
 ];
 
-const BUILTIN_IDS = ['anthropic', 'openai', 'ollama'];
-const CUSTOM_IDS = ['custom_openai:vllm'];
+const BUILTIN_IDS = ['anthropic', 'openai'];
+const CUSTOM_IDS = ['custom_openai:ollama', 'custom_openai:vllm'];
 
 function renderPage() {
   return render(() => (
@@ -207,18 +208,76 @@ describe('<ProvidersPage> (F-729)', () => {
       const rowsRendered = getAllByTestId('provider-row');
       const disabledOnes = rowsRendered.filter((el) => el.getAttribute('data-enabled') === 'false');
       expect(disabledOnes).toHaveLength(SAMPLE_ROWS.filter((r) => r.enabled === false).length);
-      // F-732: Edit button only renders for custom_openai:* rows; built-ins
-      // get an empty non-applicable slot so the row track stays aligned.
+      // Edit pencil renders on every row. Enabled for custom_openai:* rows
+      // (where endpoint/model are editable today); disabled for built-ins
+      // until per-vendor edit dialogs land.
       for (const id of CUSTOM_IDS) {
-        expect(getByTestId(`edit-provider-trigger-${id}`)).toBeInTheDocument();
+        const trigger = getByTestId(
+          `edit-provider-trigger-${id}`,
+        ) as HTMLButtonElement;
+        expect(trigger).toBeInTheDocument();
+        expect(trigger.disabled).toBe(false);
       }
       for (const id of BUILTIN_IDS) {
-        expect(getByTestId(`edit-not-applicable-${id}`)).toBeInTheDocument();
+        const trigger = getByTestId(
+          `edit-provider-trigger-${id}`,
+        ) as HTMLButtonElement;
+        expect(trigger).toBeInTheDocument();
+        expect(trigger.disabled).toBe(true);
+        expect(trigger.getAttribute('title') ?? '').toContain('No editable fields');
       }
       // F-732: Remove button renders for every row.
       for (const row of SAMPLE_ROWS) {
         expect(getByTestId(`remove-provider-trigger-${row.id}`)).toBeInTheDocument();
       }
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Active provider selector — per row "Set active" / "ACTIVE" badge
+  // ---------------------------------------------------------------------------
+
+  describe('active provider', () => {
+    it('marks the active provider with the ACTIVE badge and `Set active` on the others', async () => {
+      setInvokeForTesting(
+        (async (cmd: string) => {
+          if (cmd === 'dashboard_list_providers') return SAMPLE_ROWS;
+          if (cmd === 'get_active_provider') return 'anthropic';
+          return undefined;
+        }) as never,
+      );
+      const { findByTestId, queryByTestId } = renderPage();
+      // Active row gets the badge; no Set-active button.
+      await findByTestId('active-badge-anthropic');
+      expect(queryByTestId('set-active-anthropic')).toBeNull();
+      // Non-active rows get the Set-active button; no badge.
+      expect(await findByTestId('set-active-openai')).toBeInTheDocument();
+      expect(await findByTestId('set-active-custom_openai:ollama')).toBeInTheDocument();
+      expect(queryByTestId('active-badge-openai')).toBeNull();
+    });
+
+    it('clicking Set active fires set_active_provider with the row id', async () => {
+      const calls: string[] = [];
+      setInvokeForTesting(
+        (async (cmd: string, args?: Record<string, unknown>) => {
+          calls.push(cmd);
+          if (cmd === 'dashboard_list_providers') return SAMPLE_ROWS;
+          if (cmd === 'get_active_provider') return 'anthropic';
+          if (cmd === 'set_active_provider') {
+            // Echo the id so the test can assert the wire shape.
+            calls.push(`payload:${String((args as { providerId?: string })?.providerId)}`);
+            return undefined;
+          }
+          return undefined;
+        }) as never,
+      );
+      const { findByTestId } = renderPage();
+      const btn = await findByTestId('set-active-openai');
+      btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await waitFor(() => {
+        expect(calls.find((c) => c === 'set_active_provider')).toBeDefined();
+      });
+      expect(calls).toContain('payload:openai');
     });
   });
 });

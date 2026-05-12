@@ -4,16 +4,15 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { ProviderId } from '@forge/ipc';
 import { ApprovalPrompt } from './components/ApprovalPrompt/ApprovalPrompt';
-import { ProviderPanel } from './routes/Dashboard/ProviderPanel';
 import { PaneHeader } from './routes/Session/PaneHeader';
 import { setInvokeForTesting } from './lib/tauri';
 
 // ---------------------------------------------------------------------------
-// Regression for F-083: every interactive button in ApprovalPrompt,
-// ProviderPanel, and PaneHeader must (a) carry a `:focus-visible` rule
-// using the ember-400 outline pattern, and (b) be reachable via keyboard
-// focus. JSDOM cannot compute `:focus-visible` styles, so we assert the
-// rule on disk and confirm focusability against the live DOM.
+// Regression for F-083: every interactive button in ApprovalPrompt and
+// PaneHeader must (a) carry a `:focus-visible` rule using the ember-400
+// outline pattern, and (b) be reachable via keyboard focus. JSDOM cannot
+// compute `:focus-visible` styles, so we assert the rule on disk and
+// confirm focusability against the live DOM.
 // ---------------------------------------------------------------------------
 
 const cssDir = resolve(__dirname);
@@ -49,11 +48,6 @@ describe('F-083 :focus-visible rules in CSS', () => {
     const css = readCss('components/ApprovalPrompt/ApprovalPrompt.css');
     expectFocusVisibleRule(css, '.approval-prompt__btn');
     expectFocusVisibleRule(css, '.approval-prompt__menu-item');
-  });
-
-  it('ProviderPanel.css covers .provider-panel__btn', () => {
-    const css = readCss('routes/Dashboard/ProviderPanel.css');
-    expectFocusVisibleRule(css, '.provider-panel__btn');
   });
 
   it('PaneHeader.css covers .pane-header__close', () => {
@@ -103,27 +97,12 @@ describe('F-083 buttons are keyboard-focusable', () => {
     }
   });
 
-  it('ProviderPanel refresh button accepts focus', async () => {
-    const invoke = vi.fn().mockResolvedValue({
-      reachable: true,
-      base_url: 'http://127.0.0.1:11434',
-      models: ['llama3'],
-      last_checked: '2026-04-19T00:00:00Z',
-    });
-    setInvokeForTesting(invoke as never);
-
-    const { findByRole } = render(() => <ProviderPanel />);
-    const refresh = (await findByRole('button', { name: /refresh/i })) as HTMLButtonElement;
-    refresh.focus();
-    expect(document.activeElement).toBe(refresh);
-  });
-
   it('PaneHeader close button accepts focus', () => {
     const { getByRole } = render(() => (
       <PaneHeader
         subject="hello"
-        providerId={'ollama' as ProviderId}
-        providerLabel="ollama"
+        providerId={'anthropic' as ProviderId}
+        providerLabel="anthropic"
         costLabel="0.00"
         onClose={vi.fn()}
       />

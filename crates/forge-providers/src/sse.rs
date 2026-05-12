@@ -21,9 +21,8 @@
 //! any caller (Anthropic, OpenAI, future providers) without coupling to
 //! `ChatChunk`.
 //!
-//! Bound defaults mirror Ollama's NDJSON decoder so the two transports share
-//! a single DoS-resistance posture (1 MiB per line, 30 s idle, 600 s wall
-//! clock).
+//! Bound defaults pin a single DoS-resistance posture across every SSE-backed
+//! provider in this crate (1 MiB per line, 30 s idle, 600 s wall clock).
 
 use bytes::{Bytes, BytesMut};
 use futures::stream::{BoxStream, StreamExt};
@@ -31,18 +30,15 @@ use std::time::Duration;
 use tokio_util::codec::FramedRead;
 use tokio_util::io::StreamReader;
 
-/// Per-line SSE byte cap (1 MiB). Matches Ollama's NDJSON cap so a hostile
-/// peer cannot exhaust memory by streaming a single newline-less line.
+/// Per-line SSE byte cap (1 MiB). Prevents a hostile peer from exhausting
+/// memory by streaming a single newline-less line.
 pub const DEFAULT_MAX_LINE_BYTES: usize = 1 << 20;
-/// Wall-clock gap between consecutive SSE lines. Matches Ollama's idle cap.
+/// Wall-clock gap between consecutive SSE lines.
 pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
-/// Wall-clock cap on the entire SSE stream. Matches Ollama's wall-clock cap.
+/// Wall-clock cap on the entire SSE stream.
 pub const DEFAULT_WALL_CLOCK_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Bounds that make the SSE decoder DoS-resistant against a hostile peer.
-/// Mirrors `crate::ollama::StreamConfig` — the two configs are deliberately
-/// separate types because their callers wire different defaults at different
-/// layers, but the defaults themselves are identical.
 #[derive(Debug, Clone, Copy)]
 pub struct StreamConfig {
     pub max_line_bytes: usize,
@@ -591,12 +587,8 @@ fn strip_cr(line: &Bytes) -> &[u8] {
 
 // ── SseLineCodec ──────────────────────────────────────────────────────────────
 //
-// Lifted from `ollama::BytesLineCodec` because the line-framing requirements
-// are identical (\n-delimited, byte-cap-bounded, yields `Bytes` slices over
-// the codec's buffer). The two crates intentionally do NOT share a codec —
-// pulling Ollama's into a shared module would be churn outside this task's
-// DoD. Diverging behavior between the two would be caught by the unit
-// tests in each module.
+// Standalone line codec used by the SSE adapter — `\n`-delimited and
+// byte-cap-bounded, yields `Bytes` slices over the codec's buffer.
 
 #[derive(Debug)]
 struct SseLineCodec {

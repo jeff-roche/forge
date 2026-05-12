@@ -27,11 +27,10 @@ fn no_eprintln_in_shipped_session_sources() {
     );
 }
 
-/// `main.rs` hosts the daemon startup banners and the ollama base_url
-/// disclosure. `forged` installs no tracing subscriber (emission-only
-/// scope contract), so these operator-facing lines must reach stderr
-/// directly — the `ollama_url_validation` integration tests scrape for
-/// them. Runtime surface remains audited.
+/// `main.rs` hosts the daemon startup banners. `forged` installs no
+/// tracing subscriber (emission-only scope contract), so these
+/// operator-facing lines must reach stderr directly. Runtime surface
+/// remains audited.
 fn is_bin_main(path: &std::path::Path) -> bool {
     path.file_name().and_then(|n| n.to_str()) == Some("main.rs")
 }

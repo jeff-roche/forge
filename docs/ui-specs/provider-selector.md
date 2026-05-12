@@ -23,8 +23,8 @@
 │ ◎ openai                   AUTH EXPIRED │
 │   — reauthenticate                      │
 ├─────────────────────────────────────────┤
-│ ◎ ollama                        READY  │
-│   llama-3.3-70b        local            │
+│ ◎ custom_openai:ollama          READY  │
+│   llama3.2             local            │
 │   qwen-2.5-coder       local            │
 ├─────────────────────────────────────────┤
 │ [+ new provider]  [manage providers]   │

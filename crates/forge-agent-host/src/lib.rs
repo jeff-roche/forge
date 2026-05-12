@@ -398,9 +398,9 @@ impl DaemonHelloState {
 /// value out via [`Self::take`] / [`Self::get`] only at the network
 /// boundary, never logging the result.
 ///
-/// Phase-1 Ollama is keyless, so the stash is observed but unused; the
-/// slot is here so Anthropic/OpenAI providers can hook in without a
-/// further protocol revision when they ship.
+/// Keyless providers (e.g. the `custom_openai:ollama` preset) observe but
+/// never consume the stash; the slot stays present so Anthropic / OpenAI
+/// auth shapes hook in without a further protocol revision.
 #[derive(Clone, Default)]
 pub struct CredentialStash {
     inner: Arc<Mutex<HashMap<String, SecretString>>>,
@@ -746,10 +746,10 @@ async fn dispatch_loop(
             }
             SidecarMessage::Credentials(cred) => {
                 // F-608 step 6: stash the credential keyed by
-                // `provider_id`. Phase-1 OllamaProvider is keyless so
-                // the (still-stub) RunTurn handler ignores the stash;
-                // the slot is here so Anthropic / OpenAI auth shapes
-                // can hook in without a further protocol revision.
+                // `provider_id`. Keyless providers (e.g. the
+                // `custom_openai:ollama` preset) leave the stash
+                // untouched; Anthropic / OpenAI auth shapes pull
+                // their secret out at the network boundary.
                 // `stash_credential` redacts on every log emission —
                 // see its module-doc.
                 stash_credential(&credentials, instance_id, cred);

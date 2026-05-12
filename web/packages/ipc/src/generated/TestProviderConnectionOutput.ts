@@ -3,7 +3,9 @@
 /**
  * `test_provider_connection` IPC output. `ok` is the canonical success bit;
  * `latency_ms` is populated only when `ok = true` and the probe round-trip
- * fits the 5s deadline. `model_count` is best-effort — providers that do
- * not return a model list on the probe endpoint leave it `None`.
+ * fits the 5s deadline. `model_count` and `models` are best-effort — providers
+ * that do not return a recognizable model list on the probe endpoint leave
+ * both `None`. When present, `models` lists each `id` from the response array
+ * in source order; callers can render a dropdown directly from it.
  */
-export type TestProviderConnectionOutput = { ok: boolean, latency_ms?: bigint | null, model_count?: number | null, };
+export type TestProviderConnectionOutput = { ok: boolean, latency_ms?: bigint | null, model_count?: number | null, models?: Array<string> | null, };

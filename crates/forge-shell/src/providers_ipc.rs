@@ -4,8 +4,8 @@
 //! without Tauri:
 //!
 //! - [`dashboard_list_providers`] — returns one row per provider the user
-//!   has explicitly configured: any built-in (Ollama, Anthropic, OpenAI)
-//!   whose `providers.enabled.<id>` key is present, plus one row per
+//!   has explicitly configured: any built-in (Anthropic, OpenAI) whose
+//!   `providers.enabled.<id>` key is present, plus one row per
 //!   `[providers.custom_openai.<name>]` section. A fresh install has no
 //!   providers configured; the Add Provider modal writes the first entry.
 //!   Each row is enriched with a credential-presence flag pulled from the
@@ -69,7 +69,6 @@ fn settings_write_guard() -> &'static Mutex<()> {
 /// keyring all key on. Adding a new built-in: extend the
 /// `BUILTIN_PROVIDERS` table below and add a matching credential-required
 /// hint.
-pub const PROVIDER_OLLAMA: &str = "ollama";
 pub const PROVIDER_ANTHROPIC: &str = "anthropic";
 pub const PROVIDER_OPENAI: &str = "openai";
 pub const PROVIDER_CUSTOM_OPENAI: &str = "custom_openai";
@@ -80,34 +79,88 @@ pub const PROVIDER_CUSTOM_OPENAI: &str = "custom_openai";
 /// dashboard tokenises on.
 pub const CUSTOM_OPENAI_PREFIX: &str = "custom_openai:";
 
+/// Separator between a built-in vendor slug and a user-chosen instance
+/// name. Phase A: enables `anthropic:work` and `anthropic:personal` style
+/// ids alongside the bare `anthropic` legacy form so the user can hold
+/// multiple credentials for the same vendor side-by-side.
+pub const NAMED_INSTANCE_SEPARATOR: char = ':';
+
+/// Parsed form of a provider id used throughout the IPC layer.
+///
+/// - `BuiltinBare(vendor)` — legacy single-instance built-in (`anthropic`).
+/// - `BuiltinNamed { vendor, name }` — named built-in instance
+///   (`anthropic:work`). `name` is the user-chosen instance label.
+/// - `CustomOpenAi(name)` — custom OpenAI-spec entry (`custom_openai:vllm`).
+/// - `Unknown` — neither prefix matched. Validation flows surface a
+///   typed error for this case.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParsedProviderId<'a> {
+    BuiltinBare(&'a str),
+    BuiltinNamed { vendor: &'a str, name: &'a str },
+    CustomOpenAi(&'a str),
+    Unknown,
+}
+
+impl<'a> ParsedProviderId<'a> {
+    /// Vendor slug carried by this id (`anthropic`, `openai`).
+    /// `None` for `CustomOpenAi` and `Unknown`.
+    pub fn vendor(&self) -> Option<&'a str> {
+        match self {
+            ParsedProviderId::BuiltinBare(v) | ParsedProviderId::BuiltinNamed { vendor: v, .. } => {
+                Some(v)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Classify a provider id without consulting settings. The result is used
+/// by validation, routing, and the dashboard list to handle the three
+/// supported id shapes uniformly. Vendor strings are matched against
+/// [`BUILTIN_ADDABLE_KINDS`] — broader than [`BUILTIN_PROVIDERS`] because
+/// `mistral` is an addable slug whose runtime adapter has not landed yet
+/// (the schema still recognises it). Anything with the `custom_openai:`
+/// prefix flows through `CustomOpenAi`.
+pub fn parse_provider_id(id: &str) -> ParsedProviderId<'_> {
+    if id.is_empty() {
+        return ParsedProviderId::Unknown;
+    }
+    // Custom OpenAI takes precedence over the named-builtin shape because
+    // the literal vendor slug "custom_openai" is intentionally NOT in
+    // `BUILTIN_ADDABLE_KINDS` — custom entries route through their own
+    // section in settings (see add_provider).
+    if let Some(rest) = id.strip_prefix(CUSTOM_OPENAI_PREFIX) {
+        return ParsedProviderId::CustomOpenAi(rest);
+    }
+    if let Some((vendor, name)) = id.split_once(NAMED_INSTANCE_SEPARATOR) {
+        if BUILTIN_ADDABLE_KINDS.contains(&vendor) {
+            return ParsedProviderId::BuiltinNamed { vendor, name };
+        }
+        return ParsedProviderId::Unknown;
+    }
+    if BUILTIN_ADDABLE_KINDS.contains(&id) {
+        return ParsedProviderId::BuiltinBare(id);
+    }
+    ParsedProviderId::Unknown
+}
+
 /// Per-built-in metadata used to render the dashboard cards.
 struct BuiltinDescriptor {
     id: &'static str,
     display_name: &'static str,
     credential_required: bool,
-    /// When `true`, the dashboard skips the "available models" enrichment
-    /// step — the user supplies the model identifier per entry.
-    user_supplied_model: bool,
 }
 
 const BUILTIN_PROVIDERS: &[BuiltinDescriptor] = &[
     BuiltinDescriptor {
-        id: PROVIDER_OLLAMA,
-        display_name: "Ollama",
-        credential_required: false,
-        user_supplied_model: false,
-    },
-    BuiltinDescriptor {
         id: PROVIDER_ANTHROPIC,
         display_name: "Anthropic",
         credential_required: true,
-        user_supplied_model: true,
     },
     BuiltinDescriptor {
         id: PROVIDER_OPENAI,
         display_name: "OpenAI",
         credential_required: true,
-        user_supplied_model: true,
     },
     // `custom_openai` is intentionally absent — it's a kind, not a row.
     // Concrete OpenAI-spec endpoints render via the `custom_openai:<name>`
@@ -125,13 +178,13 @@ const BUILTIN_PROVIDERS: &[BuiltinDescriptor] = &[
 ///
 /// `has_credential` is `false` when the keyring backend reports no entry
 /// for the provider id, when the backend is unavailable (treated as
-/// "absent" by contract), or when the credential is irrelevant
-/// (Ollama keyless). The dashboard renders the warning glyph only when
+/// "absent" by contract), or when the credential is irrelevant. The
+/// dashboard renders the warning glyph only when
 /// `credential_required && !has_credential`.
 ///
-/// `endpoint` / `api_version` are populated only for `custom_openai:<name>`
-/// rows so the Providers page's Edit dialog can pre-fill its inputs from
-/// the row payload directly (no follow-up read). Built-in rows omit them.
+/// `endpoint` is populated only for `custom_openai:<name>` rows so the
+/// Providers page's Edit dialog can pre-fill its inputs from the row
+/// payload directly (no follow-up read). Built-in rows omit it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProviderEntry {
     pub id: String,
@@ -149,20 +202,19 @@ pub struct ProviderEntry {
     /// resolve their endpoint through `builtin_probe_url`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
-    /// Optional `api_version` override stored under the same
-    /// `[providers.custom_openai.<name>]` section. Reserved for a future
-    /// expansion of `CustomOpenAiEntry`; today the field is always `None`
-    /// because the typed settings struct ignores the dotted-key write — the
-    /// Edit dialog re-prompts for the value, which is consistent with the
-    /// spec's "blank means clear" semantics on edit.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub api_version: Option<String>,
     /// F-733: per-provider enable flag mirroring `providers.enabled.<id>`.
     /// Absent settings entries read as `true` — historical configs (pre
     /// F-730) that never wrote the flag keep their built-ins live. The
     /// Providers page toggle and the new-session picker key on this bit.
     #[serde(default = "default_enabled_true")]
     pub enabled: bool,
+    /// Phase B: authentication mode for named built-in instances. `None`
+    /// for bare-vendor / `custom_openai:` / provider-without-section
+    /// rows. When `Some(Vertex)`, the dashboard suppresses the
+    /// "ADD CREDENTIAL" CTA and the orange auth pill — Vertex auth pulls
+    /// from gcloud ADC at request time, not from the keychain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_kind: Option<forge_core::BuiltinAuthKind>,
 }
 
 fn default_enabled_true() -> bool {
@@ -189,32 +241,101 @@ pub fn build_provider_list(
     // A built-in only appears in the list when the user has explicitly
     // added it — i.e. `providers.enabled.<id>` is present (with any bool
     // value). Absent means "not configured" and the row is omitted.
-    // Removing a built-in deletes the key, so it stays gone until the
-    // user re-adds it through the Add Provider modal.
-    let mut out: Vec<ProviderEntry> = BUILTIN_PROVIDERS
-        .iter()
-        .filter_map(|b| {
-            let enabled = settings.providers.enabled.get(b.id).copied()?;
-            Some(ProviderEntry {
-                id: b.id.to_string(),
-                display_name: b.display_name.to_string(),
-                credential_required: b.credential_required,
-                has_credential: if b.credential_required {
-                    cred_present(b.id)
+    // Phase A: the `<id>` may be either the bare vendor (`anthropic`) or
+    // a named instance (`anthropic:work`). Both shapes resolve here to a
+    // single row carrying the full id; the dashboard shows the user the
+    // instance name when one is present so two `anthropic:*` entries
+    // are distinguishable at a glance.
+    let mut out: Vec<ProviderEntry> = Vec::new();
+    // Phase A: emit bare-vendor entries first in `BUILTIN_PROVIDERS`
+    // declaration order so the dashboard's user-facing card order stays
+    // stable across releases. Then append any named instances
+    // (`<vendor>:<name>`) sorted by full id so multiple anthropic / openai
+    // configurations cluster together below their bare equivalents.
+    // Phase B: look up the per-instance auth_kind for named built-in
+    // Anthropic entries so the row can suppress the "ADD CREDENTIAL"
+    // surface when gcloud ADC supplies auth at request time.
+    let instance_auth = |vendor: &str, name: &str| -> Option<forge_core::BuiltinAuthKind> {
+        if vendor == PROVIDER_ANTHROPIC {
+            settings
+                .providers
+                .anthropic
+                .get(name)
+                .map(|entry| entry.auth_kind)
+        } else {
+            None
+        }
+    };
+
+    let row_for = |id: &str,
+                   vendor: &str,
+                   instance_name: Option<&str>,
+                   enabled: bool,
+                   auth_kind: Option<forge_core::BuiltinAuthKind>| {
+        BUILTIN_PROVIDERS.iter().find(|b| b.id == vendor).map(|descriptor| {
+            let display_name = match instance_name {
+                Some(name) => format!("{} — {name}", descriptor.display_name),
+                None => descriptor.display_name.to_string(),
+            };
+            // Vertex instances bypass the keychain — gcloud ADC supplies
+            // an access token at request time. Report `credential_required
+            // = false` so the dashboard does NOT prompt for an API key.
+            let is_vertex = matches!(auth_kind, Some(forge_core::BuiltinAuthKind::Vertex));
+            let effective_credential_required = descriptor.credential_required && !is_vertex;
+            ProviderEntry {
+                id: id.to_string(),
+                display_name,
+                credential_required: effective_credential_required,
+                // Probe the keychain only when a credential is actually
+                // required — ADC-backed (Vertex) rows report `false` and
+                // the dashboard's pill predicate
+                // (`credential_required && !has_credential`) trivially
+                // falls through to `ready`.
+                has_credential: if effective_credential_required {
+                    cred_present(id)
                 } else {
                     false
                 },
                 // Built-ins always claim a model is available — the daemon
-                // either ships one (Ollama via env / discovery) or the user
-                // supplies it via the spec / a custom entry.
-                model_available: !b.user_supplied_model,
+                // ships a default and the orchestrator resolves the concrete
+                // model id at request time. Per-instance overrides land via
+                // `[providers.<vendor>.<name>]` once that schema grows a
+                // `model` field; for now the daemon default is the source.
+                model_available: true,
                 model: None,
                 endpoint: None,
-                api_version: None,
                 enabled,
-            })
+                auth_kind,
+            }
+        })
+    };
+
+    for descriptor in BUILTIN_PROVIDERS.iter() {
+        if let Some(enabled) = settings.providers.enabled.get(descriptor.id).copied() {
+            if let Some(row) = row_for(descriptor.id, descriptor.id, None, enabled, None) {
+                out.push(row);
+            }
+        }
+    }
+
+    let mut named: Vec<(&String, bool)> = settings
+        .providers
+        .enabled
+        .iter()
+        .filter_map(|(id, enabled)| match parse_provider_id(id) {
+            ParsedProviderId::BuiltinNamed { .. } => Some((id, *enabled)),
+            _ => None,
         })
         .collect();
+    named.sort_by(|(a, _), (b, _)| a.cmp(b));
+    for (id, enabled) in named {
+        if let ParsedProviderId::BuiltinNamed { vendor, name } = parse_provider_id(id) {
+            let auth_kind = instance_auth(vendor, name);
+            if let Some(row) = row_for(id, vendor, Some(name), enabled, auth_kind) {
+                out.push(row);
+            }
+        }
+    }
 
     // User-configured CustomOpenAI entries render as their own rows —
     // one per `[providers.custom_openai.<name>]` section. Their credential
@@ -238,9 +359,9 @@ pub fn build_provider_list(
                 None
             },
             endpoint: Some(entry.base_url.clone()),
-            api_version: None,
             enabled: is_enabled_provider(settings, &id),
             id,
+            auth_kind: None,
         });
     }
 
@@ -261,13 +382,18 @@ pub fn is_enabled_provider(settings: &forge_core::settings::AppSettings, id: &st
 /// `set_active_provider` and `set_provider_enabled` can validate the id
 /// without going through the credential store.
 pub fn is_known_provider_id(settings: &forge_core::settings::AppSettings, id: &str) -> bool {
-    if BUILTIN_PROVIDERS.iter().any(|b| b.id == id) {
-        return settings.providers.enabled.contains_key(id);
+    match parse_provider_id(id) {
+        // Both bare (`anthropic`) and named (`anthropic:work`) built-ins
+        // record the same shape in settings: a key in
+        // `providers.enabled.<full_id>`. The named form is added by the
+        // Phase-A Add Provider modal when the user supplies an instance
+        // name; the bare form is the legacy single-instance shape.
+        ParsedProviderId::BuiltinBare(_) | ParsedProviderId::BuiltinNamed { .. } => {
+            settings.providers.enabled.contains_key(id)
+        }
+        ParsedProviderId::CustomOpenAi(name) => settings.providers.custom_openai.contains_key(name),
+        ParsedProviderId::Unknown => false,
     }
-    if let Some(rest) = id.strip_prefix(CUSTOM_OPENAI_PREFIX) {
-        return settings.providers.custom_openai.contains_key(rest);
-    }
-    false
 }
 
 // F-675: `MAX_PROVIDER_ID_BYTES` is defined canonically in `crate::ipc` so
@@ -299,9 +425,29 @@ pub const SET_PROVIDER_ENABLED_ERROR: &str = "set_provider_enabled: ";
 pub const BUILTIN_ADDABLE_KINDS: &[&str] = &[
     PROVIDER_ANTHROPIC,
     PROVIDER_OPENAI,
-    PROVIDER_OLLAMA,
     "mistral",
 ];
+
+/// Validate the shape of an instance name suffix. Shared by
+/// `custom_openai:<name>` and built-in `<vendor>:<name>` ids so the two id
+/// families honor the same charset / non-empty constraints — the keyring
+/// id and the dashboard display both depend on it.
+fn validate_instance_name(name: &str, kind_for_error: &str) -> Result<(), String> {
+    if name.is_empty() || name.chars().all(char::is_whitespace) {
+        return Err(format!(
+            "provider_id {kind_for_error}<name> must have a non-empty name"
+        ));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(format!(
+            "provider_id {kind_for_error}<name> name must contain only [A-Za-z0-9_-]"
+        ));
+    }
+    Ok(())
+}
 
 /// Pure validation helper exposed for unit tests.
 pub fn validate_provider_id(provider_id: &str) -> Result<(), String> {
@@ -315,28 +461,21 @@ pub fn validate_provider_id(provider_id: &str) -> Result<(), String> {
             MAX_PROVIDER_ID_BYTES
         ));
     }
-    // `custom_openai:<name>` ids must carry a non-empty, charset-clean
-    // suffix. The bare prefix (`custom_openai:`) and whitespace-only
-    // suffixes would otherwise pass the size cap and reach
-    // `is_known_provider_id` / `apply_setting_update`, where they alias
-    // an empty map key or surprise the downstream display. Mirror the
-    // catalog/credential id shape used elsewhere in the repo.
-    if let Some(suffix) = provider_id.strip_prefix(CUSTOM_OPENAI_PREFIX) {
-        if suffix.is_empty() || suffix.chars().all(char::is_whitespace) {
-            return Err(format!(
-                "provider_id {CUSTOM_OPENAI_PREFIX}<name> must have a non-empty name"
-            ));
+    match parse_provider_id(provider_id) {
+        ParsedProviderId::BuiltinBare(_) => Ok(()),
+        ParsedProviderId::BuiltinNamed { vendor, name } => {
+            validate_instance_name(name, &format!("{vendor}{NAMED_INSTANCE_SEPARATOR}"))
         }
-        if !suffix
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        {
-            return Err(format!(
-                "provider_id {CUSTOM_OPENAI_PREFIX}<name> name must contain only [A-Za-z0-9_-]"
-            ));
+        ParsedProviderId::CustomOpenAi(name) => {
+            validate_instance_name(name, CUSTOM_OPENAI_PREFIX)
         }
+        // Some downstream paths (e.g. `set_active_provider`) call
+        // `validate_provider_id` to guard the size cap on ids they later
+        // probe through `is_known_provider_id`. Returning `Ok` here keeps
+        // that contract while letting `is_known_provider_id` reject the
+        // unknown shape against the persisted settings.
+        ParsedProviderId::Unknown => Ok(()),
     }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -513,7 +652,7 @@ pub async fn set_active_provider<R: Runtime>(
 /// `add_provider` IPC input. Two shapes share one struct — the
 /// `id` discriminates:
 ///
-/// - `"anthropic"` / `"openai"` / `"ollama"` / `"mistral"` — built-in kind.
+/// - `"anthropic"` / `"openai"` / `"mistral"` — built-in kind.
 ///   The optional `config` MUST be `None`; setting it is rejected so the
 ///   wire shape stays a typed pair and a future schema change for a built-in
 ///   can't silently absorb a `custom_openai`-shaped payload.
@@ -525,6 +664,12 @@ pub struct AddProviderInput {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<CustomOpenAiConfig>,
+    /// Phase B: per-instance config for named built-ins. Required when
+    /// `auth_kind` is non-default (e.g. `vertex`); absent leaves the
+    /// instance with all-default `BuiltinInstanceEntry` values and no
+    /// `[providers.<vendor>.<name>]` section written to disk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builtin: Option<BuiltinProviderConfig>,
 }
 
 /// Connection details for a `custom_openai:<name>` entry, supplied at add
@@ -536,8 +681,32 @@ pub struct AddProviderInput {
 pub struct CustomOpenAiConfig {
     pub endpoint: String,
     pub model: String,
+    /// When `true`, persist `auth = { shape = "none" }` so the section
+    /// represents a keyless OpenAI-compatible endpoint (Ollama via the
+    /// custom_openai preset, local
+    /// vLLM, internal mocks). The `login_provider` chain is skipped on
+    /// the UI side for these entries — there is no key to store.
+    /// Absent / `false` keeps the default Bearer-token auth shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub api_version: Option<String>,
+    pub keyless: Option<bool>,
+}
+
+/// Phase B: per-instance settings carried by the Add Provider modal for
+/// named built-ins. Today this drives the API-key vs. Vertex AI auth
+/// selector on Anthropic. Future expansions (model override, endpoint
+/// override) land here without breaking the existing wire.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+pub struct BuiltinProviderConfig {
+    /// `"api_key"` (default) or `"vertex"`.
+    #[serde(default)]
+    pub auth_kind: forge_core::BuiltinAuthKind,
+    /// Required when `auth_kind = "vertex"`: Google Cloud project id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vertex_project: Option<String>,
+    /// Required when `auth_kind = "vertex"`: Vertex region.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vertex_region: Option<String>,
 }
 
 /// Pure validation exposed for unit tests. Mirrors the field rules in
@@ -550,26 +719,66 @@ pub struct CustomOpenAiConfig {
 ///   `http`/`https`; `model` non-empty.
 pub fn validate_add_provider_input(input: &AddProviderInput) -> Result<(), String> {
     validate_provider_id(&input.id).map_err(|e| format!("{ADD_PROVIDER_ERROR}{e}"))?;
-    let is_custom = input.id.starts_with(CUSTOM_OPENAI_PREFIX);
-    if is_custom {
-        let cfg = input
-            .config
-            .as_ref()
-            .ok_or_else(|| format!("{ADD_PROVIDER_ERROR}custom_openai requires config"))?;
-        validate_endpoint(&cfg.endpoint)?;
-        if cfg.model.trim().is_empty() {
-            return Err(format!("{ADD_PROVIDER_ERROR}model is required"));
+    match parse_provider_id(&input.id) {
+        ParsedProviderId::CustomOpenAi(_) => {
+            let cfg = input
+                .config
+                .as_ref()
+                .ok_or_else(|| format!("{ADD_PROVIDER_ERROR}custom_openai requires config"))?;
+            validate_endpoint(&cfg.endpoint)?;
+            if cfg.model.trim().is_empty() {
+                return Err(format!("{ADD_PROVIDER_ERROR}model is required"));
+            }
         }
-    } else if !BUILTIN_ADDABLE_KINDS.contains(&input.id.as_str()) {
-        return Err(format!(
-            "{ADD_PROVIDER_ERROR}unknown provider kind: {}",
-            input.id
-        ));
-    } else if input.config.is_some() {
-        return Err(format!(
-            "{ADD_PROVIDER_ERROR}built-in provider {} does not accept config",
-            input.id
-        ));
+        ParsedProviderId::BuiltinBare(vendor) | ParsedProviderId::BuiltinNamed { vendor, .. } => {
+            if !BUILTIN_ADDABLE_KINDS.contains(&vendor) {
+                return Err(format!(
+                    "{ADD_PROVIDER_ERROR}unknown provider kind: {vendor}",
+                ));
+            }
+            if input.config.is_some() {
+                return Err(format!(
+                    "{ADD_PROVIDER_ERROR}built-in provider {} does not accept config",
+                    input.id
+                ));
+            }
+            if let Some(builtin) = input.builtin.as_ref() {
+                match builtin.auth_kind {
+                    forge_core::BuiltinAuthKind::ApiKey => {
+                        // No extra fields required.
+                    }
+                    forge_core::BuiltinAuthKind::Vertex => {
+                        if vendor != PROVIDER_ANTHROPIC {
+                            return Err(format!(
+                                "{ADD_PROVIDER_ERROR}vertex auth is only supported on anthropic",
+                            ));
+                        }
+                        match builtin.vertex_project.as_deref().map(str::trim) {
+                            Some(p) if !p.is_empty() => {}
+                            _ => {
+                                return Err(format!(
+                                    "{ADD_PROVIDER_ERROR}vertex_project is required for vertex auth",
+                                ));
+                            }
+                        }
+                        match builtin.vertex_region.as_deref().map(str::trim) {
+                            Some(r) if !r.is_empty() => {}
+                            _ => {
+                                return Err(format!(
+                                    "{ADD_PROVIDER_ERROR}vertex_region is required for vertex auth",
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        ParsedProviderId::Unknown => {
+            return Err(format!(
+                "{ADD_PROVIDER_ERROR}unknown provider kind: {}",
+                input.id
+            ));
+        }
     }
     Ok(())
 }
@@ -650,12 +859,29 @@ pub async fn add_provider<R: Runtime>(
         let cfg = input.config.as_ref().expect("validated above");
         write_custom_openai_section(&existing, name, cfg)?
     } else {
-        apply_setting_update(
+        let with_enabled = apply_setting_update(
             &existing,
             &format!("providers.enabled.{}", input.id),
             toml::Value::Boolean(true),
         )
-        .map_err(|e| format!("{ADD_PROVIDER_ERROR}{e}"))?
+        .map_err(|e| format!("{ADD_PROVIDER_ERROR}{e}"))?;
+
+        // Phase B: persist the per-instance section when the modal sent
+        // non-default builtin config (today: anything other than the
+        // implicit api_key auth_kind).
+        if let Some(builtin) = input.builtin.as_ref() {
+            if let ParsedProviderId::BuiltinNamed { vendor, name } = parse_provider_id(&input.id) {
+                if matches!(builtin.auth_kind, forge_core::BuiltinAuthKind::Vertex) {
+                    write_builtin_instance_section(&with_enabled, vendor, name, builtin)?
+                } else {
+                    with_enabled
+                }
+            } else {
+                with_enabled
+            }
+        } else {
+            with_enabled
+        }
     };
     save_user_settings_raw_in(&user_dir, &updated)
         .await
@@ -681,8 +907,8 @@ pub async fn add_provider<R: Runtime>(
 }
 
 /// Walk-and-set helper for the `[providers.custom_openai.<name>]` branch.
-/// Three dotted-key writes (`base_url`, `model`, optional `api_version`) so
-/// the auth-shape default and the empty model_list stay implicit.
+/// Two dotted-key writes (`base_url`, `model`) so the auth-shape default
+/// and the empty model_list stay implicit.
 fn write_custom_openai_section(
     existing: &str,
     name: &str,
@@ -700,13 +926,65 @@ fn write_custom_openai_section(
         toml::Value::String(cfg.model.clone()),
     )
     .map_err(|e| format!("{ADD_PROVIDER_ERROR}{e}"))?;
-    if let Some(api_version) = &cfg.api_version {
+    if matches!(cfg.keyless, Some(true)) {
+        // Emit `[providers.custom_openai.<name>.auth] shape = "none"` so
+        // the runtime constructs the client without an Authorization /
+        // x-api-key header. The bracketed table form is what the typed
+        // `AuthShapeSettings::None` round-trips to in TOML.
         body = apply_setting_update(
             &body,
-            &format!("providers.custom_openai.{name}.api_version"),
-            toml::Value::String(api_version.clone()),
+            &format!("providers.custom_openai.{name}.auth.shape"),
+            toml::Value::String("none".to_string()),
         )
         .map_err(|e| format!("{ADD_PROVIDER_ERROR}{e}"))?;
+    }
+    Ok(body)
+}
+
+/// Phase B: write `[providers.<vendor>.<name>]` for a named built-in
+/// instance. Only emits the section when the auth_kind is non-default —
+/// the legacy ApiKey path leaves no on-disk per-instance state so
+/// existing user files stay byte-identical.
+///
+/// Vendor is one of `BUILTIN_PROVIDERS` (currently `anthropic` — other
+/// vendors do not yet have a Vertex / non-default auth mode). Caller
+/// validates `vertex_project`/`vertex_region` presence; we trust the
+/// payload here.
+fn write_builtin_instance_section(
+    existing: &str,
+    vendor: &str,
+    name: &str,
+    cfg: &BuiltinProviderConfig,
+) -> Result<String, String> {
+    let auth_kind_str = match cfg.auth_kind {
+        forge_core::BuiltinAuthKind::ApiKey => "api_key",
+        forge_core::BuiltinAuthKind::Vertex => "vertex",
+    };
+    let mut body = apply_setting_update(
+        existing,
+        &format!("providers.{vendor}.{name}.auth_kind"),
+        toml::Value::String(auth_kind_str.to_string()),
+    )
+    .map_err(|e| format!("{ADD_PROVIDER_ERROR}{e}"))?;
+    if let Some(project) = cfg.vertex_project.as_deref().map(str::trim) {
+        if !project.is_empty() {
+            body = apply_setting_update(
+                &body,
+                &format!("providers.{vendor}.{name}.vertex_project"),
+                toml::Value::String(project.to_string()),
+            )
+            .map_err(|e| format!("{ADD_PROVIDER_ERROR}{e}"))?;
+        }
+    }
+    if let Some(region) = cfg.vertex_region.as_deref().map(str::trim) {
+        if !region.is_empty() {
+            body = apply_setting_update(
+                &body,
+                &format!("providers.{vendor}.{name}.vertex_region"),
+                toml::Value::String(region.to_string()),
+            )
+            .map_err(|e| format!("{ADD_PROVIDER_ERROR}{e}"))?;
+        }
     }
     Ok(body)
 }
@@ -716,7 +994,7 @@ fn write_custom_openai_section(
 // ---------------------------------------------------------------------------
 
 /// `test_provider_connection` IPC input. The `provider_id` discriminates a
-/// built-in slug (`anthropic` / `openai` / `ollama` / `mistral`) from a
+/// built-in slug (`anthropic` / `openai` / `mistral`) from a
 /// `custom_openai:<name>` entry — same surface `add_provider` accepts.
 #[derive(Debug, Clone, Deserialize, Serialize, TS)]
 #[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
@@ -726,8 +1004,10 @@ pub struct TestProviderConnectionInput {
 
 /// `test_provider_connection` IPC output. `ok` is the canonical success bit;
 /// `latency_ms` is populated only when `ok = true` and the probe round-trip
-/// fits the 5s deadline. `model_count` is best-effort — providers that do
-/// not return a model list on the probe endpoint leave it `None`.
+/// fits the 5s deadline. `model_count` and `models` are best-effort — providers
+/// that do not return a recognizable model list on the probe endpoint leave
+/// both `None`. When present, `models` lists each `id` from the response array
+/// in source order; callers can render a dropdown directly from it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 #[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
 pub struct TestProviderConnectionOutput {
@@ -736,11 +1016,25 @@ pub struct TestProviderConnectionOutput {
     pub latency_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models: Option<Vec<String>>,
 }
 
 /// Wall-clock deadline applied to each probe — matches the 5s budget in
 /// `docs/ui-specs/providers-page.md §"Test connection"`.
 pub const TEST_PROVIDER_CONNECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Build the `/v1/models` URL for a user-configured base. The wire
+/// convention is that `base_url` is the host root (e.g.
+/// `http://127.0.0.1:11434`) and callers append their own versioned
+/// path; in practice users sometimes paste the full
+/// `http://host/v1` URL — strip a single trailing `/v1` plus any
+/// trailing slashes so we never produce `…/v1/v1/models`.
+fn models_probe_url(base_url: &str) -> String {
+    let trimmed = base_url.trim_end_matches('/');
+    let stripped = trimmed.strip_suffix("/v1").unwrap_or(trimmed);
+    format!("{stripped}/v1/models")
+}
 
 /// Built-in models endpoint per kind. The `custom_openai:<name>` branch
 /// derives its URL from the user-configured `base_url`.
@@ -748,7 +1042,6 @@ fn builtin_probe_url(kind: &str) -> Option<&'static str> {
     match kind {
         PROVIDER_ANTHROPIC => Some("https://api.anthropic.com/v1/models"),
         PROVIDER_OPENAI => Some("https://api.openai.com/v1/models"),
-        PROVIDER_OLLAMA => Some("http://127.0.0.1:11434/api/tags"),
         "mistral" => Some("https://api.mistral.ai/v1/models"),
         _ => None,
     }
@@ -776,13 +1069,35 @@ async fn probe_http_request(
         builder = builder.header(name.as_str(), value);
     }
 
+    // Header names only — values may contain Bearer tokens or other
+    // secrets and must never be logged verbatim.
+    let header_names: Vec<&str> = headers.iter().map(|(n, _)| n.as_str()).collect();
+    tracing::debug!(
+        target: "forge_shell::providers",
+        url = %url,
+        headers = ?header_names,
+        "probe GET"
+    );
+
     let started = std::time::Instant::now();
-    let response = builder
-        .send()
-        .await
-        .map_err(|e| format!("{TEST_PROVIDER_CONNECTION_ERROR}network {e}"))?;
+    let response = builder.send().await.map_err(|e| {
+        tracing::debug!(
+            target: "forge_shell::providers",
+            url = %url,
+            error = %e,
+            "probe network error"
+        );
+        format!("{TEST_PROVIDER_CONNECTION_ERROR}network {e}")
+    })?;
     let status = response.status();
     let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    tracing::debug!(
+        target: "forge_shell::providers",
+        url = %url,
+        status = status.as_u16(),
+        latency_ms = latency_ms,
+        "probe response"
+    );
 
     if !status.is_success() {
         return Err(format!(
@@ -791,25 +1106,53 @@ async fn probe_http_request(
         ));
     }
 
-    // Best-effort model_count: parse the body as JSON and look for a
-    // top-level `data` array (OpenAI/Mistral/Anthropic) or `models` array
-    // (Ollama). Failures here do not invalidate the probe — the connection
-    // itself succeeded.
-    let model_count = response
+    // Best-effort model list: parse the body as JSON and look for a
+    // top-level `data` array (OpenAI/Mistral/Anthropic) or `models` array.
+    // For each element, accept the canonical OpenAI shape (`{ "id": "..." }`)
+    // or the Ollama shape (`{ "name": "..." }`). Failures here do not
+    // invalidate the probe — the connection itself succeeded.
+    let models = response
         .json::<serde_json::Value>()
         .await
         .ok()
         .and_then(|body| {
             body.get("data")
                 .or_else(|| body.get("models"))
-                .and_then(|arr| arr.as_array())
-                .and_then(|arr| u32::try_from(arr.len()).ok())
+                .and_then(|arr| arr.as_array().cloned())
+        })
+        .map(|arr| {
+            arr.into_iter()
+                .filter_map(|item| {
+                    item.get("id")
+                        .or_else(|| item.get("name"))
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned)
+                })
+                .collect::<Vec<String>>()
         });
+    let model_count = models
+        .as_ref()
+        .and_then(|m| u32::try_from(m.len()).ok());
+    // Log up to the first five ids so a misconfigured endpoint reads
+    // obviously in the log without bloating the line for a 200-model
+    // response.
+    let preview: Vec<&str> = models
+        .as_ref()
+        .map(|m| m.iter().take(5).map(String::as_str).collect())
+        .unwrap_or_default();
+    tracing::debug!(
+        target: "forge_shell::providers",
+        url = %url,
+        model_count = model_count.unwrap_or(0),
+        preview = ?preview,
+        "probe models parsed"
+    );
 
     Ok(TestProviderConnectionOutput {
         ok: true,
         latency_ms: Some(latency_ms),
         model_count,
+        models,
     })
 }
 
@@ -838,7 +1181,7 @@ async fn dispatch_probe(
         let entry = settings.providers.custom_openai.get(name).ok_or_else(|| {
             format!("{TEST_PROVIDER_CONNECTION_ERROR}unknown provider: {provider_id}")
         })?;
-        let url = format!("{}/v1/models", entry.base_url.trim_end_matches('/'));
+        let url = models_probe_url(&entry.base_url);
         let headers = match &entry.auth {
             forge_core::settings::AuthShapeSettings::None => Vec::new(),
             forge_core::settings::AuthShapeSettings::Bearer => {
@@ -853,12 +1196,33 @@ async fn dispatch_probe(
         return probe_http_request(client, &url, headers).await;
     }
 
-    let url = builtin_probe_url(provider_id).ok_or_else(|| {
+    // Built-in (bare or `<vendor>:<name>`). The vendor drives URL +
+    // header shape; the full `provider_id` keys credential lookup so
+    // named instances pull their own API key from the keychain.
+    let parsed = parse_provider_id(provider_id);
+    let vendor = parsed
+        .vendor()
+        .ok_or_else(|| format!("{TEST_PROVIDER_CONNECTION_ERROR}unknown provider: {provider_id}"))?;
+
+    // Phase B: Anthropic instances may be configured for Google Vertex
+    // AI via `[providers.anthropic.<name>] auth_kind = "vertex"`. In
+    // that case the probe shells out to gcloud for an ADC access token
+    // and hits the Vertex publisher endpoint — no API key involved.
+    if vendor == PROVIDER_ANTHROPIC {
+        if let ParsedProviderId::BuiltinNamed { vendor: _, name } = parsed {
+            if let Some(entry) = settings.providers.anthropic.get(name) {
+                if matches!(entry.auth_kind, forge_core::BuiltinAuthKind::Vertex) {
+                    return probe_anthropic_vertex(client, entry).await;
+                }
+            }
+        }
+    }
+
+    let url = builtin_probe_url(vendor).ok_or_else(|| {
         format!("{TEST_PROVIDER_CONNECTION_ERROR}unknown provider: {provider_id}")
     })?;
 
-    let headers: Vec<(String, String)> = match provider_id {
-        PROVIDER_OLLAMA => Vec::new(),
+    let headers: Vec<(String, String)> = match vendor {
         PROVIDER_ANTHROPIC => {
             let key = load_credential(creds, provider_id).await?;
             vec![
@@ -874,6 +1238,47 @@ async fn dispatch_probe(
     };
 
     probe_http_request(client, url, headers).await
+}
+
+/// Vertex AI probe for `[providers.anthropic.<name>] auth_kind = "vertex"`
+/// instances. Shells out via `forge_providers::anthropic::fetch_vertex_access_token`
+/// (gcloud ADC) and GETs the location resource at
+/// `https://aiplatform.googleapis.com/v1/projects/<project>/locations/<region>`.
+/// A 2xx response confirms: gcloud ADC is wired, the project exists, the
+/// caller has Vertex AI access on it, and the region is a valid Vertex
+/// location. This is the standard cross-API "get location" call — works
+/// reliably even when partner-model resources like `publishers/anthropic`
+/// aren't list-able directly.
+#[cfg(feature = "webview")]
+async fn probe_anthropic_vertex(
+    client: &reqwest::Client,
+    entry: &forge_core::BuiltinInstanceEntry,
+) -> Result<TestProviderConnectionOutput, String> {
+    let project = entry.vertex_project.as_deref().unwrap_or("").trim();
+    let region = entry.vertex_region.as_deref().unwrap_or("").trim();
+    if project.is_empty() {
+        return Err(format!(
+            "{TEST_PROVIDER_CONNECTION_ERROR}vertex_project is empty in settings"
+        ));
+    }
+    if region.is_empty() {
+        return Err(format!(
+            "{TEST_PROVIDER_CONNECTION_ERROR}vertex_region is empty in settings"
+        ));
+    }
+    let token = tokio::task::spawn_blocking(forge_providers::anthropic::fetch_vertex_access_token)
+        .await
+        .map_err(|e| format!("{TEST_PROVIDER_CONNECTION_ERROR}vertex token join failed: {e}"))?
+        .map_err(|e| format!("{TEST_PROVIDER_CONNECTION_ERROR}vertex auth: {e}"))?;
+    let url = format!(
+        "https://aiplatform.googleapis.com/v1/projects/{project}/locations/{region}"
+    );
+    probe_http_request(
+        client,
+        &url,
+        vec![("authorization".to_string(), format!("Bearer {token}"))],
+    )
+    .await
 }
 
 #[cfg(feature = "webview")]
@@ -906,6 +1311,97 @@ pub async fn test_provider_connection<R: Runtime>(
     match tokio::time::timeout(TEST_PROVIDER_CONNECTION_TIMEOUT, probe).await {
         Ok(result) => result,
         Err(_) => Err(format!("{TEST_PROVIDER_CONNECTION_ERROR}timeout")),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ---- probe_provider_config ------------------------------------------------
+// ---------------------------------------------------------------------------
+
+/// `probe_provider_config` IPC input. Mirrors the on-disk
+/// `custom_openai:<name>` shape but is supplied ad-hoc by the Add /
+/// Edit Provider modal so the user can verify reachability and pull a
+/// model list *before* the entry is persisted. `endpoint` is the base
+/// URL; the probe appends `/v1/models` itself. `api_key` is the
+/// Bearer token to send — leave it `None` (or empty) for keyless
+/// endpoints.
+#[derive(Debug, Clone, Deserialize, Serialize, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+pub struct ProbeProviderConfigInput {
+    pub endpoint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+}
+
+/// Ad-hoc OpenAI-compatible probe driven by form values rather than a
+/// saved entry. Same wire-format output as `test_provider_connection`
+/// — including the canonical `test_provider_connection:` error prefix
+/// — so the dashboard's auth/network classification logic works
+/// unchanged for the add/edit flow.
+#[cfg(feature = "webview")]
+#[tauri::command]
+pub async fn probe_provider_config<R: Runtime>(
+    input: ProbeProviderConfigInput,
+    webview: Webview<R>,
+) -> Result<TestProviderConnectionOutput, String> {
+    crate::ipc::require_window_label(&webview, "dashboard", "probe_provider_config")
+        .map_err(|e| format!("{TEST_PROVIDER_CONNECTION_ERROR}{e}"))?;
+    let endpoint = input.endpoint.trim();
+    validate_endpoint_for(TEST_PROVIDER_CONNECTION_ERROR, endpoint)?;
+
+    let url = models_probe_url(endpoint);
+    let has_key = matches!(
+        input.api_key.as_deref().map(str::trim),
+        Some(k) if !k.is_empty()
+    );
+    tracing::debug!(
+        target: "forge_shell::providers",
+        endpoint = %endpoint,
+        url = %url,
+        has_key = has_key,
+        "probe_provider_config invoked"
+    );
+    let headers = match input.api_key.as_deref().map(str::trim) {
+        Some(k) if !k.is_empty() => vec![("authorization".to_string(), format!("Bearer {k}"))],
+        _ => Vec::new(),
+    };
+
+    let client = reqwest::Client::builder()
+        .build()
+        .map_err(|e| format!("{TEST_PROVIDER_CONNECTION_ERROR}network {e}"))?;
+
+    let probe = probe_http_request(&client, &url, headers);
+    let outcome = tokio::time::timeout(TEST_PROVIDER_CONNECTION_TIMEOUT, probe).await;
+    match outcome {
+        Ok(Ok(out)) => {
+            tracing::debug!(
+                target: "forge_shell::providers",
+                url = %url,
+                ok = out.ok,
+                latency_ms = ?out.latency_ms,
+                model_count = ?out.model_count,
+                "probe_provider_config succeeded"
+            );
+            Ok(out)
+        }
+        Ok(Err(e)) => {
+            tracing::debug!(
+                target: "forge_shell::providers",
+                url = %url,
+                error = %e,
+                "probe_provider_config failed"
+            );
+            Err(e)
+        }
+        Err(_) => {
+            tracing::debug!(
+                target: "forge_shell::providers",
+                url = %url,
+                timeout_ms = TEST_PROVIDER_CONNECTION_TIMEOUT.as_millis() as u64,
+                "probe_provider_config timed out"
+            );
+            Err(format!("{TEST_PROVIDER_CONNECTION_ERROR}timeout"))
+        }
     }
 }
 
@@ -1025,8 +1521,8 @@ pub fn custom_openai_section_present(settings_toml: &str, name: &str) -> Result<
 }
 
 /// Re-key the `[providers.custom_openai.<name>]` section with `cfg`. Strips
-/// any pre-existing `api_version` when the caller leaves it `None` so an
-/// edit that clears the override actually clears it on disk.
+/// any pre-existing `api_version` left behind by older builds so a stale
+/// key doesn't linger in the user's settings.toml after an edit.
 fn rewrite_custom_openai_section(
     existing: &str,
     name: &str,
@@ -1044,20 +1540,10 @@ fn rewrite_custom_openai_section(
         toml::Value::String(cfg.model.clone()),
     )
     .map_err(|e| format!("{UPDATE_PROVIDER_ERROR}{e}"))?;
-    match &cfg.api_version {
-        Some(version) => {
-            body = apply_setting_update(
-                &body,
-                &format!("providers.custom_openai.{name}.api_version"),
-                toml::Value::String(version.clone()),
-            )
-            .map_err(|e| format!("{UPDATE_PROVIDER_ERROR}{e}"))?;
-        }
-        None => {
-            body = remove_toml_leaf(&body, &["providers", "custom_openai", name, "api_version"])
-                .map_err(|e| format!("{UPDATE_PROVIDER_ERROR}{e}"))?;
-        }
-    }
+    // Strip any stale `api_version` key written by older builds — the
+    // field is gone from the wire shape and the runtime never reads it.
+    body = remove_toml_leaf(&body, &["providers", "custom_openai", name, "api_version"])
+        .map_err(|e| format!("{UPDATE_PROVIDER_ERROR}{e}"))?;
     Ok(body)
 }
 
@@ -1091,9 +1577,17 @@ fn remove_toml_leaf(existing: &str, path: &[&str]) -> Result<String, String> {
 // ---------------------------------------------------------------------------
 
 /// `remove_provider` IPC input. Accepts a built-in slug (`anthropic`,
-/// `openai`, `ollama`, `mistral`) — removing a built-in clears its
+/// `openai`, `mistral`) — removing a built-in clears its
 /// `providers.enabled.<id>` flag — or a `custom_openai:<name>` id which
 /// drops the corresponding `[providers.custom_openai.<name>]` section.
+///
+/// Remove is intentionally tolerant of the vendor allowlist: any
+/// well-formed id whose entry is present in the user's settings will
+/// be cleaned up, even if the vendor itself is no longer a supported
+/// built-in. This lets users walk away from deprecated configurations
+/// (e.g. legacy `ollama:default` after Ollama moved to a `custom_openai`
+/// preset) without hand-editing TOML. The strict "is configured" check
+/// lives in [`rewrite_for_remove`].
 ///
 /// The IPC does not touch the keyring. Callers chain `logout_provider`
 /// when they want the credential cleared too — per the spec, surfacing
@@ -1104,17 +1598,11 @@ pub struct RemoveProviderInput {
     pub id: String,
 }
 
-/// Pure validation exposed for unit tests.
+/// Pure validation exposed for unit tests. Only validates the id shape —
+/// vendor-allowlist enforcement is skipped on the remove path so users
+/// can clean up entries for deprecated built-ins (see the struct doc).
 pub fn validate_remove_provider_input(input: &RemoveProviderInput) -> Result<(), String> {
     validate_provider_id(&input.id).map_err(|e| format!("{REMOVE_PROVIDER_ERROR}{e}"))?;
-    if !input.id.starts_with(CUSTOM_OPENAI_PREFIX)
-        && !BUILTIN_ADDABLE_KINDS.contains(&input.id.as_str())
-    {
-        return Err(format!(
-            "{REMOVE_PROVIDER_ERROR}unknown provider kind: {}",
-            input.id
-        ));
-    }
     Ok(())
 }
 
@@ -1213,7 +1701,7 @@ pub fn rewrite_for_remove(existing: &str, id: &str) -> Result<String, String> {
 // ---------------------------------------------------------------------------
 
 /// `set_provider_enabled` IPC input. Flips the `providers.enabled.<id>`
-/// flag. Accepts either a built-in slug (`anthropic`, `openai`, `ollama`,
+/// flag. Accepts either a built-in slug (`anthropic`, `openai`,
 /// `mistral`, `custom_openai`) or a `custom_openai:<name>` id. Disabled
 /// providers stay listed by `dashboard_list_providers` so the user can
 /// re-enable or remove them, but `set_active_provider` rejects them and
@@ -1331,7 +1819,7 @@ mod tests {
     /// for the built-ins — under the new model, absent keys yield no row.
     fn settings_with_all_builtins_enabled() -> AppSettings {
         let mut s = AppSettings::default();
-        for id in &[PROVIDER_OLLAMA, PROVIDER_ANTHROPIC, PROVIDER_OPENAI] {
+        for id in &[PROVIDER_ANTHROPIC, PROVIDER_OPENAI] {
             s.providers.enabled.insert((*id).to_string(), true);
         }
         s
@@ -1356,7 +1844,7 @@ mod tests {
         let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
         assert_eq!(
             ids,
-            vec!["ollama", "anthropic", "openai"],
+            vec!["anthropic", "openai"],
             "builtin order is the user-facing card order; do not reorder casually"
         );
     }
@@ -1377,22 +1865,63 @@ mod tests {
     }
 
     #[test]
-    fn build_provider_list_marks_ollama_as_keyless() {
-        let s = settings_with_all_builtins_enabled();
-        let entries = build_provider_list(&s, |_| false);
-        let ollama = entries.iter().find(|e| e.id == "ollama").unwrap();
-        assert!(!ollama.credential_required);
-        assert!(!ollama.has_credential);
-        assert!(ollama.model_available);
-    }
-
-    #[test]
     fn build_provider_list_marks_anthropic_credential_present_when_store_says_so() {
         let s = settings_with_all_builtins_enabled();
         let entries = build_provider_list(&s, |id| id == "anthropic");
         let anthropic = entries.iter().find(|e| e.id == "anthropic").unwrap();
         assert!(anthropic.credential_required);
         assert!(anthropic.has_credential);
+    }
+
+    #[test]
+    fn build_provider_list_vertex_anthropic_suppresses_credential_requirement() {
+        // Phase B: when `[providers.anthropic.<name>]` has `auth_kind =
+        // "vertex"`, the dashboard row reports `credential_required = false`
+        // so the orange auth pill and "ADD CREDENTIAL" CTA do not appear —
+        // gcloud ADC supplies auth at request time. The row's `auth_kind`
+        // surfaces on the wire so the UI can render Vertex-specific copy.
+        let mut s = forge_core::settings::AppSettings::default();
+        s.providers
+            .enabled
+            .insert("anthropic:vertex-work".to_string(), true);
+        s.providers.anthropic.insert(
+            "vertex-work".to_string(),
+            forge_core::BuiltinInstanceEntry {
+                auth_kind: forge_core::BuiltinAuthKind::Vertex,
+                vertex_project: Some("my-proj".to_string()),
+                vertex_region: Some("us-central1".to_string()),
+            },
+        );
+        // Even if cred_present claims true (it won't — there's no entry),
+        // the credential_required flag must be false for vertex rows.
+        let entries = build_provider_list(&s, |_| false);
+        let row = entries
+            .iter()
+            .find(|e| e.id == "anthropic:vertex-work")
+            .expect("vertex instance row");
+        assert!(!row.credential_required, "{row:?}");
+        assert!(!row.has_credential, "{row:?}");
+        assert_eq!(row.auth_kind, Some(forge_core::BuiltinAuthKind::Vertex));
+    }
+
+    #[test]
+    fn build_provider_list_api_key_anthropic_named_keeps_credential_requirement() {
+        // Sibling case: a named Anthropic instance with no per-instance
+        // section (or `auth_kind = "api_key"`) still flags
+        // credential_required=true so the dashboard renders the prompt.
+        let mut s = forge_core::settings::AppSettings::default();
+        s.providers
+            .enabled
+            .insert("anthropic:work".to_string(), true);
+        let entries = build_provider_list(&s, |_| false);
+        let row = entries
+            .iter()
+            .find(|e| e.id == "anthropic:work")
+            .expect("anthropic:work row");
+        assert!(row.credential_required);
+        assert!(!row.has_credential);
+        // No section → auth_kind absent on the wire.
+        assert_eq!(row.auth_kind, None);
     }
 
     #[test]
@@ -1419,11 +1948,11 @@ mod tests {
                 api_key: None,
             },
         );
-        for id in &[PROVIDER_OLLAMA, PROVIDER_ANTHROPIC, PROVIDER_OPENAI] {
+        for id in &[PROVIDER_ANTHROPIC, PROVIDER_OPENAI] {
             s.providers.enabled.insert((*id).to_string(), true);
         }
         let entries = build_provider_list(&s, |_| false);
-        assert_eq!(entries.len(), 4);
+        assert_eq!(entries.len(), 3);
         let custom = entries.last().unwrap();
         assert_eq!(custom.id, "custom_openai:vllm-local");
         // `auth = none` ⇒ credential not required.
@@ -1480,7 +2009,7 @@ mod tests {
         // once the user has explicitly added it (key present in
         // `providers.enabled`). Without that, even Anthropic is foreign.
         let empty = empty_settings();
-        for id in &["ollama", "anthropic", "openai"] {
+        for id in &["anthropic", "openai"] {
             assert!(
                 !is_known_provider_id(&empty, id),
                 "fresh install should treat `{id}` as not yet configured"
@@ -1488,7 +2017,7 @@ mod tests {
         }
 
         let s = settings_with_all_builtins_enabled();
-        for id in &["ollama", "anthropic", "openai"] {
+        for id in &["anthropic", "openai"] {
             assert!(is_known_provider_id(&s, id), "expected `{id}` known");
         }
         // A disabled built-in is still configured (key present, value false).
@@ -1604,6 +2133,7 @@ mod tests {
         AddProviderInput {
             id: id.to_string(),
             config,
+            builtin: None,
         }
     }
 
@@ -1611,7 +2141,7 @@ mod tests {
         CustomOpenAiConfig {
             endpoint: "https://api.example.com".to_string(),
             model: "qwen2".to_string(),
-            api_version: None,
+            keyless: None,
         }
     }
 
@@ -1620,6 +2150,60 @@ mod tests {
         // Built-in `anthropic` with no config — the validation contract for
         // the IPC's success branch.
         validate_add_provider_input(&add_input("anthropic", None)).expect("anthropic");
+    }
+
+    // Phase A: named built-in instances. `anthropic:work` and
+    // `openai:personal` flow through the same enabled-flag path as their
+    // bare counterparts, with the full id used as the credential key.
+    #[test]
+    fn add_provider_validates_named_builtin() {
+        validate_add_provider_input(&add_input("anthropic:work", None)).expect("anthropic:work");
+        validate_add_provider_input(&add_input("openai:personal", None))
+            .expect("openai:personal");
+    }
+
+    #[test]
+    fn add_provider_rejects_named_builtin_empty_name() {
+        let err = validate_add_provider_input(&add_input("anthropic:", None)).unwrap_err();
+        assert!(err.starts_with(ADD_PROVIDER_ERROR), "{err}");
+        assert!(err.contains("non-empty"), "{err}");
+    }
+
+    #[test]
+    fn add_provider_rejects_named_builtin_invalid_chars() {
+        let err =
+            validate_add_provider_input(&add_input("anthropic:has spaces", None)).unwrap_err();
+        assert!(err.contains("[A-Za-z0-9_-]"), "{err}");
+    }
+
+    #[test]
+    fn add_provider_rejects_named_builtin_with_config() {
+        let err = validate_add_provider_input(&add_input("anthropic:work", Some(custom_cfg())))
+            .unwrap_err();
+        assert!(err.contains("does not accept config"), "{err}");
+    }
+
+    #[test]
+    fn parse_provider_id_classifies_named_builtin() {
+        assert!(matches!(
+            parse_provider_id("anthropic"),
+            ParsedProviderId::BuiltinBare("anthropic")
+        ));
+        assert!(matches!(
+            parse_provider_id("anthropic:work"),
+            ParsedProviderId::BuiltinNamed {
+                vendor: "anthropic",
+                name: "work"
+            }
+        ));
+        assert!(matches!(
+            parse_provider_id("custom_openai:vllm"),
+            ParsedProviderId::CustomOpenAi("vllm")
+        ));
+        assert!(matches!(
+            parse_provider_id("gemini:work"),
+            ParsedProviderId::Unknown
+        ));
     }
 
     #[test]
@@ -1681,7 +2265,7 @@ mod tests {
 
     #[test]
     fn add_provider_accepts_mistral_builtin() {
-        // `mistral` is admitted alongside anthropic / openai / ollama per the
+        // `mistral` is admitted alongside anthropic / openai per the
         // dashboard add-provider spec — even though the runtime adapter is
         // not yet first-class, the schema reserves the slug.
         validate_add_provider_input(&add_input("mistral", None)).expect("mistral");
@@ -1719,7 +2303,7 @@ anthropic = true
         let cfg = CustomOpenAiConfig {
             endpoint: "https://api.together.xyz".into(),
             model: "mixtral".into(),
-            api_version: Some("2025-01".into()),
+            keyless: None,
         };
         let body = write_custom_openai_section("", "together", &cfg).unwrap();
         let parsed: toml::Value = toml::from_str(&body).unwrap();
@@ -1729,15 +2313,39 @@ anthropic = true
             "https://api.together.xyz"
         );
         assert_eq!(section["model"].as_str().unwrap(), "mixtral");
-        assert_eq!(section["api_version"].as_str().unwrap(), "2025-01");
+    }
+
+    /// Keyless-preset path (e.g. local Ollama exposed via the custom_openai
+    /// preset): a keyless `custom_openai` entry must persist
+    /// `auth.shape = "none"` so the request layer skips the bearer-token
+    /// header lookup. Non-keyless sections must NOT carry an `auth`
+    /// key — the daemon's default is still bearer auth.
+    #[test]
+    fn write_custom_openai_section_writes_auth_none_when_keyless() {
+        let cfg = CustomOpenAiConfig {
+            endpoint: "http://127.0.0.1:11434".into(),
+            model: "llama3.2".into(),
+            keyless: Some(true),
+        };
+        let body = write_custom_openai_section("", "local", &cfg).unwrap();
+        let parsed: toml::Value = toml::from_str(&body).unwrap();
+        let section = &parsed["providers"]["custom_openai"]["local"];
+        assert_eq!(
+            section["auth"]["shape"].as_str().unwrap(),
+            "none",
+            "keyless preset must persist auth.shape = none — {section:?}"
+        );
     }
 
     #[test]
-    fn write_custom_openai_section_omits_api_version_when_absent() {
+    fn write_custom_openai_section_omits_auth_when_not_keyless() {
         let body = write_custom_openai_section("", "vllm", &custom_cfg()).unwrap();
         let parsed: toml::Value = toml::from_str(&body).unwrap();
         let section = &parsed["providers"]["custom_openai"]["vllm"];
-        assert!(section.get("api_version").is_none(), "{section:?}");
+        assert!(
+            section.get("auth").is_none(),
+            "default custom_openai must not write auth.* — {section:?}"
+        );
     }
 
     /// F-673 prefix invariant — pinned so a future rename of
@@ -1778,7 +2386,6 @@ anthropic = true
     fn builtin_probe_url_recognises_each_builtin() {
         assert!(builtin_probe_url(PROVIDER_ANTHROPIC).is_some());
         assert!(builtin_probe_url(PROVIDER_OPENAI).is_some());
-        assert!(builtin_probe_url(PROVIDER_OLLAMA).is_some());
         assert!(builtin_probe_url("mistral").is_some());
         assert!(builtin_probe_url("gemini").is_none());
     }
@@ -1855,12 +2462,11 @@ model = "m"
 [providers.custom_openai.vllm]
 base_url = "http://old"
 model = "old-model"
-api_version = "2024-01"
 "#;
         let cfg = CustomOpenAiConfig {
             endpoint: "https://new.example.com".into(),
             model: "new-model".into(),
-            api_version: Some("2025-06".into()),
+            keyless: None,
         };
         let body = rewrite_custom_openai_section(existing, "vllm", &cfg).unwrap();
         let parsed: toml::Value = toml::from_str(&body).unwrap();
@@ -1870,11 +2476,13 @@ api_version = "2024-01"
             "https://new.example.com"
         );
         assert_eq!(section["model"].as_str().unwrap(), "new-model");
-        assert_eq!(section["api_version"].as_str().unwrap(), "2025-06");
     }
 
+    /// Migration guard: a stale `api_version` key left behind by older
+    /// builds must be stripped on the next edit so it doesn't linger in
+    /// the user's settings.toml.
     #[test]
-    fn rewrite_custom_openai_section_clears_api_version_when_dropped() {
+    fn rewrite_custom_openai_section_strips_legacy_api_version() {
         let existing = r#"
 [providers.custom_openai.vllm]
 base_url = "https://x"
@@ -1884,7 +2492,7 @@ api_version = "2024-01"
         let cfg = CustomOpenAiConfig {
             endpoint: "https://x".into(),
             model: "m".into(),
-            api_version: None,
+            keyless: None,
         };
         let body = rewrite_custom_openai_section(existing, "vllm", &cfg).unwrap();
         let parsed: toml::Value = toml::from_str(&body).unwrap();
@@ -1910,13 +2518,37 @@ api_version = "2024-01"
     fn remove_provider_validates_builtin_id() {
         validate_remove_provider_input(&remove_input("anthropic")).expect("builtin");
         validate_remove_provider_input(&remove_input("custom_openai:vllm")).expect("custom_openai");
+        // Named built-in instances must pass too — `validate_remove_provider_input`
+        // previously compared the full id against `BUILTIN_ADDABLE_KINDS`, which
+        // rejected every `vendor:name` combo and trapped users with legacy
+        // entries.
+        validate_remove_provider_input(&remove_input("anthropic:work")).expect("named builtin");
     }
 
+    /// Remove is intentionally tolerant of vendor names that are no longer
+    /// supported built-ins. The strict "is configured" check happens in
+    /// `rewrite_for_remove` so users can clean up deprecated entries
+    /// (e.g. legacy `ollama:default` after Ollama moved to a custom_openai
+    /// preset) without hand-editing TOML.
     #[test]
-    fn remove_provider_rejects_unknown_builtin_kind() {
-        let err = validate_remove_provider_input(&remove_input("gemini")).unwrap_err();
-        assert!(err.starts_with(REMOVE_PROVIDER_ERROR), "{err}");
-        assert!(err.contains("unknown provider kind"), "{err}");
+    fn remove_provider_accepts_deprecated_vendor_for_cleanup() {
+        validate_remove_provider_input(&remove_input("ollama:default"))
+            .expect("legacy ollama:default should validate");
+        validate_remove_provider_input(&remove_input("gemini"))
+            .expect("unknown vendor should validate for tolerant cleanup");
+    }
+
+    /// Tolerance at validation does not mean a fictional id silently succeeds —
+    /// `rewrite_for_remove` still requires the entry to be present in the
+    /// user's settings TOML.
+    #[test]
+    fn rewrite_for_remove_errors_when_unknown_builtin_not_configured() {
+        let body = r#"
+[providers.enabled]
+anthropic = true
+"#;
+        let err = rewrite_for_remove(body, "gemini").unwrap_err();
+        assert!(err.contains("not configured"), "{err}");
     }
 
     #[test]
@@ -2282,7 +2914,67 @@ mod dispatch_tests {
             .expect("probe succeeds");
         assert!(out.ok);
         assert_eq!(out.model_count, Some(3));
+        assert_eq!(
+            out.models.as_deref(),
+            Some(&["model-a".to_string(), "model-b".to_string(), "model-c".to_string()][..])
+        );
         assert!(out.latency_ms.is_some());
+    }
+
+    #[test]
+    fn models_probe_url_strips_redundant_v1_suffix() {
+        assert_eq!(
+            super::models_probe_url("http://127.0.0.1:11434"),
+            "http://127.0.0.1:11434/v1/models"
+        );
+        // User pasted the full `/v1` base — must not double up.
+        assert_eq!(
+            super::models_probe_url("http://127.0.0.1:11434/v1"),
+            "http://127.0.0.1:11434/v1/models"
+        );
+        // Trailing slash on the bare host root.
+        assert_eq!(
+            super::models_probe_url("http://127.0.0.1:11434/"),
+            "http://127.0.0.1:11434/v1/models"
+        );
+        // Trailing slash after `/v1`.
+        assert_eq!(
+            super::models_probe_url("http://127.0.0.1:11434/v1/"),
+            "http://127.0.0.1:11434/v1/models"
+        );
+        // Don't strip an inner `/v1` segment that isn't the trailing one.
+        assert_eq!(
+            super::models_probe_url("http://host/proxy/v1/openai"),
+            "http://host/proxy/v1/openai/v1/models"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dispatch_probe_extracts_models_from_ollama_name_shape() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .and(header("authorization", "Bearer ollama"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "models": [
+                    { "name": "llama3.2" },
+                    { "name": "qwen2.5" },
+                ]
+            })))
+            .mount(&server)
+            .await;
+        let settings = settings_with_custom("ollama", &server.uri(), AuthShapeSettings::Bearer);
+        let store = make_store("custom_openai:ollama", "ollama").await;
+        let client = reqwest::Client::new();
+
+        let out = dispatch_probe(&client, "custom_openai:ollama", &settings, &store)
+            .await
+            .expect("probe succeeds");
+        assert!(out.ok);
+        assert_eq!(
+            out.models.as_deref(),
+            Some(&["llama3.2".to_string(), "qwen2.5".to_string()][..])
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

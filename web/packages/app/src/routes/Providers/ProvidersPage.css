@@ -73,7 +73,7 @@
 
 .providers-page__row {
   display: grid;
-  grid-template-columns: auto 1fr auto auto auto auto auto;
+  grid-template-columns: auto 1fr auto auto auto auto auto auto;
   align-items: center;
   gap: var(--sp-3);
   padding: var(--sp-2) var(--sp-4);
@@ -89,6 +89,59 @@
  * itself keeps its full visibility. */
 .providers-page__row--disabled > *:not(.provider-enabled-toggle) {
   opacity: 0.55;
+}
+
+/* Subtle surface lift on the active provider row. The "ACTIVE" badge
+ * in the row's ActiveSlot is the primary visual cue; this just gives
+ * the row a slightly elevated background so the active selection is
+ * scannable in a long list. */
+.providers-page__row--active {
+  background: var(--color-surface-2);
+}
+
+.providers-page__active-badge {
+  /* StatusPill base styles are scoped to text — give the active badge
+   * the same vertical rhythm as the surrounding `size="sm"` buttons so
+   * the row's action cluster aligns cleanly. */
+  padding: var(--sp-1) var(--sp-2);
+}
+
+/* Pencil edit trigger — paired with the trash Remove trigger as the
+ * row's icon-only terminal cluster. Same dimensions / hover lift as
+ * `.remove-provider__trigger`; hover routes to the ember accent rather
+ * than the error palette since edit is non-destructive. */
+.edit-provider__trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--sp-6);
+  height: var(--sp-6);
+  padding: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: var(--ease);
+}
+
+.edit-provider__trigger:hover:not(:disabled) {
+  color: var(--color-text-primary);
+  border-color: var(--color-ember-400);
+}
+
+.edit-provider__trigger:focus-visible {
+  outline: 2px solid var(--color-ember-400);
+  outline-offset: 2px;
+}
+
+.edit-provider__trigger:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
+.edit-provider__icon {
+  flex-shrink: 0;
 }
 
 .providers-page__dot {
@@ -145,11 +198,11 @@
   color: var(--color-text-tertiary);
 }
 
+/* Invisible spacer that holds the Edit-column grid cell for rows that
+ * don't render an Edit button (built-in providers). Keeps the action
+ * cluster aligned across rows without rendering a visible box. */
 .providers-page__slot-placeholder {
-  font-family: var(--font-mono);
-  font-size: var(--type-mono-xxs);
-  color: var(--color-text-tertiary);
-  padding: var(--sp-1) var(--sp-2);
-  border: 1px dashed var(--color-border-1);
-  border-radius: var(--r-sm);
+  display: block;
+  width: 0;
+  height: 0;
 }

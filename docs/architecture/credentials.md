@@ -116,7 +116,7 @@ pub struct CredentialContext {
 }
 ```
 
-When `Some`, the orchestrator calls `store.get(provider_id)` exactly once at turn start, **before** the request loop opens its model step. The pulled value is held only for the duration of the request loop construction (today, dropped immediately because the keyless `OllamaProvider` ignores it; when Anthropic / OpenAI providers land in F-588 / F-589, the value is handed into the provider's per-request auth shape via `secrecy::ExposeSecret::expose_secret` at the network boundary).
+When `Some`, the orchestrator calls `store.get(provider_id)` exactly once at turn start, **before** the request loop opens its model step. The pulled value is held only for the duration of the request loop construction (dropped immediately for keyless providers — e.g. a `custom_openai` preset with `auth.shape = "none"` for a local Ollama or LM Studio endpoint; handed into the per-request auth shape via `secrecy::ExposeSecret::expose_secret` at the network boundary for Anthropic / OpenAI / authed `custom_openai`).
 
 Failure modes:
 

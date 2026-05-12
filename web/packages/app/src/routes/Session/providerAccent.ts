@@ -17,7 +17,6 @@ export function providerAccent(id: ProviderId): string {
       return 'var(--color-provider-anthropic)';
     case 'openai':
       return 'var(--color-provider-openai)';
-    case 'ollama':
     case 'lm-studio':
     case 'local':
       return 'var(--color-provider-local)';

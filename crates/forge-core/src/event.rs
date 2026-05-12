@@ -449,7 +449,7 @@ pub enum Event {
     /// the next `run_turn` boundary.
     ///
     /// `provider_id` is the stable slug the dashboard selected (e.g.
-    /// `"ollama"`, `"anthropic"`, `"openai"`, `"custom_openai:<name>"`).
+    /// `"anthropic"`, `"openai"`, `"custom_openai:<name>"`).
     /// The same string is what `Credentials::has_credential` keys on, and
     /// what `[providers.active]` now persists.
     ProviderChanged { provider_id: String },

@@ -15,7 +15,7 @@ These patterns are Forge-specific. Follow them consistently — they are part of
 Each AI provider gets an accent color used consistently across all panes (see [Color System](color-system.md) for the named scales and [Token Reference](token-reference.md) for the `--color-provider-*` CSS variables):
 - Anthropic / Claude: `ember-400` (`#ff4a12`)
 - OpenAI / GPT: `amber` (`#ffaa33`)
-- Local / Ollama / LM Studio: `steel` (`#7aaaff`)
+- Local / OpenAI-compatible (Ollama, LM Studio, vLLM, …): `steel` (`#7aaaff`)
 - Custom endpoints: `iron-200` (`#8a9aac`)
 
 The provider dot, send button, pane header indicator, and agent thread accent all use this color. When a user opens a pane, the color instantly communicates which model is active.

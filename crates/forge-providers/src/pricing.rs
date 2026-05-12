@@ -13,10 +13,10 @@
 //!
 //! ## Wildcard
 //!
-//! A row with `model = "*"` matches any model under that provider. The
-//! intended use is Ollama's zero-cost catch-all — every locally-hosted
-//! model is free at point of use, so a single wildcard row covers them all
-//! without enumerating every checkpoint a user might pull.
+//! A row with `model = "*"` matches any model under that provider. Useful
+//! as a catch-all for local / self-hosted endpoints where every model
+//! shares the same cost profile (typically zero) — a single wildcard row
+//! covers them all without enumerating every checkpoint a user might pull.
 //!
 //! Lookup precedence is *exact match first*, wildcard fallback. A provider
 //! that ships both a wildcard and an exact row picks the exact row.
@@ -139,12 +139,8 @@ mod tests {
 
     #[test]
     fn embedded_table_includes_every_required_row() {
-        // Per F-593: Ollama (zero), Anthropic latest x3, OpenAI latest x4.
+        // Anthropic latest x3, OpenAI latest x4.
         let table = PriceTable::embedded();
-        assert!(table
-            .rows
-            .iter()
-            .any(|r| r.provider == "ollama" && r.model == "*"));
         for m in [
             "claude-3-5-sonnet-20241022",
             "claude-3-5-haiku",
@@ -196,13 +192,6 @@ mod tests {
         // Spec: "missing model surfaced as null cost" — must not crash.
         assert!(compute_cost("anthropic", "claude-99-imaginary", 1000, 1000).is_none());
         assert!(compute_cost("unknown-provider", "any", 1000, 1000).is_none());
-    }
-
-    #[test]
-    fn ollama_wildcard_matches_any_model_at_zero_cost() {
-        let cost = compute_cost("ollama", "llama3.1:8b", 1_000_000, 1_000_000)
-            .expect("ollama wildcard must match");
-        assert_eq!(cost.amount, 0.0);
     }
 
     #[test]

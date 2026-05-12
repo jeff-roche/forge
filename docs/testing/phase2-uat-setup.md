@@ -70,8 +70,7 @@ Phase 2's Playwright config registers a `phase2` project that points at
 
 ## 5. Provider selection
 
-Phase 2 UATs use `MockProvider` end-to-end. No Ollama or remote provider is
-required. (Real-Ollama coverage continues to live in Phase 1's UAT-01c.)
+Phase 2 UATs use `MockProvider` end-to-end. No remote provider is required.
 
 `forged` picks its provider from, in precedence order:
 

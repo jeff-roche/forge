@@ -16,7 +16,6 @@
 #![cfg(feature = "webview-test")]
 
 use forge_shell::bridge::SessionConnections;
-use forge_shell::dashboard::{ProviderStatusCache, CACHE_TTL};
 use forge_shell::ipc::{build_invoke_handler, BridgeState};
 use tauri::test::{get_ipc_response, mock_builder, mock_context, noop_assets, INVOKE_KEY};
 use tauri::Manager;
@@ -290,32 +289,6 @@ fn non_dashboard_window_invoking_session_list_is_rejected() {
 
     let err = invoke(&window, "session_list", serde_json::json!({}))
         .expect_err("non-dashboard window must not call session_list");
-
-    assert!(
-        err.contains(LABEL_MISMATCH),
-        "expected label-mismatch error, got: {err}"
-    );
-}
-
-/// F-072: `provider_status` must enforce the `"dashboard"` label like every
-/// other dashboard-scoped Tauri command. Without authz, any `session-*` window
-/// could probe provider state — a low-blast-radius leak today, but it breaks
-/// the invariant that every command authenticates its caller window before
-/// executing, which is what makes per-window capability differentiation safe
-/// to add later.
-#[test]
-fn non_dashboard_window_invoking_provider_status_is_rejected() {
-    let app = mock_builder()
-        .invoke_handler(tauri::generate_handler![
-            forge_shell::dashboard::provider_status,
-        ])
-        .build(mock_context(noop_assets()))
-        .expect("build mock Tauri app");
-    app.manage(ProviderStatusCache::new(CACHE_TTL));
-    let window = build_window(&app, "session-A");
-
-    let err = invoke(&window, "provider_status", serde_json::json!({}))
-        .expect_err("non-dashboard window must not call provider_status");
 
     assert!(
         err.contains(LABEL_MISMATCH),

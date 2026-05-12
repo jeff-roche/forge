@@ -67,7 +67,7 @@ describe('context-adapter — providerFlavour', () => {
     expect(providerFlavour('openai' as ProviderId)).toBe('openai');
     expect(providerFlavour('gpt-4o' as ProviderId)).toBe('openai');
     expect(providerFlavour('groq' as ProviderId)).toBe('openai');
-    expect(providerFlavour('ollama-local' as ProviderId)).toBe('openai');
+    expect(providerFlavour('local-openai' as ProviderId)).toBe('openai');
     expect(providerFlavour('deepseek' as ProviderId)).toBe('openai');
   });
 

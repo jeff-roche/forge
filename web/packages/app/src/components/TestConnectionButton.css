@@ -6,8 +6,30 @@
   gap: var(--sp-2);
 }
 
-.test-connection__alert {
-  font-family: var(--font-mono);
-  font-size: var(--type-mono-xs);
-  color: var(--color-error);
+/* Ring spinner shown inside the Test button while the probe IPC is in
+ * flight. Replaces the "Test" text label so the button width contracts
+ * to the ring's diameter (driven by `font-size` since the ring is sized
+ * in `em`s — the surrounding Button primitive's font-size controls the
+ * overall scale). */
+.test-connection__spinner {
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  box-sizing: border-box;
+  animation: test-connection-spin 700ms linear infinite;
+}
+
+@keyframes test-connection-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .test-connection__spinner {
+    animation: none;
+  }
 }

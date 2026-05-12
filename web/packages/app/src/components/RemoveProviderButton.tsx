@@ -64,14 +64,16 @@ export const RemoveProviderButton: Component<RemoveProviderButtonProps> = (
 
   return (
     <>
-      <Button
-        variant="ghost"
-        size="sm"
+      <button
+        type="button"
+        class="remove-provider__trigger"
         data-testid={`remove-provider-trigger-${props.providerId}`}
+        title={`Remove ${props.providerId}`}
+        aria-label={`Remove ${props.providerId}`}
         onClick={open}
       >
-        Remove
-      </Button>
+        <TrashIcon />
+      </button>
       <Show when={state() === 'confirming' || state() === 'removing' || state() === 'failed'}>
         <ConfirmDialog
           providerId={props.providerId}
@@ -85,6 +87,30 @@ export const RemoveProviderButton: Component<RemoveProviderButtonProps> = (
   );
 };
 
+/** Inline SVG trash-can glyph. Matches the 1.7px stroke convention
+ *  used by the Sidebar / ActivityBar icons so the row's terminal action
+ *  reads as the same visual family. */
+const TrashIcon: Component = () => (
+  <svg
+    class="remove-provider__icon"
+    viewBox="0 0 24 24"
+    width="16"
+    height="16"
+    fill="none"
+    stroke="currentColor"
+    stroke-width="1.7"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    aria-hidden="true"
+  >
+    <path d="M3 6h18" />
+    <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+    <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+    <path d="M10 11v6" />
+    <path d="M14 11v6" />
+  </svg>
+);
+
 interface ConfirmDialogProps {
   providerId: string;
   pending: boolean;
@@ -96,6 +122,14 @@ interface ConfirmDialogProps {
 const ConfirmDialog: Component<ConfirmDialogProps> = (props) => {
   let dialogRef: HTMLDivElement | undefined;
   useFocusTrap(() => dialogRef);
+
+  // Type-to-confirm input: the operator must type the exact provider id
+  // before REMOVE enables. This is the classic destructive-action
+  // discipline (cf. GitHub repo deletion) — a single button click can
+  // wipe an API key from the keychain plus the on-disk config, so the
+  // dialog forces explicit eyes-on input naming the target.
+  const [typed, setTyped] = createSignal('');
+  const matches = (): boolean => typed().trim() === props.providerId;
 
   // WAI-ARIA APG Dialog pattern: window-level Escape so focus-trap can't
   // swallow the keystroke when focus jumps via a screen-reader rotor.
@@ -136,6 +170,27 @@ const ConfirmDialog: Component<ConfirmDialogProps> = (props) => {
           this workspace and clears its stored credential. Active sessions stay
           on the provider they started with.
         </p>
+        <label class="remove-provider__field">
+          <span class="remove-provider__label">
+            Type <strong>{props.providerId}</strong> to confirm
+          </span>
+          <input
+            type="text"
+            class="remove-provider__input"
+            data-testid={`remove-provider-confirm-input-${props.providerId}`}
+            value={typed()}
+            disabled={props.pending}
+            autocomplete="off"
+            spellcheck={false}
+            onInput={(e) => setTyped(e.currentTarget.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && matches() && !props.pending) {
+                e.preventDefault();
+                props.onConfirm();
+              }
+            }}
+          />
+        </label>
         <Show when={props.error}>
           {(msg) => (
             <p
@@ -162,7 +217,7 @@ const ConfirmDialog: Component<ConfirmDialogProps> = (props) => {
             size="sm"
             data-testid={`remove-provider-confirm-btn-${props.providerId}`}
             loading={props.pending}
-            disabled={props.pending}
+            disabled={props.pending || !matches()}
             onClick={props.onConfirm}
           >
             REMOVE

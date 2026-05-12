@@ -45,8 +45,8 @@ const PROVIDERS_DEFAULT: ProviderRow[] = [
     model_available: true,
   },
   {
-    id: 'ollama',
-    display_name: 'Ollama',
+    id: 'custom_openai:ollama',
+    display_name: 'custom_openai — ollama',
     credential_required: false,
     has_credential: false,
     model_available: true,
@@ -145,8 +145,8 @@ describe('NewSessionDialog rendering', () => {
     const { getByTestId } = renderDialog();
     expect(getByTestId('workspace-input')).toBeInTheDocument();
     await waitFor(() => expect(getByTestId('provider-select')).toBeInTheDocument());
-    expect(getByTestId('agent-static')).toBeInTheDocument();
-    expect(getByTestId('agent-static')).toHaveTextContent('orchestrator');
+    expect(getByTestId('agent-select')).toBeInTheDocument();
+    expect(getByTestId('agent-select').getAttribute('data-value')).toBe('forge-default');
   });
 
   it('defaults workspace to activeWorkspaceRoot when present', () => {
@@ -160,7 +160,7 @@ describe('NewSessionDialog rendering', () => {
     installInvokeStub({ activeProvider: 'anthropic' });
     const { getByTestId } = renderDialog();
     await waitFor(() =>
-      expect((getByTestId('provider-select') as HTMLSelectElement).value).toBe('anthropic'),
+      expect(getByTestId('provider-select').getAttribute('data-value')).toBe('anthropic'),
     );
   });
 
@@ -171,7 +171,7 @@ describe('NewSessionDialog rendering', () => {
     });
     const { getByTestId } = renderDialog();
     await waitFor(() =>
-      expect((getByTestId('provider-select') as HTMLSelectElement).value).toBe('anthropic'),
+      expect(getByTestId('provider-select').getAttribute('data-value')).toBe('anthropic'),
     );
   });
 });
@@ -223,7 +223,7 @@ describe('NewSessionDialog spawning state', () => {
         input: {
           workspace_root: '/work/repo',
           provider: 'anthropic',
-          agent: 'orchestrator',
+          agent: 'forge-default',
         },
       });
     });
@@ -337,8 +337,8 @@ describe('NewSessionDialog spawn-failed state', () => {
 
     // Form retained: workspace, provider, agent all still set.
     expect((getByTestId('workspace-input') as HTMLInputElement).value).toBe('/custom/path');
-    expect((getByTestId('provider-select') as HTMLSelectElement).value).toBe('anthropic');
-    expect(getByTestId('agent-static')).toHaveTextContent('orchestrator');
+    expect(getByTestId('provider-select').getAttribute('data-value')).toBe('anthropic');
+    expect(getByTestId('agent-select').getAttribute('data-value')).toBe('forge-default');
 
     // Retry — error clears once submit fires again.
     fireEvent.click(getByTestId('new-session-submit'));

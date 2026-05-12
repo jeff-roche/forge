@@ -2,9 +2,17 @@
 
 /**
  * `remove_provider` IPC input. Accepts a built-in slug (`anthropic`,
- * `openai`, `ollama`, `mistral`) — removing a built-in clears its
+ * `openai`, `mistral`) — removing a built-in clears its
  * `providers.enabled.<id>` flag — or a `custom_openai:<name>` id which
  * drops the corresponding `[providers.custom_openai.<name>]` section.
+ *
+ * Remove is intentionally tolerant of the vendor allowlist: any
+ * well-formed id whose entry is present in the user's settings will
+ * be cleaned up, even if the vendor itself is no longer a supported
+ * built-in. This lets users walk away from deprecated configurations
+ * (e.g. legacy `ollama:default` after Ollama moved to a `custom_openai`
+ * preset) without hand-editing TOML. The strict "is configured" check
+ * lives in [`rewrite_for_remove`].
  *
  * The IPC does not touch the keyring. Callers chain `logout_provider`
  * when they want the credential cleared too — per the spec, surfacing

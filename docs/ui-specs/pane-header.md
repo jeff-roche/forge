@@ -36,9 +36,7 @@ Flex row, vertically centered, `gap: var(--sp-3)`, padding `0 var(--sp-4)`. Back
 
 ### PH.3 Provider pill
 
-The pill is the per-pane provider indicator. Color follows `ai-patterns.md` — anthropic = `ember-400`, openai = `amber`, local/ollama = `steel`, custom = `iron-200`. The accent applies to the dot and the pill text.
-
-In Phase 1 the pill text color is hardcoded to `--color-provider-local` (steel) as a placeholder while only the local Ollama provider is wired. The convention above is the target — once provider identity is plumbed through the pane state, the pill picks the accent from the active session's provider.
+The pill is the per-pane provider indicator. Color follows `ai-patterns.md` — anthropic = `ember-400`, openai = `amber`, local / OpenAI-compatible endpoints = `steel`, other custom = `iron-200`. The accent applies to the dot and the pill text. The pill picks the accent from the active session's provider id at render time — `custom_openai:<name>` entries (including local model servers like Ollama via the local preset) resolve to `steel` when the endpoint is loopback and `iron-200` otherwise.
 
 ### PH.4 Cost meter format
 

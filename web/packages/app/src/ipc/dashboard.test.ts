@@ -3,7 +3,6 @@ import { setInvokeForTesting } from '../lib/tauri';
 import {
   sessionList,
   openSession,
-  providerStatus,
   listProviders,
   getActiveProvider,
   setActiveProvider,
@@ -38,24 +37,9 @@ describe('dashboard ipc wrappers (F-365)', () => {
     expect(invokeMock).toHaveBeenCalledWith('open_session', { id: 'sess-abc' });
   });
 
-  it('providerStatus invokes `provider_status` with no args', async () => {
-    const status = {
-      reachable: true,
-      base_url: 'http://127.0.0.1:11434',
-      models: ['llama3'],
-      last_checked: '2026-04-22T00:00:00Z',
-    };
-    invokeMock.mockResolvedValue(status);
-
-    const result = await providerStatus();
-
-    expect(invokeMock).toHaveBeenCalledWith('provider_status', undefined);
-    expect(result).toEqual(status);
-  });
-
   it('listProviders invokes `dashboard_list_providers` with no args', async () => {
     const entries = [
-      { id: 'ollama', display_name: 'Ollama', credential_required: false, has_credential: false, model_available: true },
+      { id: 'anthropic', display_name: 'Anthropic', credential_required: true, has_credential: true, model_available: true },
     ];
     invokeMock.mockResolvedValue(entries);
 

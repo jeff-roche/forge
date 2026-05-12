@@ -7,7 +7,7 @@
 //!
 //! # Streaming bounds
 //!
-//! The HTTP-layer client and the SSE decoder share Ollama's hardening posture:
+//! The HTTP-layer client and the SSE decoder enforce a hardening posture:
 //! per-line byte cap, inter-event idle timeout, and overall wall-clock budget.
 //! Any of these terminates the stream with a typed [`ChatChunk::Error`] —
 //! the SSE adapter ([`crate::sse`]) yields a typed [`crate::sse::SseError`]

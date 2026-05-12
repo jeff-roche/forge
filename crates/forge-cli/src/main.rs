@@ -154,10 +154,13 @@ async fn session_new(kind: SessionNewKind) -> Result<()> {
         SessionNewKind::Agent { name, provider, .. } => (Some(name.as_str()), provider.as_deref()),
         // `forge session new provider` historically passed `--provider <spec>`
         // without an `--agent`. The shared spawn helper applies a stable
-        // `orchestrator` default for the agent so the daemon's required flag
-        // is still satisfied; preserve the existing wire shape by passing it
-        // explicitly.
-        SessionNewKind::Provider { spec, .. } => (Some("orchestrator"), Some(spec.as_str())),
+        // `forge-default` default for the agent so the daemon's required
+        // flag is still satisfied; preserve the existing wire shape by
+        // passing it explicitly.
+        SessionNewKind::Provider { spec, .. } => (
+            Some(forge_agents::FORGE_DEFAULT_AGENT_NAME),
+            Some(spec.as_str()),
+        ),
     };
 
     let spawned = forge_cli::spawn::spawn_forged_session(&workspace, agent, provider).await?;

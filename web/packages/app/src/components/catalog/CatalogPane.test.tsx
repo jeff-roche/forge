@@ -324,8 +324,8 @@ describe('<CatalogPane> (F-592)', () => {
 // `--color-provider-*` token. Two surfaces qualify: (1) provider-scoped group
 // headers (rows grouped under a `Provider · <id>` label), and (2) Provider-
 // typed roster rows themselves. The mapping collapses runtime ids onto the
-// four design tokens — `anthropic`, `openai`, `ollama`→`local`, anything else
-// (including `custom_openai:*`) → `custom`.
+// four design tokens — `anthropic`, `openai`, `local`/`lm-studio`→`local`,
+// anything else (including `custom_openai:*`) → `custom`.
 describe('<CatalogPane> provider color discipline (F-694)', () => {
   const skillIn = (
     skillId: string,
@@ -342,7 +342,7 @@ describe('<CatalogPane> provider color discipline (F-694)', () => {
           return Promise.resolve([
             skillIn('claude-skill', 'anthropic'),
             skillIn('gpt-skill', 'openai'),
-            skillIn('llama-skill', 'ollama'),
+            skillIn('local-skill', 'local'),
             skillIn('byo-skill', 'custom_openai:acme'),
           ]);
         case 'list_mcp_servers':
@@ -363,7 +363,7 @@ describe('<CatalogPane> provider color discipline (F-694)', () => {
     }
     expect(seen.has('anthropic')).toBe(true);
     expect(seen.has('openai')).toBe(true);
-    expect(seen.has('local')).toBe(true); // ollama → local
+    expect(seen.has('local')).toBe(true); // local → local
     expect(seen.has('custom')).toBe(true); // custom_openai:* → custom
   });
 
@@ -377,7 +377,7 @@ describe('<CatalogPane> provider color discipline (F-694)', () => {
               scope: { type: 'SessionWide' },
             } satisfies ScopedRosterEntry,
             {
-              entry: { type: 'Provider', id: 'ollama', model: 'llama3.1' },
+              entry: { type: 'Provider', id: 'lm-studio', model: 'llama3.1' },
               scope: { type: 'SessionWide' },
             } satisfies ScopedRosterEntry,
           ]);

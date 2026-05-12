@@ -31,14 +31,17 @@ import {
   createMemo,
   createResource,
   createSignal,
-  For,
   onCleanup,
   onMount,
   Show,
 } from 'solid-js';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { Button } from '@forge/design';
-import type { SessionStartInput, SessionStartOutput } from '@forge/ipc';
+import type {
+  RosterTier,
+  SessionStartInput,
+  SessionStartOutput,
+} from '@forge/ipc';
 import { invoke } from '../lib/tauri';
 import {
   getActiveProvider,
@@ -46,8 +49,10 @@ import {
   openSession,
   type ProviderEntry,
 } from '../ipc/dashboard';
+import { listAgents } from '../ipc/catalog';
 import { activeWorkspaceRoot } from '../stores/session';
 import { useFocusTrap } from '../lib/useFocusTrap';
+import { Dropdown, type DropdownOption } from './Dropdown';
 import './NewSessionDialog.css';
 
 export type DialogState = 'idle' | 'validating' | 'spawning' | 'spawn-failed';
@@ -59,7 +64,10 @@ export interface NewSessionDialogProps {
   onSpawned?: (sessionId: string) => void;
 }
 
-const FALLBACK_AGENT = 'orchestrator';
+/** Built-in default — mirrors `forge_agents::FORGE_DEFAULT_AGENT_NAME` on
+ * the daemon side. The daemon's roster loader injects this name even when
+ * the user has no `.agents/*.md` files, so the picker is never empty. */
+const FALLBACK_AGENT = 'forge-default';
 
 interface ProviderOption {
   id: string;
@@ -120,6 +128,53 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
     return { list, active };
   });
 
+  // Load agents whenever the workspace root changes — agents can be either
+  // user-scoped (always present) or workspace-scoped (require a path). When
+  // the field is empty we still surface user-scoped agents so the picker
+  // is populated from the moment the dialog opens.
+  interface AgentRow {
+    id: string;
+    tier: RosterTier | null;
+  }
+  const [agentsResource] = createResource<AgentRow[], string>(
+    () => workspaceRoot().trim(),
+    async (root) => {
+      const entries = (await listAgents(root).catch(() => [])) ?? [];
+      return entries
+        .filter((e) => e.entry.type === 'Agent')
+        .map<AgentRow>((e) => ({
+          id: (e.entry as { id: string }).id,
+          tier: e.tier ?? null,
+        }));
+    },
+  );
+
+  const agentOptions = createMemo<DropdownOption[]>(() => {
+    const list = agentsResource() ?? [];
+    // De-dupe by id (an agent could in theory exist at both tiers; workspace
+    // wins because it's the more specific override).
+    const byId = new Map<string, AgentRow>();
+    for (const row of list) {
+      const existing = byId.get(row.id);
+      if (!existing || (existing.tier === 'user' && row.tier === 'workspace')) {
+        byId.set(row.id, row);
+      }
+    }
+    if (!byId.has(FALLBACK_AGENT)) {
+      byId.set(FALLBACK_AGENT, { id: FALLBACK_AGENT, tier: null });
+    }
+    return [...byId.values()]
+      .sort((a, b) => a.id.localeCompare(b.id))
+      .map<DropdownOption>((row) => {
+        const base: DropdownOption = { value: row.id, label: row.id };
+        if (row.tier === 'workspace')
+          return { ...base, chip: { text: 'workspace', tone: 'workspace' } };
+        if (row.tier === 'user')
+          return { ...base, chip: { text: 'user', tone: 'user' } };
+        return base;
+      });
+  });
+
   const providerOptions = createMemo<ProviderOption[]>(() => {
     const data = providersResource();
     if (!data) return [];
@@ -137,6 +192,17 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
     if (providerId() !== null) return;
     const def = pickDefaultProvider(toProviderOptions(data.list), data.active);
     setProviderId(def);
+  });
+
+  // Snap the agent selection to a valid option whenever the roster
+  // resolves. The current selection wins if it is still present.
+  createEffect(() => {
+    const opts = agentOptions();
+    const first = opts[0];
+    if (first === undefined) return;
+    if (!opts.some((o) => o.value === agentId())) {
+      setAgentId(first.value);
+    }
   });
 
   // Reset state when the dialog is reopened.
@@ -318,7 +384,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
               </div>
             </label>
 
-            <label class="new-session-dialog__field">
+            <div class="new-session-dialog__field">
               <span class="new-session-dialog__label">PROVIDER</span>
               <Show
                 when={hasEnabledProvider()}
@@ -332,33 +398,32 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
                   </div>
                 }
               >
-                <select
-                  class="new-session-dialog__input"
-                  data-testid="provider-select"
-                  value={providerId() ?? ''}
+                <Dropdown
+                  testid="provider-select"
+                  ariaLabel="Provider"
                   disabled={isBusy()}
-                  onChange={(e) => setProviderId(e.currentTarget.value || null)}
-                >
-                  <For each={providerOptions()}>
-                    {(opt) => (
-                      <option value={opt.id} disabled={!opt.enabled}>
-                        {opt.label}
-                      </option>
-                    )}
-                  </For>
-                </select>
+                  value={providerId() ?? ''}
+                  onChange={(v) => setProviderId(v || null)}
+                  options={providerOptions().map((opt) => ({
+                    value: opt.id,
+                    label: opt.label,
+                    disabled: !opt.enabled,
+                  }))}
+                />
               </Show>
-            </label>
+            </div>
 
-            <label class="new-session-dialog__field">
+            <div class="new-session-dialog__field">
               <span class="new-session-dialog__label">AGENT</span>
-              <span
-                class="new-session-dialog__static"
-                data-testid="agent-static"
-              >
-                {agentId()}
-              </span>
-            </label>
+              <Dropdown
+                testid="agent-select"
+                ariaLabel="Agent"
+                disabled={isBusy()}
+                value={agentId()}
+                onChange={setAgentId}
+                options={agentOptions()}
+              />
+            </div>
 
             <Show when={error() !== null}>
               <div

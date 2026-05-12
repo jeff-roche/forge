@@ -1,7 +1,9 @@
 # Phase 1 User Acceptance Test Plan
 
-**Scope:** Phase 1: Single Provider + GUI — Dashboard, Session window, chat pane, tool calls, four-scope approval, Ollama provider, archive-on-end.
-**Outcome gate:** A user can launch Forge, open a session from the Dashboard, exchange messages (with streaming) against either MockProvider or a real local Ollama model, trigger a tool call, approve it inline, and see the result rendered in the chat pane.
+**Scope:** Phase 1: Single Provider + GUI — Dashboard, Session window, chat pane, tool calls, four-scope approval, archive-on-end.
+**Outcome gate:** A user can launch Forge, open a session from the Dashboard, exchange messages (with streaming) against MockProvider, trigger a tool call, approve it inline, and see the result rendered in the chat pane.
+
+> **Post-Phase-3.1 note.** The Phase-1 milestone originally shipped a dedicated `OllamaProvider`, an Ollama status card on the Dashboard, and `ollama:<model>` provider selection. Those surfaces were retired in Phase 3.1 in favour of a `custom_openai` preset, so the Ollama-specific UATs (UAT-01b, UAT-01c, UAT-03, and UAT-12 variant A) have been dropped from this plan. The remaining MockProvider-backed UATs still document the Phase-1 outcome gate.
 
 > **Authoring convention:** new UATs in this plan should follow the `contract-level` / `acceptance-only` labelling defined in [`docs/testing/uat-conventions.md`](./uat-conventions.md). The convention's migration table tentatively classifies each Phase 1 UAT below; back-labelling each scenario in place is tracked under F-327 follow-up. The `contract-level` set feeds the persistent smoke-UAT suite (F-326).
 
@@ -14,9 +16,8 @@
 | Spec | Effect |
 |------|--------|
 | `mock` | MockProvider (uses `FORGE_MOCK_SEQUENCE_FILE` if set, else default path) |
-| `ollama:<model>` | OllamaProvider against `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`) using the named model, e.g. `ollama:qwen2.5:0.5b` |
 
-UAT-01a runs against MockProvider by default; UAT-01c runs the same flow against a real local Ollama. See `phase1-uat-setup.md` for the harness env vars.
+UAT-01a runs against MockProvider. See `phase1-uat-setup.md` for the harness env vars.
 
 ---
 
@@ -40,13 +41,10 @@ Automation vehicle:
 | Design tokens | `pnpm check-tokens` from `web/` passes (runs `scripts/check-tokens.mjs` per `docs/frontend/generation-pipelines.md`; guards F-018 drift) |
 | Playwright | `pnpm --filter app exec playwright install` has been run |
 | Tauri driver | `tauri-driver` available on `$PATH` (`cargo install tauri-driver`) |
-| Ollama | Daemon running at `http://127.0.0.1:11434` with at least one small model pulled (e.g. `llama3.2:1b`). Required for UAT-01b, UAT-03, and UAT-12 variant A. Other UATs use `MockProvider`. |
 | Mock provider | `FORGE_MOCK_SEQUENCE_FILE` points to a JSON array of NDJSON scripts (see `docs/testing/phase0-uat.sh` lines 80-90 for the format). Consumed by `forged` per `crates/forge-session/src/main.rs:38-45`. |
 | Mock agent | `.agents/test-agent.md` exists in the scratch workspace |
 | Workspace | An empty temp directory per run (no pre-existing `.forge/`) |
 | Roadmap (F-032) | `docs/build/roadmap.md` Phase 1 / Phase 3 sections match the GitHub milestone descriptions — verify with a `diff` in CI or by hand before running UATs |
-
-**Ollama prerequisite is load-bearing.** If Ollama is not running, UAT-01b and UAT-03's "reachable" variant are **Blocked** (not Failed) — but UAT-03's "unreachable" variant is actually easier to exercise (just do not start Ollama).
 
 ---
 
@@ -86,54 +84,6 @@ echo "hello from forge phase1 UAT" > "$WS/readable.txt"
 
 ---
 
-## UAT-01b: Ollama provider status card smoke
-
-**Scope:** F-021 + F-023 — the only part of Phase 1's Ollama surface that is wired end-to-end.
-**Vehicle:** Playwright + `tauri-driver`, real Ollama.
-
-| Step | Action | Expected |
-|------|--------|----------|
-| 1 | With Ollama running and at least one model pulled, launch `forge-shell` | Dashboard renders; Ollama card shows health icon in healthy color, `base_url = http://127.0.0.1:11434`, expandable model list listing pulled models |
-| 2 | Click Refresh | `provider_status` re-runs; `last_checked` timestamp updates; model list still accurate |
-
-**Failure criteria:** card never reflects a reachable daemon, model list missing, or refresh does nothing.
-
----
-
-## UAT-01c: Real-Ollama chat round-trip
-
-**Scope:** Session-level `OllamaProvider` wiring — the milestone's original outcome statement (F-038).
-**Vehicle:** Same scenario as UAT-01a, with `--provider ollama:<model>` (or `FORGE_PROVIDER=ollama:<model>`) instead of MockProvider scripts.
-
-Preparation:
-
-```bash
-# Verify the model is pulled.
-ollama pull qwen2.5:0.5b
-curl -s http://127.0.0.1:11434/api/tags | jq -r '.models[].name'   # should include qwen2.5:0.5b
-
-# Launch a session against real Ollama.
-forge session new agent test-agent --workspace "$WS" --provider ollama:qwen2.5:0.5b
-```
-
-| Step | Action | Expected |
-|------|--------|----------|
-| 1 | Run UAT-01a's script with the agent's `--provider` flag set to `ollama:qwen2.5:0.5b` | Session starts; `forged` constructs `OllamaProvider` not `MockProvider` |
-| 2 | Send a prompt | Tokens stream in from the real Ollama daemon (non-deterministic content; non-empty stream) |
-| 3 | Watch for tool calls | Phase 1 mock agents don't emit tool calls; for real tool flows use a model and prompt that intentionally invoke `fs.read` etc. — out of scope here |
-
-**Failure criteria:** session ends with an Ollama connection error despite the daemon being reachable, or `MockProvider` stub responses appear instead of real model output.
-
-The wiring is also exercised by an automated `#[ignore]`-gated integration test:
-```bash
-cargo test -p forge-session --test provider_selection -- --ignored
-```
-which sends a real prompt against `qwen2.5:0.5b` and asserts a non-empty assistant delta.
-
-Suggested follow-up ticket: "forged: select provider based on session meta (`MockProvider | OllamaProvider`)". Rerun UAT-01a's script against a real Ollama-backed session once that ships.
-
----
-
 ## UAT-02: Dashboard sessions list
 
 **Scope:** F-022.
@@ -149,24 +99,6 @@ Suggested follow-up ticket: "forged: select provider based on session meta (`Moc
 | 6 | Click an Archived card | Read-only affordance (no `open_session` for archived in Phase 1 — reactivation is deferred per F-031 scope) |
 
 **Failure criteria:** tabs do not switch, clicking active card does not invoke `open_session`, or visual badges are missing.
-
----
-
-## UAT-03: Ollama status card
-
-**Scope:** F-023.
-**Vehicle:** Playwright + `tauri-driver`, driven with real Ollama toggled on/off.
-
-| Step | Action | Expected |
-|------|--------|----------|
-| 1 | With Ollama running: open Dashboard | Provider panel shows Ollama card; health icon in healthy color; `base_url = http://127.0.0.1:11434`; model count > 0 |
-| 2 | Expand model list | All pulled model names render |
-| 3 | Click Refresh | Card re-runs `provider_status`; `last_checked` timestamp updates |
-| 4 | Point `OLLAMA_BASE_URL` at a counting HTTP shim (a 20-line Node script on a local port that proxies to 11434 and tallies requests). Click Refresh twice within 10s. | Shim records **one** `/api/tags` request, not two — the second is served from `provider_status`'s 10s cache |
-| 5 | Stop Ollama (`pkill ollama` or equivalent) and click Refresh | Health icon flips to unhealthy; card shows the voice-compliant "Start Ollama" message with install guidance |
-| 6 | Start Ollama again and Refresh | Healthy state restored |
-
-**Failure criteria:** no unreachable fallback, no refresh behavior, or the 10-second cache does not debounce.
 
 ---
 
@@ -190,7 +122,7 @@ Suggested follow-up ticket: "forged: select provider based on session meta (`Moc
 ## UAT-05: Chat pane streaming and composer
 
 **Scope:** F-025.
-**Vehicle:** Playwright against a real `forge-session` backed by `MockProvider` (deterministic streaming + tool calls without Ollama).
+**Vehicle:** Playwright against a real `forge-session` backed by `MockProvider` (deterministic streaming + tool calls).
 
 | Step | Action | Expected |
 |------|--------|----------|
@@ -319,21 +251,11 @@ Suggested follow-up ticket: "forged: select provider based on session meta (`Moc
 
 ---
 
-## UAT-12: Recovery — provider or daemon disappears mid-stream
+## UAT-12: Recovery — daemon disappears mid-stream
 
-**Scope:** IPC bridge + provider + chat pane resilience.
-**Vehicle:** Playwright + real Ollama (variant A) and signal-kill (variant B).
+**Scope:** IPC bridge + chat pane resilience.
+**Vehicle:** Playwright + signal-kill.
 
-**Variant A — Ollama crash mid-stream:**
-Requires session started against real Ollama (`--provider ollama:<model>` per the Provider selection section above).
-
-| Step | Action | Expected |
-|------|--------|----------|
-| 1 | Start a chat with real Ollama; send a long prompt | Streaming begins |
-| 2 | `pkill ollama` during stream | Chat pane renders an inline error event per voice rules; session stays alive (window does not close) |
-| 3 | Restart Ollama; send a new prompt | New turn streams normally |
-
-**Variant B — forged crash mid-stream:**
 | Step | Action | Expected |
 |------|--------|----------|
 | 1 | Start a session; begin streaming | |
@@ -401,7 +323,6 @@ These Phase 1 deliverables have no user-visible surface yet. Verification is at 
 |-----------|--------|--------------|
 | `SandboxedCommand` (env whitelist, rlimit, pgid kill) | F-030 | `cargo test -p forge-session sandbox` — `shell.exec` is a stub in Phase 1; real surface arrives in a later phase |
 | Tool dispatcher registration / collision / unknown-tool | F-028 | `cargo test -p forge-session tools` |
-| OllamaProvider NDJSON parsing edge cases | F-021 | `cargo test -p forge-providers ollama` |
 | `forge_fs::write_preview` / `edit_preview` output shape | F-029 | `cargo test -p forge-fs` |
 | `archive_or_purge` cross-device rename fallback | F-031 | `cargo test -p forge-session archive` |
 | Roadmap doc sync | F-032 | Textual `diff` of `docs/build/roadmap.md` vs GitHub milestone descriptions in CI (prereq, not a UAT) |
@@ -415,16 +336,13 @@ These Phase 1 deliverables have no user-visible surface yet. Verification is at 
 |--------|-----------|
 | **Pass** | All steps produce the expected outcome |
 | **Fail** | Any step diverges; process crashes; state on disk wrong |
-| **Blocked** | Prerequisites missing (Ollama not installed; `tauri-driver` not on path) |
+| **Blocked** | Prerequisites missing (`tauri-driver` not on path) |
 
 **Shippable bar — all must Pass:**
-UAT-01a (MockProvider outcome gate), UAT-01b (Ollama card smoke), UAT-02 (sessions list), UAT-05 (chat streaming), UAT-07 (four-scope approval), UAT-08 (fs.write / fs.edit through approval), UAT-09 (persist archive).
+UAT-01a (MockProvider outcome gate), UAT-02 (sessions list), UAT-05 (chat streaming), UAT-07 (four-scope approval), UAT-08 (fs.write / fs.edit through approval), UAT-09 (persist archive).
 
 **Stability bar — required before Phase 2 starts:**
-UAT-03 (cache + unreachable), UAT-04, UAT-06, UAT-10, UAT-11, UAT-12, UAT-13.
-
-**Real-Ollama bar:**
-UAT-01c is unblocked as of F-038 — `forged` selects its provider from `--provider <spec>` / `FORGE_PROVIDER`, so `forge session new agent test-agent --provider ollama:qwen2.5:0.5b` flows through `OllamaProvider`. The wiring is also exercised by an `#[ignore]`-gated integration test (`cargo test -p forge-session --test provider_selection -- --ignored`) so CI can opt in when an Ollama instance is available.
+UAT-04, UAT-06, UAT-10, UAT-11, UAT-12, UAT-13.
 
 ---
 
@@ -433,7 +351,7 @@ UAT-01c is unblocked as of F-038 — `forged` selects its provider from `--provi
 Mirror `docs/testing/phase0-uat.sh` for disk-state cases (UAT-09, UAT-10, UAT-13). Place Playwright specs under `web/packages/app/tests/phase1/` (one spec file per UAT, named `uat-NN-<slug>.spec.ts`) and wire a `pnpm --filter app test:e2e` script that:
 
 1. Builds the app (`pnpm --filter app build`) and the Tauri shell in debug mode.
-2. Starts `tauri-driver` for `tauri-driver`-backed specs (UAT-01a, UAT-01b, UAT-03, UAT-11, UAT-12 variant B).
+2. Starts `tauri-driver` for `tauri-driver`-backed specs (UAT-01a, UAT-11, UAT-12).
 3. Starts Vite dev for mocked-IPC specs (UAT-02, UAT-04 – UAT-08).
 4. Runs `playwright test` with the appropriate project configuration.
 

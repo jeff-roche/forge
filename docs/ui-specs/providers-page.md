@@ -18,12 +18,12 @@ Provide a single, navigable surface for configuring every provider Forge will of
 ## List view
 
 ```
-┌─ PROVIDERS                                          [+ Add provider] ─┐
-│ ● anthropic          built-in   ⦿ key       ● ready 142ms  [Test][Edit][Remove] │
-│ ● openai             built-in   ⚠ key       ◌ unknown      [Test][Edit][Remove] │
-│ ○ ollama             built-in              ● ready 12ms   [Test][Edit][Remove]  │
-│ ● custom_openai:vllm custom     ⦿ key       ● ready 38ms   [Test][Edit][Remove] │
-└────────────────────────────────────────────────────────────────────────┘
+┌─ PROVIDERS                                                [+ Add provider] ─┐
+│ ● anthropic                built-in   ⦿ key       ● ready 142ms  [Test][Edit][Remove] │
+│ ● openai                   built-in   ⚠ key       ◌ unknown      [Test][Edit][Remove] │
+│ ● custom_openai:ollama     custom                ● ready 12ms   [Test][Edit][Remove]  │
+│ ● custom_openai:vllm       custom     ⦿ key       ● ready 38ms   [Test][Edit][Remove] │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Header
@@ -48,7 +48,7 @@ A focus-trapped `role="dialog" aria-modal="true"` modal opened from the header C
 
 ### Fields
 
-- **Kind** (`<select>`): built-in templates (`anthropic`, `openai`, `ollama`, …) or `custom_openai`. Kind selection drives which subsequent fields are visible.
+- **Kind** (`<select>`): built-in templates (`anthropic`, `openai`) or `custom_openai`. Kind selection drives which subsequent fields are visible. Selecting `custom_openai` reveals a **Preset** picker (e.g. *Ollama*, *LM Studio*, *vLLM*, *Blank*); picking *Ollama* auto-fills `endpoint = http://127.0.0.1:11434/v1`, `model = llama3.2`, and `auth = none` so the user only needs to confirm the name.
 - **Name** (`<input>`): unique slug per provider. For built-ins, the kind itself is the canonical slug and the field is read-only with a `Hint: rename to add a second instance` affordance. For `custom_openai`, the field is required and must match `[A-Za-z0-9_-]+` (mirrors `validate_provider_id`'s suffix charset).
 - **Built-in kind fields:**
   - `model` — default model id; pre-filled from the kind's built-in default; editable.
@@ -56,7 +56,6 @@ A focus-trapped `role="dialog" aria-modal="true"` modal opened from the header C
 - **Custom OpenAI fields:**
   - `endpoint` — required; must parse as an `http`/`https` URL.
   - `model` — required; non-empty.
-  - `api_version` — optional, free-text.
 - **Credential** — see §Credential entry below.
 
 ### Validation
@@ -166,7 +165,7 @@ Every command in this section follows the F-673 standard: the outer error string
 ### `add_provider` (F-730)
 
 ```
-input:  { kind: string, name: string, model?: string, endpoint?: string, api_version?: string }
+input:  { kind: string, name: string, model?: string, endpoint?: string }
 output: { provider_id: string }
 error:  "add_provider: <reason>"
 ```
@@ -176,7 +175,7 @@ Validates `name` against the existing provider id-set, validates `endpoint` as `
 ### `update_provider` (F-731)
 
 ```
-input:  { provider_id: string, name?: string, model?: string, endpoint?: string, api_version?: string, kind?: never }
+input:  { provider_id: string, name?: string, model?: string, endpoint?: string, kind?: never }
 output: { provider_id: string }
 error:  "update_provider: <reason>"
 ```

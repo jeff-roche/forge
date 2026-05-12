@@ -141,7 +141,6 @@ async fn seed_user_settings(user_cfg_dir: &std::path::Path, body: &str) {
 
 const BUILTINS_ENABLED_TOML: &str = r#"
 [providers.enabled]
-ollama = true
 anthropic = true
 openai = true
 "#;
@@ -178,15 +177,13 @@ async fn list_providers_returns_added_builtins() {
 
     let result = invoke_ok(&window, "dashboard_list_providers", serde_json::json!({}));
     let entries = result.as_array().expect("list");
-    assert_eq!(entries.len(), 3);
+    assert_eq!(entries.len(), 2);
     let ids: Vec<&str> = entries.iter().map(|e| e["id"].as_str().unwrap()).collect();
-    assert_eq!(ids, vec!["ollama", "anthropic", "openai"]);
+    assert_eq!(ids, vec!["anthropic", "openai"]);
 
-    // Ollama is keyless ⇒ credential_required false.
-    assert_eq!(entries[0]["credential_required"], false);
     // Anthropic is keyed ⇒ credential_required true, has_credential false (empty store).
-    assert_eq!(entries[1]["credential_required"], true);
-    assert_eq!(entries[1]["has_credential"], false);
+    assert_eq!(entries[0]["credential_required"], true);
+    assert_eq!(entries[0]["has_credential"], false);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -226,7 +223,6 @@ async fn list_providers_appends_user_configured_custom_openai_entries() {
         user_cfg_dir.path(),
         r#"
 [providers.enabled]
-ollama = true
 anthropic = true
 openai = true
 
@@ -243,7 +239,7 @@ auth = { shape = "none" }
 
     let result = invoke_ok(&window, "dashboard_list_providers", serde_json::json!({}));
     let entries = result.as_array().expect("list");
-    assert_eq!(entries.len(), 4);
+    assert_eq!(entries.len(), 3);
     let custom = entries.last().unwrap();
     assert_eq!(custom["id"], "custom_openai:vllm-local");
     // `auth = none` ⇒ credential not required.
@@ -477,7 +473,7 @@ async fn rapid_set_active_provider_calls_leave_settings_in_a_known_state() {
     let (app, _registry) = make_app(&[workspace.path()], user_cfg_dir.path(), creds).await;
     let window = make_dashboard_window(&app);
 
-    let candidates = ["anthropic", "openai", "ollama"];
+    let candidates = ["anthropic", "openai"];
     for id in candidates.iter().cycle().take(20) {
         invoke_ok(
             &window,

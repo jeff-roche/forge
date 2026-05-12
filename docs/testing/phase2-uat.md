@@ -52,7 +52,7 @@ Automation vehicle:
 | Workspace | An empty temp directory per run (no pre-existing `.forge/` or `.mcp.json`) |
 | Spec directory | `web/packages/app/tests/phase2/` exists; one `uat-NN-<slug>.spec.ts` per Playwright UAT |
 
-**No external provider prerequisite.** Phase 2 UATs use MockProvider and mock MCP servers throughout — no Ollama or remote endpoint required. (Real-Ollama coverage continues to live in Phase 1's UAT-01c.)
+**No external provider prerequisite.** Phase 2 UATs use MockProvider and mock MCP servers throughout — no remote endpoint required.
 
 ---
 

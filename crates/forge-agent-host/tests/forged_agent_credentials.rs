@@ -85,9 +85,8 @@ async fn credentials_frame_stashed_without_log_leakage() {
         .expect("write ack");
 
     // Push the credential frame the daemon side would emit before
-    // `RunTurn`. Phase-1 OllamaProvider is keyless so the sidecar's
-    // run loop never reads the stash; this test is purely about the
-    // receive + stash + no-leak guarantee.
+    // `RunTurn`. Keyless providers never read the stash; this test
+    // is purely about the receive + stash + no-leak guarantee.
     let cred = SidecarMessage::Credentials(SidecarCredentials {
         provider_id: ProviderId::from_string("anthropic".into()),
         secret: SecretBytes::new(TEST_SECRET_VALUE.as_bytes().to_vec()),

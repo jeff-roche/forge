@@ -48,11 +48,11 @@ describe('sessionTelemetry store (F-395)', () => {
   });
 
   it('provider and usage are tracked independently', () => {
-    recordProviderModel(SID, 'ollama' as ProviderId, 'qwen2.5-coder');
+    recordProviderModel(SID, 'anthropic' as ProviderId, 'claude-opus-4-7');
     recordUsageTick(SID, 100, 200, 0);
     const t = getSessionTelemetry(SID);
-    expect(t.provider).toBe('ollama');
-    expect(t.model).toBe('qwen2.5-coder');
+    expect(t.provider).toBe('anthropic');
+    expect(t.model).toBe('claude-opus-4-7');
     expect(t.tokensIn).toBe(100);
     expect(t.tokensOut).toBe(200);
     expect(t.costUsd).toBe(0);
@@ -77,7 +77,7 @@ describe('sessionTelemetry store (F-395)', () => {
     });
 
     it('ignores an assistant_message that omits provider/model (keeps last-observed pair)', () => {
-      recordProviderModel(SID, 'ollama' as ProviderId, 'qwen');
+      recordProviderModel(SID, 'anthropic' as ProviderId, 'claude-opus-4-7');
       routeTelemetryEvent(SID, {
         type: 'assistant_message',
         id: 'a-2',
@@ -88,8 +88,8 @@ describe('sessionTelemetry store (F-395)', () => {
       });
       const t = getSessionTelemetry(SID);
       // Still the prior pair — we don't clear on a metadata-less event.
-      expect(t.provider).toBe('ollama');
-      expect(t.model).toBe('qwen');
+      expect(t.provider).toBe('anthropic');
+      expect(t.model).toBe('claude-opus-4-7');
     });
 
     it('routes usage_tick with tokens + cost into the store', () => {

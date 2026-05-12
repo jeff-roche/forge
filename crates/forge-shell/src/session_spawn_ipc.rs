@@ -132,6 +132,21 @@ pub async fn session_start<R: Runtime>(
         MAX_WORKSPACE_ROOT_BYTES,
     )?;
 
+    // Seed the workspaces registry with the picked path before the
+    // downstream resolve gate validates it. The user explicitly chose
+    // this path via the OS file picker in the new-session dialog —
+    // that's the registry-creation moment. Idempotent: if the path is
+    // already registered (most calls), this is a no-op.
+    let supplied = std::path::Path::new(&input.workspace_root);
+    if let Ok(canonical) = supplied.canonicalize() {
+        let toml_path = crate::ipc::resolve_workspaces_toml(&state);
+        forge_core::workspaces::register_workspace_if_missing(&toml_path, &canonical)
+            .await
+            .map_err(|e| {
+                format!("{SESSION_START_ERROR}could not update workspaces registry: {e}")
+            })?;
+    }
+
     let workspace_path =
         resolve_workspace_root_for_command(webview.label(), &input.workspace_root, &state)
             .await
@@ -293,7 +308,7 @@ mod tests {
         // Under the "empty by default" model, a built-in is only known once
         // the user has added it (key present in `providers.enabled`).
         let empty = AppSettings::default();
-        for id in &["anthropic", "openai", "ollama"] {
+        for id in &["anthropic", "openai"] {
             assert!(
                 !provider_is_known(&empty, id),
                 "fresh install should treat `{id}` as unconfigured"
@@ -301,10 +316,10 @@ mod tests {
         }
 
         let mut settings = AppSettings::default();
-        for id in &["anthropic", "openai", "ollama"] {
+        for id in &["anthropic", "openai"] {
             settings.providers.enabled.insert((*id).into(), true);
         }
-        for id in &["anthropic", "openai", "ollama"] {
+        for id in &["anthropic", "openai"] {
             assert!(provider_is_known(&settings, id), "expected `{id}` known");
         }
 

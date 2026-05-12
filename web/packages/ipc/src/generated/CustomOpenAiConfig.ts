@@ -6,4 +6,13 @@
  * the credential is stored separately via `login_provider` and is never
  * carried on this struct.
  */
-export type CustomOpenAiConfig = { endpoint: string, model: string, api_version?: string | null, };
+export type CustomOpenAiConfig = { endpoint: string, model: string, 
+/**
+ * When `true`, persist `auth = { shape = "none" }` so the section
+ * represents a keyless OpenAI-compatible endpoint (Ollama via the
+ * custom_openai preset, local
+ * vLLM, internal mocks). The `login_provider` chain is skipped on
+ * the UI side for these entries — there is no key to store.
+ * Absent / `false` keeps the default Bearer-token auth shape.
+ */
+keyless?: boolean | null, };

@@ -119,10 +119,10 @@ describe('DashboardHero (F-719 / F-728)', () => {
             model_available: true,
           },
           {
-            id: 'ollama',
-            display_name: 'Ollama',
-            credential_required: false,
-            has_credential: false,
+            id: 'custom_openai:ollama',
+            display_name: 'custom_openai — ollama',
+            credential_required: true,
+            has_credential: true,
             model_available: true,
           },
           {
@@ -136,7 +136,7 @@ describe('DashboardHero (F-719 / F-728)', () => {
       }
       if (cmd === 'has_credential') {
         const id = args?.['providerId'] as string | undefined;
-        return id === 'anthropic';
+        return id === 'anthropic' || id === 'custom_openai:ollama';
       }
       return undefined;
     }) as never);
@@ -144,7 +144,7 @@ describe('DashboardHero (F-719 / F-728)', () => {
     const { container } = render(() => <DashboardHero />);
     await waitFor(() => {
       expect(container.querySelector('.dashboard-hero__status')?.textContent).toBe(
-        'Two sessions active. One agent paused awaiting approval. Anthropic and local Ollama connected — OpenAI awaiting credentials.',
+        'Two sessions active. One agent paused awaiting approval. Anthropic and custom_openai — ollama connected — OpenAI awaiting credentials.',
       );
     });
   });

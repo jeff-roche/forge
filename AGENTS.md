@@ -23,7 +23,7 @@ Tasks are tracked as GitHub Issues on [forge-ide/forge](https://github.com/forge
 ```
 crates/
   forge-core        canonical types, config, credentials trait, path utils
-  forge-providers   Provider trait + Anthropic/OpenAI/Ollama impls, streaming
+  forge-providers   Provider trait + Anthropic/OpenAI/CustomOpenAI impls, streaming
   forge-mcp         MCP server lifecycle, .mcp.json parsing
   forge-agents      agent def parsing, AGENTS.md injection, orchestration
   forge-session     forged binary — session process, event log, IPC server

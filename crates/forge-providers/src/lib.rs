@@ -15,7 +15,6 @@ pub mod anthropic;
 // F-679: shared HTTP / SSE helpers used by Anthropic and the OpenAI family.
 // Crate-private — the only consumers are sibling provider modules.
 pub(crate) mod http_util;
-pub mod ollama;
 pub mod openai;
 // F-593: static price-table parser + cost calculator. The committed
 // `data/prices.toml` is `include_str!`-embedded so every binary that links
@@ -42,8 +41,8 @@ pub use runtime::{RuntimeProvider, SwappableProvider};
 #[derive(Debug, Clone, Default)]
 pub struct ChatRequest {
     /// Optional system prompt. Providers handle it in role-specific ways:
-    /// e.g. Anthropic hoists it to a top-level `system` field, Ollama
-    /// prepends it to the message stream. `None` means "no system prompt".
+    /// e.g. Anthropic hoists it to a top-level `system` field. `None` means
+    /// "no system prompt".
     ///
     /// F-566: held as `Arc<str>` so per-iteration `req.clone()` on the
     /// orchestrator hot loop is a refcount bump rather than a deep copy
@@ -119,9 +118,9 @@ pub enum ChatChunk {
     /// OpenAI `call_…`) needed to round-trip a `ChatBlock::ToolResult`
     /// back to that provider — the assistant message that initiated the
     /// tool use carries the id, and the user-role tool result references
-    /// it. Providers that do not surface an id on the wire (Ollama,
-    /// `MockProvider`) emit an empty string; the orchestrator falls back
-    /// to its own internal id in that case.
+    /// it. Providers that do not surface an id on the wire (`MockProvider`)
+    /// emit an empty string; the orchestrator falls back to its own
+    /// internal id in that case.
     ToolCall {
         id: String,
         name: String,

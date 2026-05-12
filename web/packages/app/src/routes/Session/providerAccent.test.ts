@@ -3,7 +3,7 @@ import type { ProviderId } from '@forge/ipc';
 import { providerAccent } from './providerAccent';
 
 // F-091: per ai-patterns.md §7 each provider has a fixed accent token:
-//   anthropic → ember-400, openai → amber, local/ollama/lm-studio → steel,
+//   anthropic → ember-400, openai → amber, local/lm-studio → steel,
 //   custom (and any unknown) → iron-200.
 // The helper returns a `var(--color-provider-*)` reference so callers can
 // drop it directly into an inline-style CSS custom property without touching
@@ -13,7 +13,6 @@ describe('providerAccent (F-091)', () => {
   it.each<[ProviderId, string]>([
     ['anthropic' as ProviderId, 'var(--color-provider-anthropic)'],
     ['openai' as ProviderId, 'var(--color-provider-openai)'],
-    ['ollama' as ProviderId, 'var(--color-provider-local)'],
     ['local' as ProviderId, 'var(--color-provider-local)'],
     ['lm-studio' as ProviderId, 'var(--color-provider-local)'],
     ['custom' as ProviderId, 'var(--color-provider-custom)'],

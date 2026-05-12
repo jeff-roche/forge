@@ -61,48 +61,15 @@ Spec grammar:
 | Spec | Effect |
 |------|--------|
 | `mock` | MockProvider |
-| `ollama:<model>` | OllamaProvider against `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`), e.g. `ollama:qwen2.5:0.5b` |
 
 Examples for the UAT harness:
 
 ```bash
 # UAT-01a (default, MockProvider via FORGE_MOCK_SEQUENCE_FILE)
 ./docs/testing/phase1-uat.sh --cli-only
-
-# UAT-01c (real Ollama)
-FORGE_PROVIDER=ollama:qwen2.5:0.5b ./docs/testing/phase1-uat.sh --cli-only
-
-# Direct: spawn a single session against Ollama
-forge session new agent test-agent --provider ollama:qwen2.5:0.5b --workspace "$WS"
 ```
 
-## 5. Ollama (for UAT-01b, UAT-01c, UAT-03, UAT-12 variant A)
-
-Install, start, and pull one tiny model. The UAT only needs the Dashboard to
-enumerate models — any model smaller than ~1 GB is fine.
-
-```bash
-# Fedora / general Linux
-curl -fsSL https://ollama.com/install.sh | sh
-
-# Start the daemon in the background (if it isn't already):
-ollama serve &
-
-# Pull a lightweight model. Options in size order:
-ollama pull qwen2.5:0.5b          # ~400 MB, fastest
-ollama pull llama3.2:1b           # ~1.3 GB, higher quality
-
-# Smoke check:
-curl http://127.0.0.1:11434/api/tags    # should list the pulled models
-```
-
-Stop the daemon when you want to exercise UAT-03's unreachable variant:
-
-```bash
-pkill ollama
-```
-
-## 6. tauri-driver (for real-shell Playwright specs, optional)
+## 5. tauri-driver (for real-shell Playwright specs, optional)
 
 Required for specs marked `requires tauri-driver` (UAT-01a/01b/03/12B). Until
 you wire a webdriverio harness, skip this step — the mocked-IPC specs cover
@@ -114,7 +81,7 @@ cargo install tauri-driver --locked
 sudo dnf install -y webkit2gtk4.1-driver   # Fedora
 ```
 
-## 7. Run the harness
+## 6. Run the harness
 
 ```bash
 # Full suite:
@@ -137,19 +104,14 @@ cd web/packages/app && pnpm run test:e2e:ui
 ## What to expect first run
 
 - **CLI UATs** (UAT-09, UAT-10, UAT-13) should pass once the Rust build is
-  green. They're fully automated and do not depend on Ollama or Playwright.
+  green. They're fully automated and do not depend on Playwright.
 - **Playwright UATs**:
   - **Runnable now**: UAT-02 (sessions list), UAT-04 (window lifecycle),
     UAT-05 (streaming + composer), UAT-06 (tool call card — partial), UAT-07
-    (approval UI — partial), UAT-01b UI contract.
+    (approval UI — partial).
   - **Skipped by design** until follow-up fixtures land: UAT-01a (needs a
-    real `forged` bridge), UAT-03 (needs Ollama toggle harness), UAT-08
-    (needs `forged` + tempdir workspace), UAT-11, UAT-12.
-  - **Runnable with Ollama**: UAT-01c — `ollama pull qwen2.5:0.5b`, then
-    pass `--provider ollama:qwen2.5:0.5b` (or `FORGE_PROVIDER=ollama:...`).
-    The Playwright spec itself remains `test.skip` pending the real-shell
-    tauri-driver harness; the Rust integration round-trip covers the wiring
-    today (`cargo test -p forge-session --test provider_selection -- --ignored`).
+    real `forged` bridge), UAT-08 (needs `forged` + tempdir workspace),
+    UAT-11, UAT-12.
 
 Spec files carry `test.skip(...)` with a human-readable reason; the
 `README.md` next to them maps every reason to its fix.

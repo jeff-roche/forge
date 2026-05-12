@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Removed
+
+- The dedicated `ollama` built-in provider has been removed. Ollama is now
+  configurable as a `custom_openai` preset that auto-fills the local endpoint
+  (`http://127.0.0.1:11434/v1`), pins a default model (`llama3.2`), and marks
+  the entry keyless. The dashboard Ollama status card, the
+  `forge-providers::ollama` module, and the `ProviderKind::Ollama` session
+  dispatch path are gone. Existing `ollama:default` settings entries can be
+  cleaned up via the Remove button on the Providers page.
+
 ### Changed
 
 - **Agent sidecar architecture is now default-on (F-608 follow-up).** The

@@ -32,9 +32,10 @@ pub struct SpawnedSession {
 /// `workspace` is the absolute directory `forged` will operate under. Pass
 /// the current working directory when the caller has none.
 ///
-/// `agent` defaults to `orchestrator` when `None`. `provider` is forwarded
-/// verbatim to `forged` via `--provider <spec>` when present and otherwise
-/// omitted so the daemon picks its own default (env var, then mock).
+/// `agent` defaults to [`forge_agents::FORGE_DEFAULT_AGENT_NAME`] when `None`.
+/// `provider` is forwarded verbatim to `forged` via `--provider <spec>` when
+/// present and otherwise omitted so the daemon picks its own default (env
+/// var, then mock).
 pub async fn spawn_forged_session(
     workspace: &Path,
     agent: Option<&str>,
@@ -55,8 +56,13 @@ pub async fn spawn_forged_session(
         .env("FORGE_WORKSPACE", workspace.to_str().unwrap_or(""))
         .env("FORGE_PID_FILE", pid_file.to_str().unwrap_or(""));
 
-    let agent_name = agent.unwrap_or("orchestrator");
+    let agent_name = agent.unwrap_or(forge_agents::FORGE_DEFAULT_AGENT_NAME);
     cmd.arg("--agent").arg(agent_name);
+    // The daemon currently reads the active agent from the environment;
+    // forward it here so per-agent memory injection actually fires when
+    // the caller selected an agent (the `--agent` CLI flag is parsed for
+    // future compatibility but not yet consumed by `forged`).
+    cmd.env("FORGE_ACTIVE_AGENT", agent_name);
     if let Some(spec) = provider {
         cmd.arg("--provider").arg(spec);
     }

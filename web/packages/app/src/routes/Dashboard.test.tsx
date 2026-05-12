@@ -359,11 +359,14 @@ describe('Dashboard', () => {
         if (cmd === 'dashboard_list_providers') {
           return [
             {
-              id: 'ollama',
-              display_name: 'Ollama',
-              credential_required: false,
+              id: 'custom_openai:ollama',
+              display_name: 'custom_openai — ollama',
+              credential_required: true,
               has_credential: false,
               model_available: true,
+              model: 'llama3.2',
+              endpoint: 'http://127.0.0.1:11434/v1',
+              enabled: true,
             },
           ];
         }

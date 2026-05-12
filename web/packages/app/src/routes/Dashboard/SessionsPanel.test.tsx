@@ -18,7 +18,7 @@ const sample = (over: Partial<SessionSummary> = {}): SessionSummary => ({
   persistence: 'persist',
   createdAt: '2026-04-15T10:00:00Z',
   lastEventAt: '2026-04-15T11:00:00Z',
-  provider: 'ollama',
+  provider: 'anthropic',
   ...over,
 });
 

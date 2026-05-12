@@ -108,16 +108,16 @@ type McpTransport = 'stdio' | 'http';
 
 /**
  * F-694: maps a runtime provider id onto one of the four `--color-provider-*`
- * design tokens. Runtime ids (`anthropic`, `openai`, `ollama`,
- * `custom_openai:<name>`) are richer than the four-color discipline; this
- * collapses them onto the canonical token names per `docs/design/ai-patterns.md`.
+ * design tokens. Runtime ids (`anthropic`, `openai`, `custom_openai:<name>`)
+ * are richer than the four-color discipline; this collapses them onto the
+ * canonical token names per `docs/design/ai-patterns.md`.
  */
 type ProviderColorId = 'anthropic' | 'openai' | 'local' | 'custom';
 
 function providerColorId(id: string): ProviderColorId {
   if (id === 'anthropic') return 'anthropic';
   if (id === 'openai') return 'openai';
-  if (id === 'ollama' || id === 'lm-studio' || id === 'local') return 'local';
+  if (id === 'lm-studio' || id === 'local') return 'local';
   return 'custom';
 }
 

@@ -1,0 +1,152 @@
+/* Lightweight combobox styled to match the dialog inputs. The trigger
+ * mirrors `.new-session-dialog__input` chrome; the panel renders below
+ * the trigger using absolute positioning so callers control width via
+ * the wrapping container. */
+
+.forge-dropdown {
+  position: relative;
+  display: block;
+}
+
+.forge-dropdown__trigger {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  background: var(--color-bg);
+  color: var(--color-text-primary);
+  border: 1px solid var(--color-border-1);
+  border-radius: var(--r-sm);
+  padding: var(--sp-2) var(--sp-3);
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-md);
+  outline: 0;
+  cursor: pointer;
+  text-align: left;
+  /* Match the dialog inputs' resting height so trigger + textbox line up. */
+  min-height: calc(var(--type-mono-md) + var(--sp-2) * 2 + 2px);
+}
+
+.forge-dropdown__trigger:hover:not(:disabled) {
+  border-color: var(--color-border-2);
+}
+
+.forge-dropdown__trigger:focus-visible {
+  border-color: var(--color-ember-400);
+}
+
+.forge-dropdown__trigger[aria-expanded='true'] {
+  border-color: var(--color-ember-400);
+}
+
+.forge-dropdown__trigger:disabled {
+  background: var(--color-surface-1);
+  color: var(--color-text-disabled);
+  cursor: not-allowed;
+}
+
+.forge-dropdown__label {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.forge-dropdown__label-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.forge-dropdown__label--placeholder {
+  color: var(--color-text-tertiary);
+}
+
+.forge-dropdown__chevron {
+  width: 10px;
+  height: 6px;
+  flex-shrink: 0;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6' fill='none' stroke='%238a9aac' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><path d='M1 1l4 4 4-4'/></svg>");
+  background-repeat: no-repeat;
+  background-position: center;
+}
+
+.forge-dropdown__panel {
+  position: absolute;
+  top: calc(100% + var(--sp-1));
+  left: 0;
+  right: 0;
+  z-index: 200;
+  max-height: 240px;
+  overflow-y: auto;
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border-2);
+  border-radius: var(--r-sm);
+  padding: var(--sp-1);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+.forge-dropdown__option {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-sm);
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-md);
+  color: var(--color-text-primary);
+  cursor: pointer;
+}
+
+.forge-dropdown__option-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.forge-dropdown__option--highlighted {
+  background: var(--color-surface-3, var(--color-surface-1));
+}
+
+.forge-dropdown__option--selected {
+  color: var(--color-ember-300);
+}
+
+.forge-dropdown__option--disabled {
+  color: var(--color-text-disabled);
+  cursor: not-allowed;
+}
+
+/* Scope / vendor chip — small, fully padded so its background isn't
+ * crammed against the row edge on either axis. */
+.forge-dropdown__chip {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 2px var(--sp-2);
+  border-radius: var(--r-sm);
+  border: 1px solid var(--color-border-1);
+  color: var(--color-text-secondary);
+  background: var(--color-bg);
+  line-height: 1.4;
+}
+
+.forge-dropdown__chip[data-tone='workspace'] {
+  border-color: var(--color-ember-400);
+  color: var(--color-ember-300);
+}
+
+.forge-dropdown__chip[data-tone='user'] {
+  border-color: var(--color-border-2);
+  color: var(--color-text-secondary);
+}

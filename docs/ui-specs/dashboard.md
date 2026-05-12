@@ -34,7 +34,7 @@ Fills the outlet. Hero block sits at the top with `padding: var(--sp-8)`; the gr
 │  │ ● refactor-payment-service          streaming     │ │           │ │
 │  │ ● doc-site-rewrite          awaiting approval     │ │ Anthropic │ │
 │  │ ● test-harness-migration              done        │ │ OpenAI    │ │
-│  │ ● sql-query-optimizer                 idle        │ │ Ollama    │ │
+│  │ ● sql-query-optimizer                 idle        │ │ ollama    │ │
 │  └───────────────────────────────────────────────────┘ │ Mistral   │ │
 │                                                        └───────────┘ │
 │  ┌──────────────── col-6 ─────────────┐ ┌────────── col-6 ──────────┐│
@@ -70,7 +70,7 @@ A two-column hero — see `DESIGN.md §Hero block`. Headline on the left, CTA cl
 │ Forge something.                          [Attach] [+ New session]  │
 │                                                                     │
 │ Two sessions active. One agent paused awaiting approval.            │
-│ Anthropic and local Ollama connected — OpenAI awaiting credentials. │
+│ Anthropic and the active workspace provider connected.              │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -87,7 +87,7 @@ A two-column hero — see `DESIGN.md §Hero block`. Headline on the left, CTA cl
 | loading  | workspace summary pending          | headline + buttons paint immediately; status sentence renders as `forge · …` placeholder | `forge · …`                                                                                    |
 | empty    | zero sessions, zero providers      | headline + buttons paint; status sentence narrates the empty state | `No sessions yet. Configure a provider to get started.`                                        |
 | error    | workspace summary rejects          | status sentence collapses to the verbatim error fragment; CTAs remain enabled | `Couldn't load workspace status.`                                                              |
-| ready    | summary resolves                   | full hero — headline, status sentence, two CTAs            | `Welcome back.` / `Forge something.` / `Two sessions active. One agent paused awaiting approval. Anthropic and local Ollama connected — OpenAI awaiting credentials.` |
+| ready    | summary resolves                   | full hero — headline, status sentence, two CTAs            | `Welcome back.` / `Forge something.` / `Two sessions active. One agent paused awaiting approval. Anthropic connected; OpenAI awaiting credentials.` |
 
 ## Grid
 
@@ -164,8 +164,8 @@ The `col-4` secondary card on the primary row. Mirrors the provider list from th
 │   sonnet-4.5 · opus-4.1                                        │
 │ ● OpenAI                                           ● auth      │
 │   credentials expired                                          │
-│ ● Ollama                                           ● ready     │
-│   llama-3.3 · qwen-2.5                                         │
+│ ● custom · ollama                                  ● ready     │
+│   llama3.2                                                     │
 │ ● Mistral                                          ● ready     │
 │   medium-2508                                                  │
 └────────────────────────────────────────────────────────────────┘

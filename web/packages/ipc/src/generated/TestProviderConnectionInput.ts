@@ -2,7 +2,7 @@
 
 /**
  * `test_provider_connection` IPC input. The `provider_id` discriminates a
- * built-in slug (`anthropic` / `openai` / `ollama` / `mistral`) from a
+ * built-in slug (`anthropic` / `openai` / `mistral`) from a
  * `custom_openai:<name>` entry — same surface `add_provider` accepts.
  */
 export type TestProviderConnectionInput = { provider_id: string, };

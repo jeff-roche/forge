@@ -1709,7 +1709,6 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "bytes",
- "criterion",
  "dirs 6.0.0",
  "forge-core",
  "futures",

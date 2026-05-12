@@ -12,7 +12,7 @@ describe('PaneHeader close button — voice & terminology (F-084)', () => {
     const { getByRole } = render(() => (
       <PaneHeader
         subject="example"
-        providerId={'ollama' as ProviderId}
+        providerId={'local' as ProviderId}
         providerLabel="local"
         costLabel="$0.00"
         onClose={vi.fn()}
@@ -28,7 +28,7 @@ describe('PaneHeader close button — voice & terminology (F-084)', () => {
     const { getByRole } = render(() => (
       <PaneHeader
         subject="example"
-        providerId={'ollama' as ProviderId}
+        providerId={'local' as ProviderId}
         providerLabel="local"
         costLabel="$0.00"
         onClose={vi.fn()}
@@ -41,7 +41,7 @@ describe('PaneHeader close button — voice & terminology (F-084)', () => {
 
 // PaneHeader provider pill (F-091): per ai-patterns.md §7, the provider pill
 // color must follow the active provider — anthropic/ember, openai/amber,
-// ollama/lm-studio/local/steel, otherwise iron-200. The component plumbs the
+// lm-studio/local/steel, otherwise iron-200. The component plumbs the
 // active provider's accent into a CSS custom property on the provider pill so
 // the existing class-driven CSS picks it up without per-provider rules.
 
@@ -49,7 +49,6 @@ describe('PaneHeader provider pill accent (F-091)', () => {
   it.each<[ProviderId, string]>([
     ['anthropic' as ProviderId, 'var(--color-provider-anthropic)'],
     ['openai' as ProviderId, 'var(--color-provider-openai)'],
-    ['ollama' as ProviderId, 'var(--color-provider-local)'],
     ['local' as ProviderId, 'var(--color-provider-local)'],
     ['lm-studio' as ProviderId, 'var(--color-provider-local)'],
     ['custom' as ProviderId, 'var(--color-provider-custom)'],
@@ -99,7 +98,7 @@ describe('PaneHeader compactness (F-119)', () => {
     const { getByTestId, queryByTestId } = render(() => (
       <PaneHeader
         subject="example"
-        providerId={'ollama' as ProviderId}
+        providerId={'local' as ProviderId}
         providerLabel="local"
         costLabel="$0.00"
         onClose={vi.fn()}
@@ -115,7 +114,7 @@ describe('PaneHeader compactness (F-119)', () => {
     const { getByTestId, queryByTestId } = render(() => (
       <PaneHeader
         subject="example"
-        providerId={'ollama' as ProviderId}
+        providerId={'local' as ProviderId}
         providerLabel="local"
         costLabel="$0.00"
         compactness="compact"
@@ -139,7 +138,7 @@ describe('PaneHeader compactness (F-119)', () => {
     const { getByTestId, queryByTestId } = render(() => (
       <PaneHeader
         subject="example"
-        providerId={'ollama' as ProviderId}
+        providerId={'local' as ProviderId}
         providerLabel="local"
         costLabel="$0.00"
         compactness="icon-only"
@@ -163,7 +162,7 @@ describe('PaneHeader compactness (F-119)', () => {
       const { getByRole, unmount } = render(() => (
         <PaneHeader
           subject="example"
-          providerId={'ollama' as ProviderId}
+          providerId={'local' as ProviderId}
           providerLabel="local"
           costLabel="$0.00"
           compactness={c}

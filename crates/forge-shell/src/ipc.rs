@@ -196,7 +196,7 @@ pub(crate) const MAX_REJECT_REASON_BYTES: usize = 1024;
 pub(crate) const MAX_MESSAGE_ID_BYTES: usize = 64;
 
 /// F-675: canonical cap on every `provider_id` accepted by an IPC command.
-/// Slugs are short ASCII (`anthropic`, `openai`, `ollama`); 128 bytes is the
+/// Slugs are short ASCII (`anthropic`, `openai`); 128 bytes is the
 /// generous upper bound that still admits the longest realistic
 /// `custom_openai:<name>` form while rejecting hostile renderers driving
 /// megabyte calls. Defined here — and only here — so the credentials and
@@ -710,6 +710,7 @@ pub fn build_invoke_handler<R: Runtime>() -> Box<dyn Fn(tauri::ipc::Invoke<R>) -
         // id was active).
         crate::providers_ipc::add_provider,
         crate::providers_ipc::test_provider_connection,
+        crate::providers_ipc::probe_provider_config,
         crate::providers_ipc::update_provider,
         crate::providers_ipc::remove_provider,
         // F-733: per-row Enabled toggle on the Providers page. Flips
@@ -906,7 +907,7 @@ pub(crate) fn resolve_user_config_dir(state: &BridgeState) -> Option<PathBuf> {
 /// `webview-test` override when present. Production falls back to the
 /// canonical `~/.config/forge/workspaces.toml` path via
 /// `crate::dashboard_sessions::default_workspaces_toml`.
-fn resolve_workspaces_toml(state: &BridgeState) -> PathBuf {
+pub(crate) fn resolve_workspaces_toml(state: &BridgeState) -> PathBuf {
     #[cfg(feature = "webview-test")]
     {
         if let Some(override_path) = state.test_workspaces_toml_override.as_ref() {
@@ -925,7 +926,11 @@ fn resolve_workspaces_toml(state: &BridgeState) -> PathBuf {
 ///   the cached value from `session_hello` is used instead.
 /// - **`dashboard` callers**: the supplied `workspace_root` is validated
 ///   against the workspaces registry (`workspaces.toml`). A path not present
-///   in the registry is rejected.
+///   in the registry is rejected. The new-session flow seeds the registry
+///   before this gate fires by calling
+///   `forge_core::workspaces::register_workspace_if_missing` inside
+///   `session_start`; commands that arrive here later (approvals,
+///   settings, etc.) keep the strict gate as defense-in-depth.
 pub(crate) async fn resolve_workspace_root_for_command(
     webview_label: &str,
     webview_supplied: &str,
@@ -3616,11 +3621,11 @@ pub(crate) const MAX_ROSTER_WORKSPACE_ROOT_BYTES: usize = MAX_WORKSPACE_ROOT_BYT
 
 /// F-591: built-in providers exposed to the roster.
 ///
-/// Hardcoded for Phase 3 — F-583 (Anthropic), F-584 (OpenAI) and Phase-1
-/// Ollama are the live built-ins. Future work (F-585 CustomOpenAi,
-/// per-workspace provider configs) will fold a settings-derived list in
-/// alongside these built-ins; today the built-in list is the universe.
-const BUILT_IN_PROVIDER_IDS: &[&str] = &["anthropic", "openai", "ollama"];
+/// Hardcoded for Phase 3 — F-583 (Anthropic) and F-584 (OpenAI) are the
+/// live built-ins. Future work (F-585 CustomOpenAi, per-workspace provider
+/// configs) will fold a settings-derived list in alongside these built-ins;
+/// today the built-in list is the universe.
+const BUILT_IN_PROVIDER_IDS: &[&str] = &["anthropic", "openai"];
 
 /// F-591: shared scope-arg validator. Rejects oversized embedded id strings
 /// inside an `Agent { id }` / `Provider { id }` filter so a hostile webview
@@ -3926,8 +3931,8 @@ pub async fn list_agents<R: Runtime>(
 
 /// F-591: list providers, filtered by [`forge_core::RosterScope`].
 ///
-/// Returns one entry per built-in provider id (`anthropic`, `openai`,
-/// `ollama`) plus any user-defined `[providers.custom_openai.<name>]`
+/// Returns one entry per built-in provider id (`anthropic`, `openai`)
+/// plus any user-defined `[providers.custom_openai.<name>]`
 /// entries from merged settings (F-585), each surfaced as
 /// `custom_openai:<name>`. Each entry's source scope is `Provider { id }`,
 /// so a `SessionWide` filter returns all of them, a `Provider(id)` filter

@@ -61,16 +61,16 @@ describe('formatCostLabel (F-395 / pane-header.md §PH.4)', () => {
     const s = formatCostLabel(
       telem({ tokensIn: 100, tokensOut: 200, costUsd: 0 }),
     );
-    // Zero cost is a legitimate Ollama state — the meter must still render
-    // the real token counts, not the placeholder.
+    // Zero cost is a legitimate local-provider state — the meter must still
+    // render the real token counts, not the placeholder.
     expect(s).not.toBe('—');
     expect(s).toContain('$0.00');
   });
 });
 
 describe('formatProviderLabel (F-395)', () => {
-  it('falls back to `ollama` before the first assistant turn', () => {
-    expect(formatProviderLabel(telem())).toBe('ollama');
+  it('falls back to the em-dash placeholder before the first assistant turn', () => {
+    expect(formatProviderLabel(telem())).toBe('—');
   });
 
   it('uses the observed provider id once recorded', () => {
@@ -81,7 +81,7 @@ describe('formatProviderLabel (F-395)', () => {
 
   it('never renders the unsanctioned `pending` state suffix', () => {
     expect(formatProviderLabel(telem())).not.toContain('pending');
-    expect(formatProviderLabel(telem({ provider: 'ollama' }))).not.toContain(
+    expect(formatProviderLabel(telem({ provider: 'anthropic' }))).not.toContain(
       'pending',
     );
   });
@@ -108,8 +108,8 @@ describe('formatChatSubject (F-395)', () => {
 });
 
 describe('resolveProviderId (F-395)', () => {
-  it('falls back to `ollama` when no provider observed', () => {
-    expect(resolveProviderId(telem())).toBe('ollama');
+  it('falls back to `custom` when no provider observed', () => {
+    expect(resolveProviderId(telem())).toBe('custom');
   });
   it('returns the observed provider id', () => {
     expect(resolveProviderId(telem({ provider: 'anthropic' }))).toBe(

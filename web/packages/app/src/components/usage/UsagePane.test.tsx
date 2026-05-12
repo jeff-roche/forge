@@ -83,7 +83,6 @@ describe('UsagePane helpers', () => {
   it('chartProviderClass: maps known providers to their CSS data-attribute', () => {
     expect(chartProviderClass('anthropic')).toBe('anthropic');
     expect(chartProviderClass('openai')).toBe('openai');
-    expect(chartProviderClass('ollama')).toBe('local');
     expect(chartProviderClass('local')).toBe('local');
     expect(chartProviderClass('Anthropic')).toBe('anthropic');
   });

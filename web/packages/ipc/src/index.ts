@@ -1,5 +1,8 @@
 export type { AddMcpServerInput } from './generated/AddMcpServerInput';
 export type { AddProviderInput } from './generated/AddProviderInput';
+export type { BuiltinAuthKind } from './generated/BuiltinAuthKind';
+export type { BuiltinInstanceEntry } from './generated/BuiltinInstanceEntry';
+export type { BuiltinProviderConfig } from './generated/BuiltinProviderConfig';
 export type { McpServerConfig } from './generated/McpServerConfig';
 export type { AgentId } from './generated/AgentId';
 export type { AgentInstanceId } from './generated/AgentInstanceId';
@@ -56,6 +59,7 @@ export type { TerminalId } from './generated/TerminalId';
 export type { TerminalSpawnArgs } from './generated/TerminalSpawnArgs';
 export type { TestProviderConnectionInput } from './generated/TestProviderConnectionInput';
 export type { TestProviderConnectionOutput } from './generated/TestProviderConnectionOutput';
+export type { ProbeProviderConfigInput } from './generated/ProbeProviderConfigInput';
 export type { UpdateProviderInput } from './generated/UpdateProviderInput';
 export type { RemoveProviderInput } from './generated/RemoveProviderInput';
 export type { SetProviderEnabledInput } from './generated/SetProviderEnabledInput';

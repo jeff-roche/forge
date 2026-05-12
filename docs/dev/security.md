@@ -61,8 +61,8 @@ Forge layers several byte-size and resource caps to bound any single tool call's
 |---|---|---|---|---|
 | `forge_fs::Limits::max_read_bytes` | per-`fs.read` call | 10 MiB | `crates/forge-fs/src/limits.rs` | one `fs.read` blowing up the daemon's heap on a giant log/blob |
 | `forge_fs::Limits::max_write_bytes` | per-`fs.write` / per-`fs.edit` call | 10 MiB | `crates/forge-fs/src/limits.rs` | one tool-issued write filling the disk or RAM |
-| `forge_providers::ollama::DEFAULT_MAX_LINE_BYTES` | per-NDJSON-line on the SSE/JSON stream | 1 MiB | `crates/forge-providers/src/ollama.rs` | a malformed/giant JSON event from a malicious or buggy provider |
-| `list_models` body cap | per-HTTP-response from `/api/tags` | 1 MiB | `crates/forge-providers/src/ollama.rs` | a model registry handshake returning a multi-GiB body |
+| `forge_providers::sse::DEFAULT_MAX_LINE_BYTES` | per-SSE/NDJSON-line on the provider stream | 1 MiB | `crates/forge-providers/src/sse.rs` | a malformed/giant JSON event from a malicious or buggy provider |
+| `list_models` body cap | per-HTTP-response from the provider's models endpoint | 1 MiB | `crates/forge-providers/src/openai/` | a model registry handshake returning a multi-GiB body |
 | `forge_core::event_log::MAX_LINE_BYTES` | per-line in the on-disk session log | 4 MiB | `crates/forge-core/src/event_log.rs`, `transcript.rs` | log replay loading a single oversized event into memory |
 | `RLIMIT_FSIZE` | per-`shell.exec` child process | 100 MiB | `crates/forge-session/src/sandbox.rs` (`SandboxConfig`) | "cat to disk" attacks (kernel raises SIGXFSZ at the limit) |
 | `RLIMIT_NOFILE` | per-`shell.exec` child process | 256 fds | `crates/forge-session/src/sandbox.rs` (`SandboxConfig`) | fd-table exhaustion inside a sandboxed tool |

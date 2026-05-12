@@ -86,12 +86,36 @@ describe('RemoveProviderButton', () => {
     const onRemoved = vi.fn();
     const { getByTestId, providerId } = renderButton({ onRemoved });
     fireEvent.click(getByTestId(`remove-provider-trigger-${providerId}`));
+    // Type-to-confirm: enter the provider id to unlock the REMOVE button.
+    fireEvent.input(getByTestId(`remove-provider-confirm-input-${providerId}`), {
+      target: { value: providerId },
+    });
     fireEvent.click(getByTestId(`remove-provider-confirm-btn-${providerId}`));
     await waitFor(() => {
       const remove = calls.find((c) => c.cmd === 'remove_provider');
       expect(remove?.args).toEqual({ input: { id: providerId } });
     });
     await waitFor(() => expect(onRemoved).toHaveBeenCalledTimes(1));
+  });
+
+  it('REMOVE stays disabled until the typed id matches the provider id', () => {
+    const { calls } = installInvokeStub();
+    const { getByTestId, providerId } = renderButton();
+    fireEvent.click(getByTestId(`remove-provider-trigger-${providerId}`));
+    const confirmBtn = getByTestId(
+      `remove-provider-confirm-btn-${providerId}`,
+    ) as HTMLButtonElement;
+    expect(confirmBtn.disabled).toBe(true);
+    fireEvent.input(getByTestId(`remove-provider-confirm-input-${providerId}`), {
+      target: { value: 'wrong' },
+    });
+    expect(confirmBtn.disabled).toBe(true);
+    fireEvent.input(getByTestId(`remove-provider-confirm-input-${providerId}`), {
+      target: { value: providerId },
+    });
+    expect(confirmBtn.disabled).toBe(false);
+    // Sanity: no IPC fired while the user was typing.
+    expect(calls.some((c) => c.cmd === 'remove_provider')).toBe(false);
   });
 
   it('renders the verbatim daemon error with role="alert"', async () => {
@@ -104,6 +128,9 @@ describe('RemoveProviderButton', () => {
     const onRemoved = vi.fn();
     const { getByTestId, providerId } = renderButton({ onRemoved });
     fireEvent.click(getByTestId(`remove-provider-trigger-${providerId}`));
+    fireEvent.input(getByTestId(`remove-provider-confirm-input-${providerId}`), {
+      target: { value: providerId },
+    });
     fireEvent.click(getByTestId(`remove-provider-confirm-btn-${providerId}`));
     await waitFor(() =>
       expect(getByTestId(`remove-provider-error-${providerId}`)).toBeInTheDocument(),

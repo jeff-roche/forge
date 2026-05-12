@@ -517,7 +517,7 @@ impl SessionBridge {
     /// the previous provider — see `SwappableProvider::swap`.
     ///
     /// `provider_id` matches the dashboard's `[providers.active]` shape
-    /// (`"ollama"`, `"anthropic"`, `"openai"`, `"custom_openai:<name>"`).
+    /// (`"anthropic"`, `"openai"`, `"custom_openai:<name>"`).
     /// Unknown / unsupported ids are logged daemon-side and skipped; the
     /// bridge call still resolves `Ok(())` once the frame is written.
     pub async fn switch_provider(&self, session_id: &str, provider_id: String) -> Result<()> {

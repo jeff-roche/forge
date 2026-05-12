@@ -663,34 +663,15 @@ pub async fn serve(path: &Path, auto_approve: bool, ephemeral: bool) -> Result<(
 ///
 /// The daemon's `IpcMessage::SwitchProvider` arm calls this to materialise
 /// a swap target without re-entering the dashboard's settings/credential
-/// flow. Phase 1 only constructs `ollama` (keyless, env-driven). Anything
-/// else returns `Err` so the caller can log + skip the swap. Rebuilding
-/// Anthropic / OpenAI / CustomOpenAI live needs settings + keyring
-/// access that is not plumbed into the daemon today and lands with the
-/// Phase 3.5 bootstrap work; integration tests bypass this helper and
-/// drive [`SwappableProvider::swap`] directly with a `RuntimeProvider::Mock`.
+/// flow. Rebuilding Anthropic / OpenAI / CustomOpenAI live needs settings
+/// + keyring access that is not plumbed into the daemon today and lands
+/// with the Phase 3.5 bootstrap work; integration tests bypass this helper
+/// and drive [`SwappableProvider::swap`] directly with a
+/// `RuntimeProvider::Mock`.
 pub fn build_runtime_provider(provider_id: &str) -> Result<RuntimeProvider> {
-    use forge_providers::ollama::OllamaProvider;
-    match provider_id {
-        "ollama" => {
-            let raw = std::env::var("OLLAMA_BASE_URL").ok();
-            let allow_remote_raw = std::env::var(forge_providers::ollama::ALLOW_REMOTE_ENV).ok();
-            let allow_remote =
-                forge_providers::ollama::parse_allow_remote(allow_remote_raw.as_deref());
-            let url = forge_providers::ollama::validate_base_url(raw.as_deref(), allow_remote)?;
-            let model = std::env::var("FORGE_OLLAMA_MODEL")
-                .ok()
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "mistral".to_string());
-            Ok(RuntimeProvider::Ollama(Arc::new(OllamaProvider::new(
-                url.as_str(),
-                model,
-            ))))
-        }
-        other => anyhow::bail!(
-            "build_runtime_provider: provider id {other:?} not supported by the daemon yet"
-        ),
-    }
+    anyhow::bail!(
+        "build_runtime_provider: provider id {provider_id:?} not supported by the daemon yet"
+    )
 }
 
 /// Timeout for the post-`EADDRINUSE` liveness probe. Short enough that a
@@ -781,8 +762,8 @@ pub async fn serve_with_session<P: Provider + 'static>(
     // F-587: optional per-turn credential pull. When `Some`, every
     // `run_turn` invocation in this session reads the active provider's
     // credential through this context (see `CredentialContext` for the
-    // contract). `None` keeps the keyless `OllamaProvider` / `MockProvider`
-    // path identical to pre-F-587 behaviour.
+    // contract). `None` keeps the keyless `MockProvider` path identical to
+    // pre-F-587 behaviour.
     credentials: Option<CredentialContext>,
     // F-601: the agent the session is bound to for cross-session memory
     // selection. `None` (or empty/whitespace) → memory off and the session
@@ -1401,11 +1382,10 @@ async fn handle_connection<P: Provider + 'static>(
                                 // when the daemon is constructed with a
                                 // provider that needs auth (Anthropic /
                                 // OpenAI in Phase 3); `None` for keyless
-                                // providers (current `OllamaProvider` /
-                                // `MockProvider`) so the orchestrator
-                                // skips the pull entirely. The keyring
-                                // store + active provider id flow in
-                                // through `credential_ctx_for_turn`
+                                // providers (`MockProvider`) so the
+                                // orchestrator skips the pull entirely.
+                                // The keyring store + active provider id
+                                // flow in through `credential_ctx_for_turn`
                                 // below, captured at session start.
                                 credential_ctx_for_turn.clone(),
                             ).await;

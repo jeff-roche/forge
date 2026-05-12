@@ -40,6 +40,33 @@ pub use skill_loader::{
 
 use def::load_from_dir;
 
+/// Canonical name of the built-in default agent.
+///
+/// The dashboard's new-session picker and the CLI's `--agent` flag both
+/// default to this name so the user always has a usable selection even
+/// before they author their first `.agents/*.md` file. Users can override
+/// the built-in by dropping a definition with the same name into
+/// `<user_home>/.agents/` or `<workspace>/.agents/` — the standard
+/// workspace-over-user-over-builtin precedence applies.
+pub const FORGE_DEFAULT_AGENT_NAME: &str = "forge-default";
+
+/// In-memory definition for the [`FORGE_DEFAULT_AGENT_NAME`] built-in.
+///
+/// Plain `Process` isolation, no per-agent memory, empty body — the daemon
+/// composes its system prompt from `AGENTS.md` and skill docs, so the
+/// built-in only needs to exist in the roster for `agent_is_known` to
+/// accept its name.
+fn builtin_forge_default() -> AgentDef {
+    AgentDef {
+        name: FORGE_DEFAULT_AGENT_NAME.into(),
+        description: Some("Default Forge agent — general-purpose assistant.".into()),
+        body: String::new(),
+        allowed_paths: Vec::new(),
+        isolation: Isolation::Process,
+        memory_enabled: false,
+    }
+}
+
 /// Load agents from `<workspace_root>/.agents/*.md`, returning an empty vec if the directory is absent.
 pub fn load_workspace_agents(workspace_root: &Path) -> anyhow::Result<Vec<AgentDef>> {
     load_from_dir(&workspace_root.join(".agents")).map_err(anyhow::Error::from)
@@ -50,20 +77,23 @@ pub fn load_user_agents(user_home: &Path) -> anyhow::Result<Vec<AgentDef>> {
     load_from_dir(&user_home.join(".agents")).map_err(anyhow::Error::from)
 }
 
-/// Load and merge user-home and workspace-local agent definitions.
+/// Load and merge built-in, user-home, and workspace-local agent definitions.
 ///
-/// User agents are loaded first; workspace agents are then layered on top so
-/// that on a name collision the workspace definition replaces the user one,
-/// and workspace-only agents are appended. This lets a project pin or override
-/// agents without editing the user's home directory.
+/// Precedence (lowest → highest): built-ins, then user agents, then workspace
+/// agents. On a name collision the higher-precedence definition replaces the
+/// lower; agents present only at one tier are appended in load order. This
+/// lets a project pin or override an agent without editing the user's home
+/// directory, and lets a user override a built-in by dropping a file with
+/// the matching name into `<user_home>/.agents/`.
 pub fn load_agents(workspace_root: &Path, user_home: &Path) -> anyhow::Result<Vec<AgentDef>> {
     let workspace = load_workspace_agents(workspace_root)?;
-    let mut merged = load_user_agents(user_home)?;
+    let user = load_user_agents(user_home)?;
+    let mut merged: Vec<AgentDef> = vec![builtin_forge_default()];
 
-    for ws_agent in workspace {
-        match merged.iter().position(|a| a.name == ws_agent.name) {
-            Some(pos) => merged[pos] = ws_agent,
-            None => merged.push(ws_agent),
+    for next in user.into_iter().chain(workspace) {
+        match merged.iter().position(|a| a.name == next.name) {
+            Some(pos) => merged[pos] = next,
+            None => merged.push(next),
         }
     }
     Ok(merged)

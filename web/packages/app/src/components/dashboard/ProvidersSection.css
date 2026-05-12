@@ -83,8 +83,7 @@
   margin: 0;
 }
 
-.providers__error,
-.providers__action-error {
+.providers__error {
   display: flex;
   flex-direction: column;
   gap: var(--sp-2);
@@ -134,34 +133,16 @@
   border-radius: var(--r-sm);
   background: transparent;
   border: 1px solid transparent;
-  cursor: pointer;
-  transition: var(--ease);
   text-align: left;
 }
 
-.providers__row:hover {
-  background: var(--color-surface-2);
-  border-color: var(--color-border-2);
-}
-
-.providers__row:focus-visible {
-  outline: 2px solid var(--color-ember-400);
-  outline-offset: 2px;
-}
-
 .providers__row--active {
+  /* Subtle background lift is the only chrome for the active row — the
+   * `.providers__active-pip` ember bar on the right edge is the primary
+   * "this is the active provider" cue. A full ember border on the row
+   * overloaded the same color used for `auth`-state pills and read as
+   * a warning rather than a selection. */
   background: var(--color-surface-2);
-  border-color: var(--color-ember-400);
-}
-
-.providers__row[aria-busy='true'],
-.providers__row--pending {
-  border-color: var(--color-ember-300);
-  cursor: progress;
-}
-
-.providers__row[aria-disabled='true']:not(.providers__row--pending) {
-  cursor: not-allowed;
 }
 
 /* Brand dot: 10px circle keyed to the provider accent. Falls back to
@@ -258,10 +239,19 @@
   outline-offset: 2px;
 }
 
-/* Active-pip carry-over from the F-586 pattern — small ember glow on
- * the right edge confirming the selection. Rendered after the pill so
- * it sits flush to the row's trailing edge.
+/* Active-pip — small ember glow on the right edge confirming the
+ * selection. Rendered on EVERY row (muted on inactive ones) so the
+ * pill / CTA cluster doesn't horizontally shift when the active
+ * provider changes. The pill cluster gets a right margin to leave
+ * room for the pip — the pip absolutely positions at `right: var(--sp-2)`
+ * (8px) but the row padding is only `var(--sp-3)` (12px), so without
+ * extra spacing the trailing pill would sit right next to the pip.
  */
+.providers__pill,
+.providers__cta {
+  margin-right: var(--sp-4);
+}
+
 .providers__active-pip {
   position: absolute;
   right: var(--sp-2);
@@ -270,7 +260,13 @@
   width: 4px;
   height: 16px;
   border-radius: 2px;
+  /* Inactive default: muted bar holds the slot. Active variant below
+   * overrides with ember + glow. */
+  background: var(--color-border-2);
+  pointer-events: none;
+}
+
+.providers__active-pip--active {
   background: var(--color-ember-400);
   box-shadow: 0 0 6px var(--color-ember-400);
-  pointer-events: none;
 }

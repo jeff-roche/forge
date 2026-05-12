@@ -160,6 +160,51 @@ fn default_auth_shape() -> AuthShapeSettings {
     AuthShapeSettings::default()
 }
 
+/// Authentication mode for a named built-in provider instance
+/// (`[providers.<vendor>.<name>]`). `ApiKey` is the historical default:
+/// the credential store holds the API key under the full provider id and
+/// the runtime adapter hits the vendor's public API. `Vertex` retargets
+/// Anthropic at Google Vertex AI — the credential pull yields a Google
+/// access token instead of an API key and the URL/header shape changes
+/// accordingly. See `BuiltinInstanceEntry` for the surrounding config.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+#[serde(rename_all = "snake_case")]
+pub enum BuiltinAuthKind {
+    #[default]
+    ApiKey,
+    Vertex,
+}
+
+fn is_default_builtin_auth(kind: &BuiltinAuthKind) -> bool {
+    matches!(kind, BuiltinAuthKind::ApiKey)
+}
+
+/// Per-instance settings for a named built-in provider — one entry per
+/// `[providers.<vendor>.<name>]` section. Currently used to carry the
+/// `auth_kind` discriminator (`api_key` vs. `vertex`) plus the Vertex
+/// project / region; future fields (model defaults, endpoint overrides)
+/// land here without breaking the wire.
+///
+/// The absence of a section for a given instance id is equivalent to the
+/// all-defaults entry: `auth_kind = "api_key"` and no Vertex fields.
+/// `add_provider` only writes the section when at least one non-default
+/// value is set (today: `auth_kind = "vertex"`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+pub struct BuiltinInstanceEntry {
+    #[serde(default, skip_serializing_if = "is_default_builtin_auth")]
+    pub auth_kind: BuiltinAuthKind,
+    /// Google Cloud project id hosting the Vertex AI Anthropic publisher.
+    /// Required when `auth_kind = "vertex"`; ignored otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vertex_project: Option<String>,
+    /// Vertex region (e.g. `"us-central1"`). Required when `auth_kind =
+    /// "vertex"`; ignored otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vertex_region: Option<String>,
+}
+
 /// `[providers.custom_openai]` table — a map of `name → entry`. Each name
 /// is a user-chosen identifier (e.g. `"vllm-local"`, `"together"`) used to
 /// disambiguate multiple entries in error messages and the settings UI.
@@ -171,10 +216,9 @@ fn default_auth_shape() -> AuthShapeSettings {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
 pub struct ProvidersSettings {
-    /// F-586: id of the active provider (e.g. `"ollama"`, `"anthropic"`,
-    /// `"openai"`, `"custom_openai:vllm-local"`). `None` means "no
-    /// preference" — the orchestrator falls through to whatever the daemon
-    /// was started with (Phase-1 default: Ollama keyless).
+    /// F-586: id of the active provider (e.g. `"anthropic"`, `"openai"`,
+    /// `"custom_openai:vllm-local"`). `None` means "no preference" — the
+    /// orchestrator falls through to the catalog's first ready entry.
     ///
     /// Stored as `Option<String>` rather than the random-hex `ProviderId`
     /// id type from `ids.rs`: provider selection is keyed by stable, human-
@@ -193,6 +237,13 @@ pub struct ProvidersSettings {
     /// One entry per user-named OpenAI-compatible server.
     #[serde(default)]
     pub custom_openai: BTreeMap<String, CustomOpenAiEntry>,
+    /// Phase B: per-instance settings for named built-in Anthropic
+    /// configurations. Each key is the instance name (e.g. `"default"`,
+    /// `"work"`) that pairs with the `anthropic:` vendor prefix to form
+    /// the full id `"anthropic:<name>"`. Absent entries default to API
+    /// key auth — see `BuiltinInstanceEntry`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub anthropic: BTreeMap<String, BuiltinInstanceEntry>,
 }
 
 /// `[catalog]` section (F-592): per-(kind,id) enable flags for the Skills /

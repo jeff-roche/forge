@@ -183,7 +183,6 @@
   fill: var(--color-provider-openai);
 }
 
-.usage-pane__chart-bar[data-provider='ollama'],
 .usage-pane__chart-bar[data-provider='local'] {
   fill: var(--color-provider-local);
 }
@@ -222,7 +221,6 @@
   background: var(--color-provider-openai);
 }
 
-.usage-pane__chart-legend-swatch[data-provider='ollama'],
 .usage-pane__chart-legend-swatch[data-provider='local'] {
   background: var(--color-provider-local);
 }

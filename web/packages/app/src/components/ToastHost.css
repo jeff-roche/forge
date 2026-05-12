@@ -1,0 +1,116 @@
+/* Toast host: fixed-position stack in the lower-right corner of the
+ * viewport. Each toast slides in from the right and stacks downward so
+ * the most recent message is closest to the bottom. The viewport
+ * dimensions and z-index keep the stack above route content
+ * (StatusBar lives below 100; toasts ride above modals at 200). */
+
+.toast-host {
+  position: fixed;
+  right: var(--sp-4);
+  bottom: var(--sp-4);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  z-index: 200;
+  pointer-events: none;
+  max-width: min(420px, calc(100vw - var(--sp-8)));
+}
+
+.toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border-1);
+  border-left-width: 3px;
+  border-radius: var(--r-sm);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-sm);
+  color: var(--color-text-primary);
+  animation: toast-slide-in 180ms ease-out;
+}
+
+@keyframes toast-slide-in {
+  from {
+    transform: translateX(calc(100% + var(--sp-4)));
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+/* Kind-coded left border doubles as the success/failure signal so the
+ * user can scan a column of toasts without reading any text. `info` =
+ * success (green), `warning` = caution (amber), `error` = failure (red).
+ */
+.toast[data-kind='info'] {
+  border-left-color: var(--color-success);
+}
+
+.toast[data-kind='warning'] {
+  border-left-color: var(--color-warning);
+}
+
+.toast[data-kind='error'] {
+  border-left-color: var(--color-error);
+}
+
+.toast__message {
+  flex: 1;
+  word-break: break-word;
+  white-space: pre-wrap;
+  line-height: 1.4;
+}
+
+.toast__close {
+  flex-shrink: 0;
+  width: var(--sp-5);
+  height: var(--sp-5);
+  position: relative;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  border-radius: var(--r-sm);
+  font-size: 0;
+}
+
+.toast__close:hover {
+  color: var(--color-text-primary);
+  background: var(--color-surface-3);
+}
+
+.toast__close::before,
+.toast__close::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: var(--sp-3);
+  height: 2px;
+  background: currentColor;
+  border-radius: 1px;
+}
+
+.toast__close::before {
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+
+.toast__close::after {
+  transform: translate(-50%, -50%) rotate(-45deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toast {
+    animation: none;
+  }
+}

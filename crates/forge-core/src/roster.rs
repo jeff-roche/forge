@@ -265,11 +265,11 @@ mod tests {
     #[test]
     fn roster_entry_provider_omits_model_when_absent() {
         let entry = RosterEntry::Provider {
-            id: provider_id("ollama"),
+            id: provider_id("anthropic"),
             model: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
-        assert_eq!(json, "{\"type\":\"Provider\",\"id\":\"ollama\"}");
+        assert_eq!(json, "{\"type\":\"Provider\",\"id\":\"anthropic\"}");
         let back: RosterEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(back, entry);
     }

@@ -1,11 +1,11 @@
 use anyhow::Result;
 use forge_core::Event;
-use forge_providers::{ollama::OllamaProvider, MockProvider, RuntimeProvider, SwappableProvider};
+use forge_providers::MockProvider;
 use forge_session::{
     log_bridge,
     pid_file::OwnedPidFile,
     provider_spec::{parse_provider_spec, ProviderKind},
-    server::{event_log_path, serve_with_session, serve_with_session_swappable},
+    server::{event_log_path, serve_with_session},
     session::Session,
     socket_path::resolve_socket_path,
 };
@@ -133,67 +133,6 @@ async fn main() -> Result<()> {
                     workspace,
                     Some(session_id),
                     // F-587: MockProvider is keyless; no credential pull.
-                    None,
-                    // F-601: typed active-agent — `None` here keeps memory off.
-                    active_agent,
-                )
-                .await
-            }
-            ProviderKind::Ollama { model } => {
-                // F-058 / M5 (T7): validate `OLLAMA_BASE_URL` before handing
-                // it to reqwest. An unvalidated URL (the old `env::var` +
-                // `unwrap_or_else` pattern) TLS-dials arbitrary hosts and
-                // exfiltrates every chat transcript + tool-result payload.
-                // Policy is enforced by `validate_base_url`; see its docs.
-                let raw = std::env::var("OLLAMA_BASE_URL").ok();
-                let allow_remote_raw =
-                    std::env::var(forge_providers::ollama::ALLOW_REMOTE_ENV).ok();
-                let allow_remote =
-                    forge_providers::ollama::parse_allow_remote(allow_remote_raw.as_deref());
-                let url = forge_providers::ollama::validate_base_url(raw.as_deref(), allow_remote)?;
-                // Loudly surface the resolved URL so env-var redirection is
-                // visible in logs. Remote-opt-in is called out explicitly.
-                // F-371: `forged` installs no tracing subscriber (scope
-                // contract: emission-only), so these operator banners go
-                // directly to stderr. `eprintln_audit` exempts main.rs.
-                if allow_remote
-                    && !matches!(
-                        url.host_str(),
-                        Some("127.0.0.1") | Some("localhost") | Some("::1") | Some("[::1]")
-                    )
-                {
-                    eprintln!(
-                        "WARN ollama base_url targets a remote endpoint (allow-remote opt-in) base_url={} env_var={}",
-                        url,
-                        forge_providers::ollama::ALLOW_REMOTE_ENV,
-                    );
-                } else {
-                    eprintln!("ollama base_url {}", url);
-                }
-                // F-640: wrap the concrete `OllamaProvider` in an
-                // `Arc<SwappableProvider>` so a dashboard `provider:changed`
-                // event delivered as `IpcMessage::SwitchProvider` over the
-                // UDS can swap the inner between turns without restarting
-                // the session. The same `Arc` is handed to the daemon as
-                // both the active provider and the swap handle, so the
-                // server's `Provider::chat` calls and the swap arm both
-                // operate on the same in-memory holder.
-                let inner = OllamaProvider::new(url.as_str(), model);
-                let swap = Arc::new(SwappableProvider::new(RuntimeProvider::Ollama(Arc::new(
-                    inner,
-                ))));
-                serve_with_session_swappable(
-                    &socket_path,
-                    session,
-                    Arc::clone(&swap),
-                    Some(swap),
-                    auto_approve,
-                    ephemeral,
-                    workspace,
-                    Some(session_id),
-                    // F-587: OllamaProvider is keyless. Anthropic / OpenAI
-                    // providers will wire their LayeredStore + provider id
-                    // here when they land.
                     None,
                     // F-601: typed active-agent — `None` here keeps memory off.
                     active_agent,

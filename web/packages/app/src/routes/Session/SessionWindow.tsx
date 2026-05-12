@@ -237,9 +237,10 @@ export const SessionWindow: Component = () => {
   // `usage_tick` → tokens + cost). Reading through `getSessionTelemetry`
   // inside these accessor functions opts into Solid's fine-grained store
   // reactivity so the header updates the moment a tick lands. Before the
-  // first assistant turn, the provider pill falls back to the `ollama`
-  // Phase-1 default per `pane-header.md §PH.3` — never the unsanctioned
-  // `pending` state suffix (`voice-terminology.md §8`). Before the first
+  // first assistant turn, the provider pill falls back to the active
+  // provider id (or a neutral placeholder when none is set) per
+  // `pane-header.md §PH.3` — never the unsanctioned `pending` state
+  // suffix (`voice-terminology.md §8`). Before the first
   // usage_tick, the cost meter renders a documented em-dash placeholder
   // rather than the fabricated `$0.00` that triggered the F-395 report.
   const telemetry = () => getSessionTelemetry(sessionId());

@@ -4,11 +4,6 @@
 import { test } from '@playwright/test';
 
 test.describe('UAT-12 — recovery', () => {
-  // Variant A blocked by the same session-provider wiring gap as UAT-01c.
-  test.skip('Variant A — Ollama crash mid-stream (BLOCKED)', async () => {
-    // Held for reference; see phase1-uat.md §UAT-12 variant A.
-  });
-
   test.skip('Variant B — forged crash mid-stream (requires tauri-driver)', async () => {
     // 1. Start session with MockProvider.
     // 2. kill forged while stream is mid-flight.

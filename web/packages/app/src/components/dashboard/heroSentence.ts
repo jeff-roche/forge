@@ -41,13 +41,10 @@ function num(n: number): string {
 }
 
 /**
- * Provider names get a small style adjustment for the connected list —
- * the spec calls Ollama out as "local Ollama" so the brand-color story
- * (`var(--p-local)`) reads in copy too. Every other provider uses its
- * `display_name` verbatim.
+ * Provider names render their `display_name` verbatim in the connected
+ * list.
  */
 function connectedLabel(provider: ProviderEntry): string {
-  if (provider.id === 'ollama') return 'local Ollama';
   return provider.display_name;
 }
 
@@ -85,6 +82,11 @@ function isConnected(provider: ProviderEntry, credentialsPresent: Record<string,
   // F-733: a disabled provider is not a candidate for "connected" — the
   // user opted it out, so the hero sentence must not advertise it.
   if (provider.enabled === false) return false;
+  // Phase B: Vertex instances are self-contained — gcloud ADC supplies
+  // auth at request time and the model is supplied per request. Skip
+  // the model-availability + credential heuristics; treat as connected
+  // whenever the row is enabled.
+  if (provider.auth_kind === 'vertex') return true;
   if (!provider.model_available) return false;
   if (provider.credential_required && !credentialsPresent[provider.id]) return false;
   return true;

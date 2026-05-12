@@ -66,7 +66,7 @@ fn parse_session_new_agent_with_provider_flag() {
         "agent",
         "code-review",
         "--provider",
-        "ollama:qwen2.5:0.5b",
+        "mock",
     ])
     .expect("should parse");
     let Commands::Session {
@@ -78,7 +78,7 @@ fn parse_session_new_agent_with_provider_flag() {
     else {
         panic!("wrong command shape");
     };
-    assert_eq!(provider, Some("ollama:qwen2.5:0.5b".to_string()));
+    assert_eq!(provider, Some("mock".to_string()));
 }
 
 #[test]

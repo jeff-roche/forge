@@ -213,7 +213,7 @@ Output bytes flow back via the `terminal:bytes` Tauri event (see §4.1 events).
 | `list_agents` | `ipc.rs` | `workspace_root: String, scope: RosterScope` | `Vec<ScopedRosterEntry>` | `dashboard + session-*` |
 | `list_providers` | `ipc.rs` | `workspace_root: String, scope: RosterScope` | `Vec<ScopedRosterEntry>` | `dashboard + session-*` |
 
-`RosterScope` is a tagged union: `{ type: "SessionWide" } | { type: "Agent", id: AgentId } | { type: "Provider", id: ProviderId }`. Filter semantics: `SessionWide` returns everything; `Agent(id)` narrows to entries bound to that agent (returns empty today for skills/agents/MCP since those surface as `SessionWide` until per-agent binding lands); `Provider(id)` narrows to that provider entry. Built-in providers (`anthropic`, `openai`, `ollama`) are hardcoded; `[providers.custom_openai.<name>]` entries from merged settings surface as `custom_openai:<name>`.
+`RosterScope` is a tagged union: `{ type: "SessionWide" } | { type: "Agent", id: AgentId } | { type: "Provider", id: ProviderId }`. Filter semantics: `SessionWide` returns everything; `Agent(id)` narrows to entries bound to that agent (returns empty today for skills/agents/MCP since those surface as `SessionWide` until per-agent binding lands); `Provider(id)` narrows to that provider entry. Built-in providers (`anthropic`, `openai`) are hardcoded; `[providers.custom_openai.<name>]` entries from merged settings surface as `custom_openai:<name>` — local model servers (Ollama, LM Studio, vLLM, …) live here as preset-filled `custom_openai` entries.
 
 **Transcript export** (F-607) — thin wrapper over the daemon's on-disk `events.jsonl` so the AgentMonitor Inspector (F-449 §9.3) can pull a session transcript through IPC instead of the filesystem.
 
@@ -541,7 +541,7 @@ The client then sends either:
 | `ResumeSession` | client → daemon | (empty) | F-603 | Resume a paused orchestrator. Daemon emits `Event::SessionResumed`. Already-running is a no-op. See §5.7. |
 | `InterruptSession` | client → daemon | (empty) | F-604 | Interrupt the in-flight assistant turn at the next chunk boundary. Distinct from cancel (terminal) and pause (resumable). Response arrives as `RefineHandoff`. See §5.8. |
 | `RefineHandoff` | daemon → client | `partial_text, captured_at_step_id, captured_at_msg_id` | F-604 | Response to `InterruptSession`. Carries the partial assistant text captured at the interrupt boundary. |
-| `SwitchProvider` | client → daemon | `provider_id: String` | F-640 | Swap the in-process `SwappableProvider`'s inner. `provider_id` matches the dashboard's `[providers.active]` shape (`"ollama"`, `"anthropic"`, `"openai"`, `"custom_openai:<name>"`). In-flight turns finish on the previous provider; the next `run_turn` dispatches to the new one. |
+| `SwitchProvider` | client → daemon | `provider_id: String` | F-640 | Swap the in-process `SwappableProvider`'s inner. `provider_id` matches the dashboard's `[providers.active]` shape (`"anthropic"`, `"openai"`, `"custom_openai:<name>"`). In-flight turns finish on the previous provider; the next `run_turn` dispatches to the new one. |
 
 > Future work tracked in F-701 §4: a doc-test or CI script that asserts the variant count in this table matches the discriminant count of `forge_ipc::IpcMessage`, so the doc cannot drift from the enum without breaking the build.
 

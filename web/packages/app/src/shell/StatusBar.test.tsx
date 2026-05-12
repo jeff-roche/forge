@@ -814,7 +814,7 @@ describe('StatusBar — left slot (F-717)', () => {
       onChange = h;
       return () => undefined;
     };
-    let current = 'ollama';
+    let current = 'anthropic';
     const getProvider = vi.fn(async () => current);
     const { findByTestId, getByTestId } = render(() => (
       <StatusBar
@@ -826,16 +826,16 @@ describe('StatusBar — left slot (F-717)', () => {
       />
     ));
     await waitFor(() => {
-      expect(getByTestId('status-bar-provider')).toHaveTextContent('ollama');
+      expect(getByTestId('status-bar-provider')).toHaveTextContent('anthropic');
     });
     await waitFor(() => {
       expect(onChange).not.toBeNull();
     });
     // Simulate a provider swap on the backend; the handler refetches.
-    current = 'anthropic';
-    await onChange!('anthropic');
+    current = 'openai';
+    await onChange!('openai');
     await waitFor(() => {
-      expect(getByTestId('status-bar-provider')).toHaveTextContent('anthropic');
+      expect(getByTestId('status-bar-provider')).toHaveTextContent('openai');
     });
     expect(await findByTestId('status-bar-provider')).toBeTruthy();
   });

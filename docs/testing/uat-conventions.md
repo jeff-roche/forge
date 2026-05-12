@@ -127,7 +127,7 @@ The persistent suite lives at `docs/testing/smoke-uat.sh`. It exists so that con
 # Only the Playwright-driven contract-level UATs (skips Phase 0):
 ./docs/testing/smoke-uat.sh --gui-only
 
-# Subset of phases (e.g. skip Phase 1 until Ollama is wired):
+# Subset of phases (e.g. skip Phase 1):
 ./docs/testing/smoke-uat.sh --phases 0,2
 ```
 
@@ -138,7 +138,7 @@ The runner forwards `--contract-only` to every selected `phaseN-uat.sh` and aggr
 The suite runs the union of all `contract-level` UATs across every existing phase plan. The current contents are sourced from the [migration tables](#migration-classifying-the-existing-phase-0--1--2-uats) above:
 
 - **Phase 0** — all 13 UATs (`UAT-01` .. `UAT-13`).
-- **Phase 1** — `UAT-01c`, `UAT-08`, `UAT-09`, `UAT-10`, `UAT-11`, `UAT-13`, `UAT-14`.
+- **Phase 1** — `UAT-08`, `UAT-09`, `UAT-10`, `UAT-11`, `UAT-13`, `UAT-14`.
 - **Phase 2** — `UAT-04`, `UAT-05`, `UAT-10`, `UAT-12`.
 
 If you need the executable enumeration (e.g. for CI matrix logic), grep the `CONTRACT_LEVEL_UATS=` array in the matching `phaseN-uat.sh`.
@@ -188,10 +188,7 @@ Phase 0 is essentially all `contract-level`: it pre-dates the GUI and tests the 
 | UAT | Tentative label | Rationale |
 |-----|-----------------|-----------|
 | UAT-01a Outcome gate (MockProvider) | acceptance-only | Specific Dashboard + Session-window + ChatPane flow is Phase 1 UI. |
-| UAT-01b Ollama provider status card smoke | acceptance-only | Specific status-card UI. The provider being reachable is a contract; the card visual is not. |
-| UAT-01c Real-Ollama chat round-trip | contract-level | `OllamaProvider` selection via `--provider` / `FORGE_PROVIDER` is durable. |
 | UAT-02 Dashboard sessions list | acceptance-only | Dashboard layout changes in Phase 3. |
-| UAT-03 Ollama status card | acceptance-only | UI affordance + 10s cache visualisation. |
 | UAT-04 Session window lifecycle | acceptance-only | Single-window model is Phase 1 specific. |
 | UAT-05 Chat pane streaming and composer | acceptance-only | Specific ChatPane component contract. |
 | UAT-06 Tool call card rendering | acceptance-only | Specific card component. |

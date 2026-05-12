@@ -65,7 +65,7 @@ export const ProviderEnabledToggle: Component<ProviderEnabledToggleProps> = (
         }}
         aria-hidden="true"
       >
-        {current() ? 'on' : 'off'}
+        {current() ? 'enabled' : 'disabled'}
       </span>
       <label
         class="provider-enabled-toggle__switch"

@@ -11,7 +11,6 @@ use tauri::{
     WebviewWindowBuilder,
 };
 
-use crate::dashboard::{self, ProviderStatusCache, CACHE_TTL};
 use crate::window_spec::WindowSpec;
 
 /// Raw bytes of the canonical forge mark, embedded at compile time so the
@@ -77,13 +76,6 @@ impl<R: Runtime> WindowManager<R> {
 /// Entry point invoked from `main`. Builds the Tauri app, registers the
 /// session IPC bridge + dashboard commands, and opens the Dashboard on setup.
 pub fn run() -> Result<()> {
-    // Debug-only: write a one-shot XDG `.desktop` entry so the Linux
-    // compositor can resolve the running app's icon. No-op on macOS,
-    // Windows, and release builds (where the installed bundle owns the
-    // desktop integration).
-    #[cfg(target_os = "linux")]
-    crate::dev_desktop_entry::ensure();
-
     // Debug-only: install the tracing→log bridge so `tracing::*` calls in
     // this process flow to `tauri-plugin-log`'s Webview target and land in
     // the browser devtools console. The bridge subscriber must be set
@@ -138,9 +130,7 @@ pub fn run() -> Result<()> {
         // true, ... })` from `@tauri-apps/plugin-dialog`; the capability file
         // grants the matching `dialog:allow-open` permission.
         .plugin(tauri_plugin_dialog::init())
-        .manage(ProviderStatusCache::new(CACHE_TTL))
         .invoke_handler(tauri::generate_handler![
-            dashboard::provider_status,
             crate::dashboard_sessions::session_list,
             crate::dashboard_sessions::open_session,
             crate::ipc::session_hello,
@@ -215,6 +205,11 @@ pub fn run() -> Result<()> {
             // single low-cost probe against the provider's models endpoint
             // under a 5s wall-clock deadline.
             crate::providers_ipc::test_provider_connection,
+            // F-731 (ad-hoc): drives the Add/Edit Provider modal's
+            // "Test connection" affordance — accepts a transient
+            // endpoint + key so the user can verify a target and
+            // populate the model picker before saving.
+            crate::providers_ipc::probe_provider_config,
             // F-732: Providers page edit / remove commands. `update_provider`
             // rewrites a `[providers.custom_openai.<name>]` section; built-in
             // ids are rejected. `remove_provider` drops the section (or the

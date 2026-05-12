@@ -92,8 +92,8 @@ pub enum SessionNewKind {
         /// Workspace root directory.
         #[arg(long)]
         workspace: Option<PathBuf>,
-        /// Provider spec (e.g. "ollama:qwen2.5:0.5b" or "mock"). Falls back
-        /// to FORGE_PROVIDER env, then MockProvider.
+        /// Provider spec (e.g. "mock"). Falls back to FORGE_PROVIDER env,
+        /// then MockProvider.
         #[arg(long)]
         provider: Option<String>,
     },

@@ -11,10 +11,7 @@ tests/phase1/
     tauri-mock.ts        # installs mock window.__TAURI_INTERNALS__ before app boot
     events.ts            # factories for UserMessage / AssistantDelta / ToolCall* payloads
   uat-01a-*.spec.ts      # outcome gate (skipped — needs forged bridge fixture)
-  uat-01b-*.spec.ts      # Ollama card UI contract + real-shell variant (skipped)
-  uat-01c-*.spec.ts      # real-Ollama chat (BLOCKED — session provider gap)
   uat-02-*.spec.ts       # Dashboard sessions list — runs under mocked IPC
-  uat-03-*.spec.ts       # Ollama card variants (skipped — needs tauri-driver)
   uat-04-*.spec.ts       # Session window lifecycle — runs under mocked IPC
   uat-05-*.spec.ts       # Chat pane streaming & composer
   uat-06-*.spec.ts       # Tool call card
@@ -61,5 +58,4 @@ Any spec marked `test.skip(...)` carries a reason string:
 |---|---|
 | `requires forged bridge fixture` | Build a companion fixture that spawns `forged` with `FORGE_MOCK_SEQUENCE_FILE`, captures the socket path, and forwards Tauri `invoke` calls through a real UDS. |
 | `requires tauri-driver` | Set up `tauri-driver` + `webdriverio` for real-shell tests; those specs should move to a sibling `tests/phase1-shell/` suite. |
-| `BLOCKED — forged hardcodes MockProvider` | Phase 1 gap. `crates/forge-session/src/main.rs:38-45` needs to select `OllamaProvider` when requested. Open a follow-up ticket. |
 | `selector pending` | Tester must add a `data-testid` or finalize a selector convention for the relevant UI element before the assertion becomes stable. |

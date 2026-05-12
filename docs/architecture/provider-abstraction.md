@@ -101,7 +101,6 @@ The dashboard's provider picker can change the active provider mid-session witho
 
 ```rust
 pub enum RuntimeProvider {
-    Ollama(Arc<OllamaProvider>),
     Anthropic(Arc<AnthropicProvider>),
     OpenAi(Arc<OpenAiProvider>),
     CustomOpenAi(Arc<CustomOpenAiProvider>),
@@ -116,11 +115,13 @@ pub struct SwappableProvider {
 impl SwappableProvider {
     pub fn new(initial: RuntimeProvider) -> Self;
     pub fn swap(&self, next: RuntimeProvider);
-    pub fn active_id(&self) -> String; // "ollama" | "anthropic" | "openai" | "custom_openai" | "mock"
+    pub fn active_id(&self) -> String; // "anthropic" | "openai" | "custom_openai:<name>" | "mock"
 }
 ```
 
-**Why an enum.** `Provider::chat` returns `impl Future`, so the trait is not object-safe; `Arc<dyn Provider>` is not viable. `RuntimeProvider` is a tagged union over the four shipped concrete providers (plus a test-gated `Mock`). Each `chat()` call dispatches via a `match` arm — one arm cost, negligible against a network round-trip.
+**Why an enum.** `Provider::chat` returns `impl Future`, so the trait is not object-safe; `Arc<dyn Provider>` is not viable. `RuntimeProvider` is a tagged union over the three shipped concrete providers (plus a test-gated `Mock`). Each `chat()` call dispatches via a `match` arm — one arm cost, negligible against a network round-trip.
+
+Local model servers (Ollama, LM Studio, vLLM, etc.) are configured as `custom_openai` preset entries — the dashboard's Add Provider modal auto-fills the local endpoint and default model and marks the entry keyless. There is no dedicated `Ollama` variant.
 
 **Why each variant is `Arc<…>`.** The concrete `chat()` futures borrow `&self` per the trait signature, so a `parking_lot::RwLockReadGuard` cannot survive the network round-trip (the guard is not `Send`). `SwappableProvider::chat` snapshots by `Arc::clone`-ing the active variant under a brief read lock, drops the guard, then `await`s the cloned snapshot. The clone is a refcount bump.
 
@@ -134,14 +135,15 @@ See [event-conventions.md](./event-conventions.md) for the `provider:changed` pa
 
 ### 6.7 Shipped providers and auth shapes
 
-Four production providers ship in `forge-providers`:
+Three production providers ship in `forge-providers`:
 
 | Slug              | Module                                  | Auth                                                    |
 |-------------------|-----------------------------------------|---------------------------------------------------------|
-| `ollama`          | `crates/forge-providers/src/ollama.rs`  | None — keyless, local                                   |
 | `anthropic`       | `crates/forge-providers/src/anthropic/` | `x-api-key: <key>` + `anthropic-version` header         |
 | `openai`          | `crates/forge-providers/src/openai/`    | `Authorization: Bearer <key>`                           |
 | `custom_openai`   | `crates/forge-providers/src/openai/custom.rs` | One of `Bearer` / `Header { name }` / `None`      |
+
+Local model servers (Ollama, LM Studio, vLLM, …) are configured as `custom_openai` entries with `auth.shape = "none"`. The Add Provider modal ships a "local Ollama" preset that auto-fills `endpoint = http://127.0.0.1:11434/v1`, `model = llama3.2`, and marks the entry keyless.
 
 `CustomOpenAiProvider` reuses the `openai` request translation and SSE pipeline verbatim — every byte on the wire matches what `OpenAiProvider` would send for the same `ChatRequest`. The two knobs that differ:
 
@@ -180,7 +182,7 @@ impl PriceTable {
 
 A unit test (`embedded_table_parses`) gates release on the in-tree TOML being well-formed, so a typo cannot ship as a runtime panic on first cost lookup.
 
-**Lookup precedence.** Exact `(provider, model)` first; a row with `model = "*"` is the wildcard fallback. The wildcard row exists for Ollama (every locally-hosted model is free at point of use, so a single `ollama / *` row covers any checkpoint a user might pull) — exact rows beat the wildcard so a future paid-per-token Ollama variant could be priced precisely without removing the wildcard.
+**Lookup precedence.** Exact `(provider, model)` first; a row with `model = "*"` is the wildcard fallback. The wildcard row exists for local / OpenAI-compatible endpoints (every locally-hosted model is free at point of use, so a single `custom_openai / *` row covers any checkpoint a user might pull) — exact rows beat the wildcard so a future paid-per-token custom endpoint could be priced precisely without removing the wildcard.
 
 **Cost formula.** `tokens_in × prompt_per_million / 1_000_000 + tokens_out × completion_per_million / 1_000_000`. A missing key returns `None`, which `forge_core::usage` surfaces to the UI as `cost: null` — never `0`, so "free" and "we don't know" stay distinguishable.
 

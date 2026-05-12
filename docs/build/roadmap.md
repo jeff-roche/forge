@@ -22,6 +22,8 @@ The sequencing that builds toward v1.0. Milestones are outcome-based.
 - `forge-providers::OllamaProvider` with streaming chat (NDJSON over HTTP `/api/chat`, model discovery via `/api/tags`)
 - `forge-shell` Tauri bin + webview bootstrap (Solid app)
 - Dashboard view (sessions list + Ollama daemon status) — both active and archived filters
+
+> **Post-Phase-3.1 note.** The dedicated `OllamaProvider` crate, the dashboard's Ollama status card, and the `ProviderKind::Ollama` session dispatch path were retired in Phase 3.1. Ollama is now configurable as a `custom_openai` preset (auto-filled endpoint + default model, keyless). The Phase-1 bullets above describe what shipped at the time and are preserved for the historical record.
 - Session window with single chat pane (layout system exists but splits come later)
 - Tool call cards, four-scope inline approval UI
 - File read/write tool implementations, process isolation level 1

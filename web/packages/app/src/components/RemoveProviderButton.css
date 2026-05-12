@@ -60,8 +60,71 @@
   word-break: break-word;
 }
 
+.remove-provider__field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.remove-provider__label {
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+}
+
+.remove-provider__input {
+  background: var(--color-bg);
+  color: var(--color-text-primary);
+  border: 1px solid var(--color-border-1);
+  border-radius: var(--r-sm);
+  padding: var(--sp-2) var(--sp-3);
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-md);
+  outline: 0;
+}
+
+.remove-provider__input:focus {
+  border-color: var(--color-ember-400);
+}
+
 .remove-provider__actions {
   display: flex;
   justify-content: flex-end;
   gap: var(--sp-3);
+}
+
+/* Icon-only Remove trigger. Sits in the row's terminal action cluster as
+ * a destructive affordance; the verbose confirmation lives behind the
+ * dialog so the row UI itself stays tight. Hover lifts the glyph to
+ * the error color so the destructive intent is obvious before click. */
+.remove-provider__trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--sp-6);
+  height: var(--sp-6);
+  padding: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: var(--ease);
+}
+
+.remove-provider__trigger:hover {
+  color: var(--color-error);
+  border-color: var(--color-error-border);
+  background: var(--color-error-bg);
+}
+
+.remove-provider__trigger:focus-visible {
+  outline: 2px solid var(--color-ember-400);
+  outline-offset: 2px;
+}
+
+.remove-provider__icon {
+  flex-shrink: 0;
 }

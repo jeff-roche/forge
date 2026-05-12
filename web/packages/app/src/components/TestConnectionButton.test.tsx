@@ -1,14 +1,16 @@
-// F-731: TestConnectionButton tests. Covers the four states from
-// docs/ui-specs/providers-page.md §Per-test (idle / probing / success / error),
-// the auth-failure variant detection, the verbatim error rendering, and the
-// invoke payload shape.
+// F-731: TestConnectionButton tests. The button no longer renders
+// inline success / error pills — outcomes are pushed to the toast
+// queue via `pushToast`. The inline `probing` pill is the only visible
+// indicator during the IPC roundtrip.
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, waitFor } from '@solidjs/testing-library';
 
 import { TestConnectionButton } from './TestConnectionButton';
 import { setInvokeForTesting } from '../lib/tauri';
 import type { TestProviderConnectionOutput } from '@forge/ipc';
+
+type ToastKind = 'info' | 'warning' | 'error';
 
 interface StubOptions {
   test?: (input: unknown) => Promise<TestProviderConnectionOutput>;
@@ -38,6 +40,22 @@ function installInvokeStub(opts: StubOptions = {}): {
   return { calls };
 }
 
+interface RenderWithToast {
+  toast: ReturnType<typeof vi.fn>;
+}
+
+function renderButton(
+  providerId: string,
+  extras: RenderWithToast = { toast: vi.fn() },
+) {
+  return {
+    toast: extras.toast,
+    ...render(() => (
+      <TestConnectionButton providerId={providerId} pushToast={extras.toast} />
+    )),
+  };
+}
+
 afterEach(() => {
   setInvokeForTesting(null);
   cleanup();
@@ -52,21 +70,16 @@ describe('TestConnectionButton idle state', () => {
     installInvokeStub();
   });
 
-  it('renders the Test button and the `unknown` pill on first paint', () => {
-    const { getByTestId } = render(() => (
-      <TestConnectionButton providerId="anthropic" />
-    ));
+  it('renders the Test button alone on first paint', () => {
+    const { getByTestId, queryByTestId } = renderButton('anthropic');
     const btn = getByTestId('test-connection-button-anthropic');
     expect(btn).toBeInTheDocument();
     expect(btn).toHaveAttribute('aria-busy', 'false');
-    const pill = getByTestId('test-connection-pill-anthropic');
-    expect(pill.textContent).toBe('unknown');
+    expect(queryByTestId('test-connection-pill-anthropic')).toBeNull();
   });
 
-  it('tags the wrapper with data-state="idle" so the dashboard list can target it', () => {
-    const { container } = render(() => (
-      <TestConnectionButton providerId="anthropic" />
-    ));
+  it('tags the wrapper with data-state="idle"', () => {
+    const { container } = renderButton('anthropic');
     const root = container.querySelector('.test-connection');
     expect(root).toHaveAttribute('data-state', 'idle');
     expect(root).toHaveAttribute('data-provider-id', 'anthropic');
@@ -85,10 +98,7 @@ describe('TestConnectionButton probing state', () => {
     });
     installInvokeStub({ test: () => pending });
 
-    const { container, getByTestId } = render(() => (
-      <TestConnectionButton providerId="anthropic" />
-    ));
-
+    const { container, getByTestId } = renderButton('anthropic');
     fireEvent.click(getByTestId('test-connection-button-anthropic'));
 
     await waitFor(() => {
@@ -99,7 +109,11 @@ describe('TestConnectionButton probing state', () => {
       'aria-busy',
       'true',
     );
-    expect(getByTestId('test-connection-pill-anthropic').textContent).toBe('probing');
+    // While probing, the Test label is replaced by a ring spinner.
+    expect(getByTestId('test-connection-spinner-anthropic')).toBeInTheDocument();
+    expect(
+      getByTestId('test-connection-button-anthropic').textContent,
+    ).not.toContain('Test');
 
     release({ ok: true, latency_ms: 12n as unknown as bigint } as TestProviderConnectionOutput);
   });
@@ -111,15 +125,12 @@ describe('TestConnectionButton probing state', () => {
     });
     const { calls } = installInvokeStub({ test: () => pending });
 
-    const { getByTestId } = render(() => (
-      <TestConnectionButton providerId="anthropic" />
-    ));
+    const { getByTestId } = renderButton('anthropic');
     const btn = getByTestId('test-connection-button-anthropic');
     fireEvent.click(btn);
     await waitFor(() => expect(btn).toHaveAttribute('aria-busy', 'true'));
     fireEvent.click(btn);
     fireEvent.click(btn);
-    // Only the first click reached invoke.
     expect(calls.filter((c) => c.cmd === 'test_provider_connection')).toHaveLength(1);
 
     release({ ok: true } as TestProviderConnectionOutput);
@@ -127,11 +138,11 @@ describe('TestConnectionButton probing state', () => {
 });
 
 // ---------------------------------------------------------------------------
-// success — ready pill with latency
+// success — info toast with latency
 // ---------------------------------------------------------------------------
 
-describe('TestConnectionButton success state', () => {
-  it('renders the ready pill with latency on success', async () => {
+describe('TestConnectionButton success path', () => {
+  it('pushes an info toast carrying the provider id and latency', async () => {
     installInvokeStub({
       test: async () =>
         ({
@@ -140,33 +151,32 @@ describe('TestConnectionButton success state', () => {
           model_count: 7,
         }) satisfies TestProviderConnectionOutput,
     });
+    const toast = vi.fn<[ToastKind, string], void>();
+    const { getByTestId } = renderButton('anthropic', { toast });
 
-    const { getByTestId } = render(() => (
-      <TestConnectionButton providerId="anthropic" />
-    ));
     fireEvent.click(getByTestId('test-connection-button-anthropic'));
-
-    await waitFor(() => {
-      expect(getByTestId('test-connection-pill-anthropic').textContent).toBe(
-        'ready 142ms',
-      );
-    });
+    await waitFor(() => expect(toast).toHaveBeenCalled());
+    expect(toast).toHaveBeenCalledWith(
+      'info',
+      'anthropic: connection succeeded (142ms)',
+    );
+    // Button returns to idle so the user can retry immediately.
+    expect(getByTestId('test-connection-button-anthropic')).toHaveAttribute(
+      'aria-busy',
+      'false',
+    );
   });
 
   it('omits the latency suffix when the daemon does not report one', async () => {
     installInvokeStub({
-      test: async () =>
-        ({ ok: true }) satisfies TestProviderConnectionOutput,
+      test: async () => ({ ok: true }) satisfies TestProviderConnectionOutput,
     });
+    const toast = vi.fn<[ToastKind, string], void>();
+    const { getByTestId } = renderButton('anthropic', { toast });
 
-    const { getByTestId } = render(() => (
-      <TestConnectionButton providerId="anthropic" />
-    ));
     fireEvent.click(getByTestId('test-connection-button-anthropic'));
-
-    await waitFor(() => {
-      expect(getByTestId('test-connection-pill-anthropic').textContent).toBe('ready');
-    });
+    await waitFor(() => expect(toast).toHaveBeenCalled());
+    expect(toast).toHaveBeenCalledWith('info', 'anthropic: connection succeeded');
   });
 });
 
@@ -174,49 +184,39 @@ describe('TestConnectionButton success state', () => {
 // error — auth-failure vs network-failure variants
 // ---------------------------------------------------------------------------
 
-describe('TestConnectionButton error state', () => {
-  it('renders the auth-required pill when the error begins with `test_provider_connection: auth `', async () => {
+describe('TestConnectionButton error path', () => {
+  it('pushes an error toast tagged "auth required" when the error begins with `test_provider_connection: auth `', async () => {
     const verbatim = 'test_provider_connection: auth HTTP 401';
     installInvokeStub({
       test: async () => {
         throw new Error(verbatim);
       },
     });
+    const toast = vi.fn<[ToastKind, string], void>();
+    const { getByTestId } = renderButton('anthropic', { toast });
 
-    const { getByTestId } = render(() => (
-      <TestConnectionButton providerId="anthropic" />
-    ));
     fireEvent.click(getByTestId('test-connection-button-anthropic'));
-
-    await waitFor(() => {
-      expect(getByTestId('test-connection-pill-anthropic').textContent).toBe(
-        'auth-required',
-      );
-    });
-    const alert = getByTestId('test-connection-error-anthropic');
-    expect(alert).toHaveAttribute('role', 'alert');
-    expect(alert.textContent).toBe(verbatim);
+    await waitFor(() => expect(toast).toHaveBeenCalled());
+    const [kind, message] = toast.mock.calls[0]!;
+    expect(kind).toBe('error');
+    expect(message).toBe('anthropic: auth required — auth HTTP 401');
   });
 
-  it('renders the generic unreachable pill for non-auth failures', async () => {
+  it('pushes an error toast tagged "unreachable" for non-auth failures', async () => {
     const verbatim = 'test_provider_connection: network HTTP 503';
     installInvokeStub({
       test: async () => {
         throw new Error(verbatim);
       },
     });
+    const toast = vi.fn<[ToastKind, string], void>();
+    const { getByTestId } = renderButton('anthropic', { toast });
 
-    const { getByTestId } = render(() => (
-      <TestConnectionButton providerId="anthropic" />
-    ));
     fireEvent.click(getByTestId('test-connection-button-anthropic'));
-
-    await waitFor(() => {
-      expect(getByTestId('test-connection-pill-anthropic').textContent).toBe(
-        'unreachable',
-      );
-    });
-    expect(getByTestId('test-connection-error-anthropic').textContent).toBe(verbatim);
+    await waitFor(() => expect(toast).toHaveBeenCalled());
+    const [kind, message] = toast.mock.calls[0]!;
+    expect(kind).toBe('error');
+    expect(message).toBe('anthropic: unreachable — network HTTP 503');
   });
 });
 
@@ -227,9 +227,7 @@ describe('TestConnectionButton error state', () => {
 describe('TestConnectionButton invoke payload', () => {
   it('invokes test_provider_connection with the wrapped {input} shape', async () => {
     const { calls } = installInvokeStub();
-    const { getByTestId } = render(() => (
-      <TestConnectionButton providerId="custom_openai:vllm" />
-    ));
+    const { getByTestId } = renderButton('custom_openai:vllm');
     fireEvent.click(getByTestId('test-connection-button-custom_openai:vllm'));
 
     await waitFor(() => {
@@ -249,22 +247,17 @@ describe('TestConnectionButton invoke payload', () => {
         return { ok: true, latency_ms: 10n as unknown as bigint } as TestProviderConnectionOutput;
       },
     });
+    const toast = vi.fn<[ToastKind, string], void>();
+    const { getByTestId } = renderButton('anthropic', { toast });
 
-    const { getByTestId } = render(() => (
-      <TestConnectionButton providerId="anthropic" />
-    ));
     fireEvent.click(getByTestId('test-connection-button-anthropic'));
-    await waitFor(() => {
-      expect(getByTestId('test-connection-pill-anthropic').textContent).toBe(
-        'unreachable',
-      );
-    });
-    // Retry — pill flips back to ready.
+    await waitFor(() => expect(toast).toHaveBeenCalledTimes(1));
+    expect(toast.mock.calls[0]![0]).toBe('error');
+
     fireEvent.click(getByTestId('test-connection-button-anthropic'));
-    await waitFor(() => {
-      expect(getByTestId('test-connection-pill-anthropic').textContent).toBe(
-        'ready 10ms',
-      );
-    });
+    await waitFor(() => expect(toast).toHaveBeenCalledTimes(2));
+    const [secondKind, secondMessage] = toast.mock.calls[1]!;
+    expect(secondKind).toBe('info');
+    expect(secondMessage).toBe('anthropic: connection succeeded (10ms)');
   });
 });

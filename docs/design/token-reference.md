@@ -112,10 +112,10 @@ These tokens should be defined at `:root` and used throughout. Never use raw val
   --type-body-lg: 16px;
   --type-body-md: 14px;
   --type-body-sm: 12px;
-  --type-mono-md: 13px;
-  --type-mono-sm: 11px;
-  --type-mono-xxs: 10px;
-  --type-mono-xs: 9px;
+  --type-mono-md: 14px;
+  --type-mono-sm: 12px;
+  --type-mono-xxs: 11px;
+  --type-mono-xs: 10px;
 
   /* Provider accent colors */
   --color-provider-anthropic: #ff4a12;

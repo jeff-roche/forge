@@ -360,7 +360,6 @@ async fn list_providers_session_wide_returns_built_ins() {
         .collect();
     assert!(ids.contains(&"anthropic"), "expected anthropic in {ids:?}");
     assert!(ids.contains(&"openai"), "expected openai in {ids:?}");
-    assert!(ids.contains(&"ollama"), "expected ollama in {ids:?}");
     for entry in arr {
         assert_eq!(entry["entry"]["type"], "Provider");
         assert_eq!(entry["scope"]["type"], "Provider");

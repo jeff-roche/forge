@@ -89,7 +89,7 @@ The IPC layer is the canonical enforcement point for Forge's credential rules. R
 
 ## Doesn't do
 
-- Does not surface keyless providers (e.g. Ollama). Callers should suppress the credential field for any provider whose `credential_required` flag is unset.
+- Does not surface keyless providers (e.g. a `custom_openai` preset for local Ollama / LM Studio / vLLM with `auth.shape = "none"`). Callers should suppress the credential field for any provider whose `credential_required` flag is unset.
 - Does not let the user *view* a stored key. The IPC contract is one-way once stored — only `has_credential` is queryable.
 - Does not export / back up keys. The user's keyring is the system of record.
 - Does not own provider activation or configuration — that's [`providers-page.md`](./providers-page.md) and [`providers-section.md`](./providers-section.md).

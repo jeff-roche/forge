@@ -19,14 +19,16 @@ Fills the dashboard column width. The grid uses `auto-fill, minmax(220px, 1fr)`,
 ## Structure
 
 ```
-┌─ PROVIDERS ────────────────────────────────────────────────┐
-│ ┌──────────────┐ ┌──────────────┐ ┌──────────────┐         │
-│ │ Anthropic  ●│ │ OpenAI       │ │ Ollama       │         │ ← cards
-│ │ sonnet-4.5  │ │ no model     │ │ qwen2.5:7b   │         │
-│ │ ✓ key       │ │ ⚠ key        │ │              │         │
-│ └──────────────┘ └──────────────┘ └──────────────┘         │
-└────────────────────────────────────────────────────────────┘
+┌─ PROVIDERS ────────────────────────────────────────────────────┐
+│ ┌──────────────┐ ┌──────────────┐ ┌──────────────────┐         │
+│ │ Anthropic  ●│ │ OpenAI       │ │ custom · ollama  │         │ ← cards
+│ │ sonnet-4.5  │ │ no model     │ │ llama3.2         │         │
+│ │ ✓ key       │ │ ⚠ key        │ │                  │         │
+│ └──────────────┘ └──────────────┘ └──────────────────┘         │
+└────────────────────────────────────────────────────────────────┘
 ```
+
+Local model servers (Ollama, LM Studio, vLLM, …) appear here as user-added `custom_openai:<name>` entries — the Add Provider modal on the Providers page ships a "local Ollama" preset that auto-fills the local endpoint, a default model, and keyless auth. There is no built-in `ollama` card.
 
 The grid is a `Tabs` component in `radio` variant — the cards are a single-select radiogroup with proper ARIA. A roving-tabindex (`useRovingTabindex`) keeps the section a single Tab stop with arrow-key navigation between cards.
 
@@ -35,7 +37,7 @@ The grid is a `Tabs` component in `radio` variant — the cards are a single-sel
 - **Top row:** `display_name` (left) and an active pip (right, ember dot) when this card is the active provider.
 - **Bottom row (meta):** model hint + credential hint, separated visually.
   - **Model hint:** the configured model id when one is reachable, or `no model` (text-tertiary) when `model_available === false`.
-  - **Credential hint:** `✓ key` (color-ok) when stored, `⚠ key` (color-warn) when missing. Only rendered for providers that set `credential_required = true` — Ollama and other keyless providers omit this row entirely so the chrome stays honest.
+  - **Credential hint:** `✓ key` (color-ok) when stored, `⚠ key` (color-warn) when missing. Only rendered for providers that set `credential_required = true` — keyless `custom_openai` presets (e.g. the local-Ollama preset) omit this row entirely so the chrome stays honest.
 - **Pending state:** while `set_active_provider` is in flight, the card sets `aria-busy=true` and adopts the `provider-card--pending` modifier so the user sees a single locked-in transition rather than a flicker.
 
 ## States

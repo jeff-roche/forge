@@ -281,11 +281,11 @@ pub struct SidecarAgentDef {
 /// type once the provider crate exposes a serializable spec.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SidecarProviderSpec {
-    /// Provider identifier — e.g. `"ollama"`, `"anthropic"`, `"openai"`.
+    /// Provider identifier — e.g. `"anthropic"`, `"openai"`, `"custom_openai:<name>"`.
     pub kind: String,
     /// Model id passed to the provider. Free-form; provider-specific.
     pub model: String,
-    /// Optional base URL override (e.g. self-hosted Ollama).
+    /// Optional base URL override (e.g. self-hosted OpenAI-compatible endpoint).
     pub base_url: Option<String>,
 }
 
@@ -462,9 +462,9 @@ mod tests {
                 allowed_paths: vec!["/workspace".into(), "/tmp/forge".into()],
                 workspace_path: "/workspace".into(),
                 provider_spec: SidecarProviderSpec {
-                    kind: "ollama".into(),
-                    model: "llama3.1:8b".into(),
-                    base_url: Some("http://localhost:11434".into()),
+                    kind: "anthropic".into(),
+                    model: "claude-opus-4-7".into(),
+                    base_url: Some("https://api.anthropic.com".into()),
                 },
                 sandbox_level: SidecarSandboxLevel::Level1,
                 telemetry_endpoint: None,
@@ -508,8 +508,8 @@ mod tests {
                 allowed_paths: vec!["/workspace".into()],
                 workspace_path: "/workspace".into(),
                 provider_spec: SidecarProviderSpec {
-                    kind: "ollama".into(),
-                    model: "llama3.1:8b".into(),
+                    kind: "anthropic".into(),
+                    model: "claude-opus-4-7".into(),
                     base_url: None,
                 },
                 sandbox_level: SidecarSandboxLevel::Level1,
@@ -603,8 +603,8 @@ mod tests {
             allowed_paths: vec![],
             workspace_path: "/workspace".into(),
             provider_spec: SidecarProviderSpec {
-                kind: "ollama".into(),
-                model: "llama3.1:8b".into(),
+                kind: "anthropic".into(),
+                model: "claude-opus-4-7".into(),
                 base_url: None,
             },
             sandbox_level: SidecarSandboxLevel::Level1,

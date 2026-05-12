@@ -270,7 +270,7 @@ The palette is built on two scales — **Ember** for brand and action, **Iron** 
 
 - **Primary — Ember 400 (#ff4a12):** The brand color. Used for the primary action per view, the active/selected indicator, the streaming cursor, error borders, and the status bar background. It is the only color in the system that signals "this is what matters right now."
 - **Secondary — Amber (#ffaa33):** Ember 200. Used for the OpenAI provider accent, dirty-buffer indicators in adjacent forms, gradient ends, and warning state.
-- **Tertiary — Steel (#7aaaff):** The single blue in the system. Used for links, info state, and the local/Ollama provider accent. No other blues are introduced.
+- **Tertiary — Steel (#7aaaff):** The single blue in the system. Used for links, info state, and the local / OpenAI-compatible provider accent (any custom endpoint, including a locally-hosted model server). No other blues are introduced.
 - **Neutral — Iron 900 (#07080a):** The deepest surface. App background. Every other surface in the system stacks lighter than this, in strict order, never inverted.
 - **Surface — Iron 850 (#0d0f13):** Panels and sidebars. The default content surface that sits one level above the app background.
 - **On-Surface — Cream (#eae6de):** Primary text. Intentionally warm off-white, never pure `#ffffff`. Pure white on a near-black background causes eye strain over long sessions; the cream tone is locked.

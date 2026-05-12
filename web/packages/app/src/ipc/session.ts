@@ -187,8 +187,8 @@ export async function sessionPause(sessionId: SessionId): Promise<void> {
  * mid-stream swap does not affect the running turn.
  *
  * `providerId` matches the dashboard's `[providers.active]` shape
- * (`"ollama"`, `"anthropic"`, `"openai"`, `"custom_openai:<name>"`). Unknown
- * or currently-unsupported ids are logged + skipped daemon-side; this
+ * (`"anthropic"`, `"openai"`, `"custom_openai:<name>"`). Unknown or
+ * currently-unsupported ids are logged + skipped daemon-side; this
  * call still resolves successfully so listeners can fire on every event
  * without filtering.
  */

@@ -15,20 +15,6 @@
 #   currency                      = ISO-4217 code; everything is "USD" today
 #   last_updated                  = YYYY-MM-DD when this row was last reviewed
 
-# ── Ollama (local; zero-cost) ──────────────────────────────────────────────
-# Local-first provider. Every model is free at point of use. Listing one
-# wildcard-shaped row is intentional: the lookup key is `provider + model`,
-# so an Ollama user running an unrecognised model still surfaces as
-# `cost: null` (the right outcome — we should not silently invent a price).
-
-[[entry]]
-provider = "ollama"
-model = "*"
-prompt_per_million_tokens = 0.0
-completion_per_million_tokens = 0.0
-currency = "USD"
-last_updated = "2026-04-26"
-
 # ── Anthropic ──────────────────────────────────────────────────────────────
 # Latest models per the F-593 spec.
 

@@ -59,14 +59,13 @@ function shortSessionId(id: string): string {
 
 /**
  * F-395: formats the PaneHeader provider pill label. Before the first
- * `AssistantMessage` arrives, falls back to the Phase-1 sanctioned default
- * (`ollama`) per `pane-header.md §PH.3` — never a `· pending` state suffix,
- * which is not in `voice-terminology.md §8`'s state vocabulary. Once a
- * provider/model pair is observed on the wire, the label promotes to the
- * live pair.
+ * `AssistantMessage` arrives, falls back to a neutral placeholder — never a
+ * `· pending` state suffix, which is not in `voice-terminology.md §8`'s
+ * state vocabulary. Once a provider/model pair is observed on the wire, the
+ * label promotes to the live pair.
  */
 export function formatProviderLabel(t: SessionTelemetry): string {
-  if (t.provider === null) return 'ollama';
+  if (t.provider === null) return '—';
   return t.provider;
 }
 
@@ -76,5 +75,5 @@ export function formatProviderLabel(t: SessionTelemetry): string {
  * lockstep before the first assistant turn lands.
  */
 export function resolveProviderId(t: SessionTelemetry): string {
-  return t.provider ?? 'ollama';
+  return t.provider ?? 'custom';
 }

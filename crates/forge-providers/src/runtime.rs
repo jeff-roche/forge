@@ -24,7 +24,6 @@ use futures::stream::BoxStream;
 use parking_lot::RwLock;
 
 use crate::anthropic::AnthropicProvider;
-use crate::ollama::OllamaProvider;
 use crate::openai::custom::CustomOpenAiProvider;
 use crate::openai::OpenAiProvider;
 #[cfg(any(test, feature = "testing"))]
@@ -51,7 +50,6 @@ use crate::{ChatChunk, ChatRequest, Provider};
 /// silently route real prompts to a scripted source.
 #[derive(Clone)]
 pub enum RuntimeProvider {
-    Ollama(Arc<OllamaProvider>),
     Anthropic(Arc<AnthropicProvider>),
     OpenAi(Arc<OpenAiProvider>),
     CustomOpenAi(Arc<CustomOpenAiProvider>),
@@ -65,7 +63,6 @@ impl RuntimeProvider {
     /// `Credentials::has_credential` use.
     pub fn id(&self) -> &str {
         match self {
-            RuntimeProvider::Ollama(_) => "ollama",
             RuntimeProvider::Anthropic(_) => "anthropic",
             RuntimeProvider::OpenAi(_) => "openai",
             RuntimeProvider::CustomOpenAi(_) => "custom_openai",
@@ -86,7 +83,6 @@ impl Provider for RuntimeProvider {
         let cloned = self.clone();
         async move {
             let fut: futures::future::BoxFuture<'static, _> = match cloned {
-                RuntimeProvider::Ollama(p) => Box::pin(async move { p.chat(req).await }),
                 RuntimeProvider::Anthropic(p) => Box::pin(async move { p.chat(req).await }),
                 RuntimeProvider::OpenAi(p) => Box::pin(async move { p.chat(req).await }),
                 RuntimeProvider::CustomOpenAi(p) => Box::pin(async move { p.chat(req).await }),
@@ -233,14 +229,11 @@ mod tests {
         let sp = SwappableProvider::new(RuntimeProvider::Mock(mock_arc("x")));
         assert_eq!(sp.active_id(), "mock");
 
-        // Swap to an Ollama variant — id must update without reaching the
-        // network. We can't easily construct a real `OllamaProvider` for
-        // unit tests, but the public API is keyless construction, so this
-        // is fine.
-        sp.swap(RuntimeProvider::Ollama(Arc::new(OllamaProvider::new(
-            "http://127.0.0.1:11434",
-            "mistral",
-        ))));
-        assert_eq!(sp.active_id(), "ollama");
+        // Swap to a different Mock variant — id must update without
+        // reaching the network. The Mock variant exists under
+        // `cfg(any(test, feature = "testing"))` so this is unit-testable
+        // without constructing a real network-backed provider.
+        sp.swap(RuntimeProvider::Mock(mock_arc("after-swap")));
+        assert_eq!(sp.active_id(), "mock");
     }
 }

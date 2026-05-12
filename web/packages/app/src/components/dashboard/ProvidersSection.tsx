@@ -1,16 +1,12 @@
-import { createResource, createSignal, For, Show, type Component } from 'solid-js';
+import { createResource, For, Show, type Component } from 'solid-js';
 import { A } from '@solidjs/router';
-import { Button, Skeleton, StatusPill, type StatusPillVariant } from '@forge/design';
+import { Skeleton, StatusPill, type StatusPillVariant } from '@forge/design';
 import {
   getActiveProvider,
   isProviderEnabled,
   listProviders,
-  providerStatus,
-  setActiveProvider,
   type ProviderEntry,
 } from '../../ipc/dashboard';
-import { useRovingTabindex } from '../../lib/useRovingTabindex';
-import { pushToast } from '../toast';
 import './ProvidersSection.css';
 
 export type { ProviderEntry };
@@ -18,76 +14,40 @@ export type { ProviderEntry };
 interface Snapshot {
   entries: ProviderEntry[];
   active: string | null;
-  /**
-   * F-738: Ollama reachability comes from the dedicated `provider_status` IPC
-   * (the only one that probes the running daemon). `dashboard_list_providers`
-   * carries no `reachable` field — TODO once a multi-provider reachability
-   * IPC lands, key this off the per-row payload instead of a side-channel
-   * probe. A probe failure leaves the flag undefined so the START OLLAMA CTA
-   * stays hidden rather than firing on a transient IPC error.
-   */
-  ollamaReachable: boolean | undefined;
 }
 
 async function fetchSnapshot(): Promise<Snapshot> {
-  const [entries, active, ollamaReachable] = await Promise.all([
+  const [entries, active] = await Promise.all([
     listProviders(),
     getActiveProvider(),
-    providerStatus()
-      .then((s) => s.reachable)
-      .catch(() => undefined),
   ]);
   // F-733: the dashboard's active-provider selector only lists enabled rows
   // so the user cannot promote a disabled provider. Disabled rows still
   // appear on the Providers page so the user can re-enable or remove them.
-  return { entries: entries.filter(isProviderEnabled), active, ollamaReachable };
+  return { entries: entries.filter(isProviderEnabled), active };
 }
 
 /**
  * F-721 Providers card for the Dashboard's v-dash grid (col-4).
  *
- * Compact stacked-list of one row per built-in provider plus any
- * user-configured `[providers.custom_openai.<name>]` entry. Each row
+ * Read-only summary of one row per user-configured provider (built-in
+ * vendor + any `[providers.custom_openai.<name>]` entry). Each row
  * leads with a brand-color dot, carries the provider name + model
  * summary (or error subtext), and a trailing readiness pill — `ready`
  * (success) when the provider has a model available, `auth` (warning)
  * when a required credential is missing or the model is unconfigured.
  *
- * Radio semantics are preserved: the wrapping list is a `radiogroup`
- * and each row carries `role="radio"` + `aria-checked`. Clicking a row
- * fires `set_active_provider`; the active row paints the ember pip /
- * border treatment. F-720's `set_active_provider` IPC continues to emit
- * `provider:changed` app-wide so any open session window picks up the
- * change on its next turn.
+ * Setting the active provider is intentionally NOT available from the
+ * Dashboard — users change it through the `/providers` page or by
+ * editing `~/.config/forge/settings.toml` directly. The Dashboard card
+ * still highlights which provider is currently active (ember pip /
+ * border) so the user can see the state at a glance.
  *
- * The header carries a `Manage` link to `/providers`. F-729 wires that
- * route; until then the link dead-ends.
+ * The header carries a `Manage` link to `/providers` for everything
+ * mutating: enable/disable, add/remove, set-active, edit credential.
  */
 export const ProvidersSection: Component = () => {
-  const [snapshot, { refetch }] = createResource(fetchSnapshot);
-  const [actionError, setActionError] = createSignal<string | null>(null);
-  // F-586 review: prevents the dashboard's double-tap race. Two quick
-  // clicks would otherwise fire two `setActiveProvider` IPCs whose
-  // refetch() resolutions could land out-of-order and leave the UI in a
-  // stale intermediate state. The backend now serializes its
-  // read-modify-write through `settings_write_guard`, but we still want
-  // the UI to feel locked-in during the round-trip so the user sees a
-  // single transition rather than a flicker.
-  const [pendingId, setPendingId] = createSignal<string | null>(null);
-  const isSubmitting = () => pendingId() !== null;
-
-  const handleSelect = (id: string) => {
-    if (isSubmitting()) return;
-    setActionError(null);
-    setPendingId(id);
-    setActiveProvider(id)
-      .then(() => refetch())
-      .catch((err) => {
-        const detail = err instanceof Error ? err.message : String(err);
-        setActionError(`set_active_provider failed: ${detail}`);
-      })
-      .finally(() => setPendingId(null));
-  };
+  const [snapshot] = createResource(fetchSnapshot);
 
   // F-699: the error-detail line MUST carry the verbatim IPC error message
   // so the user can match it against backend logs. Preserve `err.message`
@@ -97,9 +57,6 @@ export const ProvidersSection: Component = () => {
     if (!err) return null;
     return err instanceof Error ? `Error: ${err.message}` : String(err);
   };
-
-  const [listRef, setListRef] = createSignal<HTMLDivElement | undefined>();
-  useRovingTabindex(listRef, '.providers__row');
 
   return (
     <section class="providers" aria-label="AI providers">
@@ -129,14 +86,6 @@ export const ProvidersSection: Component = () => {
         )}
       </Show>
 
-      <Show when={actionError()}>
-        {(msg) => (
-          <p class="providers__action-error" role="alert">
-            {msg()}
-          </p>
-        )}
-      </Show>
-
       <Show when={snapshot.state === 'ready' && snapshot()}>
         {(data) => (
           <Show
@@ -147,22 +96,12 @@ export const ProvidersSection: Component = () => {
               </p>
             }
           >
-            <div
-              role="radiogroup"
-              aria-label="Active provider"
-              aria-busy={isSubmitting()}
-              class="providers__list"
-              ref={setListRef as never}
-            >
+            <div class="providers__list" aria-label="Configured providers">
               <For each={data().entries}>
                 {(entry) => (
                   <ProviderRow
                     entry={entry}
                     active={data().active === entry.id}
-                    pending={pendingId() === entry.id}
-                    disabled={isSubmitting()}
-                    ollamaReachable={data().ollamaReachable}
-                    onSelect={handleSelect}
                   />
                 )}
               </For>
@@ -177,32 +116,6 @@ export const ProvidersSection: Component = () => {
 interface ProviderRowProps {
   entry: ProviderEntry;
   active: boolean;
-  pending: boolean;
-  disabled: boolean;
-  /**
-   * F-738: reachability of the local Ollama daemon. Only meaningful for the
-   * `ollama` row; other rows ignore it. `undefined` when the probe hasn't
-   * resolved or rejected — in that case the START OLLAMA CTA stays hidden.
-   */
-  ollamaReachable: boolean | undefined;
-  onSelect: (id: string) => void;
-}
-
-const OLLAMA_SERVE_COMMAND = 'ollama serve';
-
-/**
- * F-738: Best-effort clipboard copy + user-visible toast. `navigator.clipboard`
- * is unavailable in non-secure contexts and some headless test envs; in those
- * cases the toast still carries the literal command so the user can copy it
- * by hand.
- */
-async function copyOllamaServeToClipboard(): Promise<void> {
-  try {
-    await navigator.clipboard?.writeText(OLLAMA_SERVE_COMMAND);
-    pushToast('info', `Copied \`${OLLAMA_SERVE_COMMAND}\` — run it in a terminal`);
-  } catch {
-    pushToast('warning', `Run \`${OLLAMA_SERVE_COMMAND}\` in a terminal`);
-  }
 }
 
 /**
@@ -213,22 +126,34 @@ async function copyOllamaServeToClipboard(): Promise<void> {
 type ProviderBrand = 'anthropic' | 'openai' | 'local' | 'custom' | 'unknown';
 
 function providerBrand(id: string): ProviderBrand {
-  if (id === 'anthropic') return 'anthropic';
-  if (id === 'openai') return 'openai';
-  if (id === 'ollama' || id === 'lm-studio' || id === 'local') return 'local';
-  if (id === 'mistral' || id === 'custom_openai' || id.startsWith('custom_openai:')) return 'custom';
+  // Phase A: split the vendor prefix off `<vendor>:<name>` so named
+  // instances inherit their vendor's brand color.
+  const vendor = id.includes(':') && !id.startsWith('custom_openai:')
+    ? id.slice(0, id.indexOf(':'))
+    : id;
+  if (vendor === 'anthropic') return 'anthropic';
+  if (vendor === 'openai') return 'openai';
+  if (vendor === 'lm-studio' || vendor === 'local') return 'local';
+  if (id === 'mistral' || vendor === 'mistral' || id === 'custom_openai' || id.startsWith('custom_openai:'))
+    return 'custom';
   return 'unknown';
 }
 
 type PillVariant = Extract<StatusPillVariant, 'ready' | 'auth'>;
 
 function pillVariant(entry: ProviderEntry): PillVariant {
+  // Vertex-backed rows are self-contained: gcloud ADC handles auth and
+  // the model is supplied per request. Neither the credential nor the
+  // model-availability heuristic applies, so the pill is always `ready`
+  // — the test-connection probe is the real validator for Vertex.
+  if (entry.auth_kind === 'vertex') return 'ready';
   if (entry.credential_required && !entry.has_credential) return 'auth';
   if (!entry.model_available) return 'auth';
   return 'ready';
 }
 
 function subtext(entry: ProviderEntry, variant: PillVariant): string {
+  if (entry.auth_kind === 'vertex') return 'gcloud ADC';
   if (variant === 'auth') {
     if (entry.credential_required && !entry.has_credential) return 'credentials missing';
     return 'unconfigured';
@@ -237,68 +162,66 @@ function subtext(entry: ProviderEntry, variant: PillVariant): string {
 }
 
 /**
- * F-738: remediation CTA shown beside the row pill when the row's state has
- * an actionable fix. `add-credential` routes the user to the Providers page
- * row for that id; `start-ollama` copies `ollama serve` to the clipboard and
- * dispatches a toast so the user can run it in their terminal. The click
- * bubbles out of the radio row's set-active handler via `stopPropagation`.
+ * Tooltip text for the pill + row. Tells the user *why* the row is in its
+ * current state and what action (if any) is required. Surface as a
+ * native `title` so the message appears on hover without claiming
+ * additional dashboard real estate.
+ *
+ * `active` flips the message to mention "currently active" so the
+ * ember/orange row border (also ember-themed) reads unambiguously as
+ * "this is your active provider" rather than as an auth warning.
  */
-function needsCredential(entry: ProviderEntry): boolean {
-  return entry.credential_required && !entry.has_credential;
+function pillTooltip(entry: ProviderEntry, variant: PillVariant, active: boolean): string {
+  const activePrefix = active ? 'Active provider. ' : '';
+  if (entry.auth_kind === 'vertex') {
+    return `${activePrefix}Authenticates via gcloud Application Default Credentials. No API key needed — run \`gcloud auth application-default login\` if requests start failing.`;
+  }
+  if (variant === 'auth') {
+    if (entry.credential_required && !entry.has_credential) {
+      return `${activePrefix}Click "Add credential" to store an API key for ${entry.display_name}.`;
+    }
+    return `${activePrefix}${entry.display_name} is unconfigured.`;
+  }
+  if (!entry.credential_required) {
+    return `${activePrefix}${entry.display_name} is keyless — no credential required.`;
+  }
+  return `${activePrefix}${entry.display_name} is ready: credential stored and model available.`;
 }
 
-function isOllamaDown(entry: ProviderEntry, ollamaReachable: boolean | undefined): boolean {
-  return entry.id === 'ollama' && ollamaReachable === false;
+/**
+ * F-738: remediation CTA shown beside the row pill when the row's state has
+ * an actionable fix. `add-credential` routes the user to the Providers page
+ * row for that id. The click bubbles out of the radio row's set-active
+ * handler via `stopPropagation`. Vertex-authenticated rows skip the CTA —
+ * gcloud ADC supplies their credential at request time.
+ */
+function needsCredential(entry: ProviderEntry): boolean {
+  if (entry.auth_kind === 'vertex') return false;
+  return entry.credential_required && !entry.has_credential;
 }
 
 const ProviderRow: Component<ProviderRowProps> = (props) => {
   const variant = () => pillVariant(props.entry);
   const brand = () => providerBrand(props.entry.id);
-  const handleClick = () => {
-    if (props.disabled && !props.pending) return;
-    props.onSelect(props.entry.id);
-  };
-  const handleKeyDown = (e: KeyboardEvent) => {
-    if (e.key === ' ' || e.key === 'Enter') {
-      e.preventDefault();
-      handleClick();
-    }
-  };
-  const ariaLabel = () => {
-    const parts = [`Select ${props.entry.display_name}`];
-    parts.push(variant() === 'ready' ? 'ready' : 'authentication required');
-    if (props.pending) parts.push('SWITCHING');
-    return parts.join(', ');
-  };
-  const stopRowSelect = (e: Event) => {
-    // CTA buttons live inside the radio row so the spec's compact row layout
-    // is preserved. Clicks must not also promote the row to active.
-    e.stopPropagation();
-  };
 
   return (
     <div
-      role="radio"
-      tabindex={-1}
-      aria-checked={props.active}
-      aria-busy={props.pending}
-      aria-disabled={props.disabled && !props.pending}
-      aria-label={ariaLabel()}
       class="providers__row"
-      classList={{
-        'providers__row--active': props.active,
-        'providers__row--pending': props.pending,
-      }}
+      classList={{ 'providers__row--active': props.active }}
       data-brand={brand()}
-      onClick={handleClick}
-      onKeyDown={handleKeyDown}
+      title={pillTooltip(props.entry, variant(), props.active)}
     >
       <span class="providers__dot" aria-hidden="true" />
       <div class="providers__identity">
         <span class="providers__name">{props.entry.display_name}</span>
         <span class="providers__sub">{subtext(props.entry, variant())}</span>
       </div>
-      <StatusPill class="providers__pill" data-variant={variant()} variant={variant()}>
+      <StatusPill
+        class="providers__pill"
+        data-variant={variant()}
+        variant={variant()}
+        title={pillTooltip(props.entry, variant(), props.active)}
+      >
         {variant()}
       </StatusPill>
       <Show when={needsCredential(props.entry)}>
@@ -306,34 +229,25 @@ const ProviderRow: Component<ProviderRowProps> = (props) => {
           class="providers__cta"
           data-testid={`provider-cta-add-credential-${props.entry.id}`}
           href={`/providers#${props.entry.id}`}
-          onClick={stopRowSelect}
-          onKeyDown={(e: KeyboardEvent) => {
-            if (e.key === ' ' || e.key === 'Enter') e.stopPropagation();
-          }}
         >
           Add credential
         </A>
       </Show>
-      <Show when={isOllamaDown(props.entry, props.ollamaReachable)}>
-        <Button
-          variant="primary"
-          size="sm"
-          class="providers__cta providers__cta--primary"
-          data-testid="provider-cta-start-ollama"
-          onClick={(e) => {
-            stopRowSelect(e);
-            void copyOllamaServeToClipboard();
-          }}
-          onKeyDown={(e) => {
-            if (e.key === ' ' || e.key === 'Enter') e.stopPropagation();
-          }}
-        >
-          START OLLAMA
-        </Button>
-      </Show>
-      <Show when={props.active}>
-        <span class="providers__active-pip" aria-hidden="true" />
-      </Show>
+      {/* Active-pip slot is rendered on every row to reserve space and
+          prevent the pill/CTA from horizontally shifting when the
+          active provider changes. Non-active rows render a muted bar
+          (same dimensions); the active row paints it ember and adds the
+          glow. */}
+      <span
+        class="providers__active-pip"
+        classList={{ 'providers__active-pip--active': props.active }}
+        aria-hidden="true"
+        title={
+          props.active
+            ? 'Active provider — used by new sessions'
+            : undefined
+        }
+      />
     </div>
   );
 };

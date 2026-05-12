@@ -162,7 +162,7 @@ pub enum IpcMessage {
 
 /// F-640: client → session: swap the in-process `SwappableProvider`'s
 /// inner. `provider_id` matches the dashboard's `[providers.active]`
-/// shape (`"ollama"`, `"anthropic"`, `"openai"`, `"custom_openai:<name>"`).
+/// shape (`"anthropic"`, `"openai"`, `"custom_openai:<name>"`).
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct SwitchProvider {
     pub provider_id: String,
@@ -739,10 +739,10 @@ mod tests {
     #[test]
     fn switch_provider_serializes_to_pinned_shape() {
         let msg = IpcMessage::SwitchProvider(SwitchProvider {
-            provider_id: "ollama".to_string(),
+            provider_id: "anthropic".to_string(),
         });
         let json = serde_json::to_string(&msg).unwrap();
-        assert_eq!(json, r#"{"t":"SwitchProvider","provider_id":"ollama"}"#);
+        assert_eq!(json, r#"{"t":"SwitchProvider","provider_id":"anthropic"}"#);
     }
 
     #[tokio::test]

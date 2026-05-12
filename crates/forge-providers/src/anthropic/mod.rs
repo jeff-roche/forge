@@ -6,7 +6,7 @@
 //!
 //! # Streaming bounds
 //!
-//! The HTTP-layer client and the SSE decoder share Ollama's hardening posture:
+//! The HTTP-layer client and the SSE decoder enforce a hardening posture:
 //! per-line byte cap, inter-event idle timeout, and overall wall-clock budget.
 //! Any of these terminates the stream with a typed [`ChatChunk::Error`] —
 //! the SSE adapter ([`crate::sse`]) yields a typed [`crate::sse::SseError`]
@@ -27,9 +27,35 @@ pub const ANTHROPIC_VERSION: &str = "2023-06-01";
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 pub const DEFAULT_MAX_TOKENS: u32 = 4096;
 
+/// Anthropic-version header for direct API calls. Vertex AI uses a
+/// different version string — see [`VERTEX_ANTHROPIC_VERSION`].
+pub const VERTEX_ANTHROPIC_VERSION: &str = "vertex-2023-10-16";
+
+/// Authentication mode for [`AnthropicProvider`]. Selects between direct
+/// Anthropic API calls (`ApiKey`) and Google Vertex AI (`Vertex`). The
+/// Vertex variant retargets the base URL and replaces `x-api-key` with
+/// `Authorization: Bearer <gcloud-access-token>`.
+#[derive(Clone, Debug)]
+pub enum AuthMode {
+    /// Direct Anthropic API: `x-api-key: <api_key>` against
+    /// `https://api.anthropic.com/v1/messages`.
+    ApiKey { api_key: String },
+    /// Google Vertex AI: gcloud Application Default Credentials supply
+    /// an access token via shelling out to `gcloud auth
+    /// application-default print-access-token`. The user runs
+    /// `gcloud auth application-default login` once outside Forge to set
+    /// this up.
+    Vertex {
+        /// GCP project hosting the Anthropic publisher.
+        project: String,
+        /// Vertex region (e.g. `us-central1`).
+        region: String,
+    },
+}
+
 pub struct AnthropicProvider {
     base_url: String,
-    api_key: String,
+    auth: AuthMode,
     model: String,
     max_tokens: u32,
     stream_client: reqwest::Client,
@@ -43,9 +69,28 @@ impl AnthropicProvider {
         model: impl Into<String>,
         max_tokens: u32,
     ) -> Self {
+        Self::with_auth(
+            base_url,
+            AuthMode::ApiKey {
+                api_key: api_key.into(),
+            },
+            model,
+            max_tokens,
+        )
+    }
+
+    /// Construct an `AnthropicProvider` with an explicit [`AuthMode`].
+    /// The Vertex variant ignores `base_url` and derives its URL from
+    /// `project` + `region`; the ApiKey variant uses `base_url` directly.
+    pub fn with_auth(
+        base_url: impl Into<String>,
+        auth: AuthMode,
+        model: impl Into<String>,
+        max_tokens: u32,
+    ) -> Self {
         Self {
             base_url: base_url.into(),
-            api_key: api_key.into(),
+            auth,
             model: model.into(),
             max_tokens,
             stream_client: http_util::build_stream_client(
@@ -63,6 +108,46 @@ impl AnthropicProvider {
         self.stream_cfg = stream_cfg;
         self
     }
+
+    /// Build the request URL for the configured auth mode. Direct API
+    /// posts to `<base_url>/v1/messages`; Vertex posts to the
+    /// region-scoped publisher endpoint.
+    pub fn request_url(&self) -> String {
+        match &self.auth {
+            AuthMode::ApiKey { .. } => {
+                format!("{}/v1/messages", self.base_url.trim_end_matches('/'))
+            }
+            AuthMode::Vertex { project, region } => format!(
+                "https://{region}-aiplatform.googleapis.com/v1/projects/{project}/locations/{region}/publishers/anthropic/models/{model}:streamRawPredict",
+                model = self.model,
+            ),
+        }
+    }
+}
+
+/// Acquire a Vertex AI access token by shelling out to
+/// `gcloud auth application-default print-access-token`. The user must
+/// have run `gcloud auth application-default login` once outside Forge
+/// to populate ADC. Tokens are valid ~1h; callers should refresh on
+/// auth failures rather than caching aggressively.
+///
+/// Returns the raw access token string on stdout. Wrapped errors carry
+/// the gcloud stderr verbatim so the user sees actionable messages
+/// (e.g. "Reauthentication failed", "command not found").
+pub fn fetch_vertex_access_token() -> anyhow::Result<String> {
+    let output = std::process::Command::new("gcloud")
+        .args(["auth", "application-default", "print-access-token"])
+        .output()
+        .map_err(|e| anyhow::anyhow!("gcloud not available: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        anyhow::bail!("gcloud print-access-token failed: {stderr}");
+    }
+    let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if token.is_empty() {
+        anyhow::bail!("gcloud print-access-token returned empty token");
+    }
+    Ok(token)
 }
 
 impl Provider for AnthropicProvider {
@@ -82,7 +167,7 @@ impl Provider for AnthropicProvider {
         &self,
         req: ChatRequest,
     ) -> impl std::future::Future<Output = Result<BoxStream<'static, ChatChunk>>> + Send {
-        let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
+        let url = self.request_url();
         let body_result = translate::serialize_request(
             &req,
             &self.model,
@@ -91,15 +176,36 @@ impl Provider for AnthropicProvider {
         );
         let client = self.stream_client.clone();
         let cfg = self.stream_cfg;
-        let api_key = self.api_key.clone();
+        let auth = self.auth.clone();
 
         async move {
             let body = body_result
                 .map_err(|e| anyhow::anyhow!("anthropic chat body serialization failed: {e}"))?;
-            let resp = client
-                .post(&url)
-                .header("x-api-key", api_key)
-                .header("anthropic-version", ANTHROPIC_VERSION)
+            // Build auth-mode-specific request headers. Vertex shells
+            // out to gcloud for an ADC access token; failures here
+            // surface as the verbatim gcloud stderr so the user can act
+            // on them.
+            let mut builder = client.post(&url);
+            match &auth {
+                AuthMode::ApiKey { api_key } => {
+                    builder = builder
+                        .header("x-api-key", api_key.as_str())
+                        .header("anthropic-version", ANTHROPIC_VERSION);
+                }
+                AuthMode::Vertex { .. } => {
+                    let token = tokio::task::spawn_blocking(fetch_vertex_access_token)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("vertex token join failed: {e}"))?
+                        .map_err(|e| anyhow::anyhow!("vertex auth: {e}"))?;
+                    builder = builder
+                        .header(
+                            reqwest::header::AUTHORIZATION,
+                            format!("Bearer {token}"),
+                        )
+                        .header("anthropic-version", VERTEX_ANTHROPIC_VERSION);
+                }
+            }
+            let resp = builder
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
                 .body(body)
                 .send()
@@ -166,7 +272,10 @@ mod tests {
     fn new_stores_config() {
         let p = AnthropicProvider::new("https://example.com", "sk-test", "claude-3-5-sonnet", 4096);
         assert_eq!(p.base_url, "https://example.com");
-        assert_eq!(p.api_key, "sk-test");
+        match &p.auth {
+            AuthMode::ApiKey { api_key } => assert_eq!(api_key, "sk-test"),
+            AuthMode::Vertex { .. } => panic!("expected ApiKey auth"),
+        }
         assert_eq!(p.model, "claude-3-5-sonnet");
         assert_eq!(p.max_tokens, 4096);
     }
@@ -174,5 +283,36 @@ mod tests {
     #[test]
     fn anthropic_version_pinned() {
         assert_eq!(ANTHROPIC_VERSION, "2023-06-01");
+        assert_eq!(VERTEX_ANTHROPIC_VERSION, "vertex-2023-10-16");
+    }
+
+    #[test]
+    fn api_key_request_url_uses_base() {
+        let p = AnthropicProvider::new("https://api.anthropic.com", "k", "claude-3", 4096);
+        assert_eq!(p.request_url(), "https://api.anthropic.com/v1/messages");
+    }
+
+    #[test]
+    fn api_key_request_url_trims_trailing_slash() {
+        let p = AnthropicProvider::new("https://api.anthropic.com/", "k", "claude-3", 4096);
+        assert_eq!(p.request_url(), "https://api.anthropic.com/v1/messages");
+    }
+
+    #[test]
+    fn vertex_request_url_targets_region_publisher() {
+        let p = AnthropicProvider::with_auth(
+            // base_url is ignored in Vertex mode.
+            "https://example.com",
+            AuthMode::Vertex {
+                project: "my-proj".to_string(),
+                region: "us-central1".to_string(),
+            },
+            "claude-3-5-sonnet@20241022",
+            4096,
+        );
+        assert_eq!(
+            p.request_url(),
+            "https://us-central1-aiplatform.googleapis.com/v1/projects/my-proj/locations/us-central1/publishers/anthropic/models/claude-3-5-sonnet@20241022:streamRawPredict"
+        );
     }
 }

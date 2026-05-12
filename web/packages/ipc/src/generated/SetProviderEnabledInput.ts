@@ -2,7 +2,7 @@
 
 /**
  * `set_provider_enabled` IPC input. Flips the `providers.enabled.<id>`
- * flag. Accepts either a built-in slug (`anthropic`, `openai`, `ollama`,
+ * flag. Accepts either a built-in slug (`anthropic`, `openai`,
  * `mistral`, `custom_openai`) or a `custom_openai:<name>` id. Disabled
  * providers stay listed by `dashboard_list_providers` so the user can
  * re-enable or remove them, but `set_active_provider` rejects them and

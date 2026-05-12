@@ -15,17 +15,26 @@ default:
 
 # Run the desktop app in dev mode. Spawns Vite at :5173 via Tauri's
 # `beforeDevCommand`, then launches the shell webview against it.
+#
+# `WEBKIT_DISABLE_DMABUF_RENDERER=1` works around WebKitGTK failing to
+# realize a GL context on hosts that don't expose a DRM render node
+# (e.g. systems where `/dev/dri/` has only `card*` and no `renderD*`).
+# Without this flag the shell window opens and immediately aborts with
+# "GDK failed to realize the GL context". Setting it forces the
+# software-composited renderer, which works everywhere at a small perf
+# cost — safe to leave on for dev.
 dev:
     @command -v cargo-tauri >/dev/null || { echo >&2 "cargo-tauri not found. Install: cargo install tauri-cli --version '^2.0' --locked"; exit 1; }
-    cd crates/forge-shell && cargo tauri dev
+    cd crates/forge-shell && WEBKIT_DISABLE_DMABUF_RENDERER=1 cargo tauri dev
 
 # Start only the Vite dev server (use with `just dev-shell` in another terminal).
 dev-vite:
     cd web && pnpm --filter app dev
 
 # Launch only the Tauri shell (Vite must already be running on :5173).
+# Same `WEBKIT_DISABLE_DMABUF_RENDERER` rationale as `just dev`.
 dev-shell:
-    cargo run -p forge-shell
+    WEBKIT_DISABLE_DMABUF_RENDERER=1 cargo run -p forge-shell
 
 # Build everything: Rust workspace (debug) + full pnpm workspace.
 build:

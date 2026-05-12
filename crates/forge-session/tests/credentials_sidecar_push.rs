@@ -128,9 +128,9 @@ async fn run_turn_pushes_credentials_frame_when_sidecar_hook_set() {
 }
 
 /// Acceptance: when the credential pull misses (`Ok(None)`), no frame is
-/// sent. Phase-1 keyless OllamaProvider relies on this — pushing an
-/// empty credential would teach the sidecar a bogus "I have a key"
-/// signal for a provider that's actually keyless.
+/// sent. Keyless providers rely on this — pushing an empty credential
+/// would teach the sidecar a bogus "I have a key" signal for a provider
+/// that's actually keyless.
 #[tokio::test]
 async fn run_turn_does_not_push_when_credential_miss() {
     let (session, provider, pending, _dir) = fixtures().await;

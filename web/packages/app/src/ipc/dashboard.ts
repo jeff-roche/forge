@@ -47,23 +47,6 @@ export async function openSession(id: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Provider
-// ---------------------------------------------------------------------------
-
-export interface ProviderStatus {
-  reachable: boolean;
-  base_url: string;
-  models: string[];
-  last_checked: string;
-  error_kind?: string;
-}
-
-/** Probe the configured AI provider and return its current status. */
-export async function providerStatus(): Promise<ProviderStatus> {
-  return invoke<ProviderStatus>('provider_status');
-}
-
-// ---------------------------------------------------------------------------
 // Provider selection (F-586)
 // ---------------------------------------------------------------------------
 
@@ -85,8 +68,6 @@ export interface ProviderEntry {
   model?: string;
   /** `base_url` of the underlying custom_openai section (custom rows only). */
   endpoint?: string;
-  /** Reserved future override (always undefined today). */
-  api_version?: string;
   /**
    * F-733: per-provider enable flag. The Providers page toggle is the only
    * writer; absent settings default to `true` so historical configs (pre
@@ -96,6 +77,15 @@ export interface ProviderEntry {
    * F-733 — still type-check; readers MUST treat `undefined` as enabled.
    */
   enabled?: boolean;
+  /**
+   * Phase B: authentication mode for named built-in instances. `'vertex'`
+   * means the row resolves auth via gcloud Application Default
+   * Credentials at request time — the dashboard suppresses the
+   * "ADD CREDENTIAL" CTA and the orange auth pill for these entries.
+   * `'api_key'` (or `undefined` for legacy payloads) keeps the existing
+   * keychain-backed flow.
+   */
+  auth_kind?: 'api_key' | 'vertex';
 }
 
 /**
@@ -108,8 +98,8 @@ export function isProviderEnabled(entry: ProviderEntry): boolean {
 }
 
 /**
- * List the three built-in providers (Ollama, Anthropic, OpenAI) plus one
- * row per user-configured `custom_openai:<name>` entry. Wraps the
+ * List the built-in providers (Anthropic, OpenAI) plus one row per
+ * user-configured `custom_openai:<name>` entry. Wraps the
  * `dashboard_list_providers` Tauri command — the
  * `dashboard_` prefix disambiguates from F-591's planned roster catalog
  * `list_providers` command (Tauri rejects duplicate command names).

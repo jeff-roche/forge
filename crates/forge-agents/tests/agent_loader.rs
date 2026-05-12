@@ -1,6 +1,6 @@
 use forge_agents::{
     load_agents, load_agents_md, load_workspace_agents, AgentDef, AgentLoader, Error,
-    AGENTS_MD_SIZE_CAP,
+    AGENTS_MD_SIZE_CAP, FORGE_DEFAULT_AGENT_NAME,
 };
 use std::fs;
 use tempfile::tempdir;
@@ -199,6 +199,63 @@ fn agent_loader_caches_agents_md_for_system_prompt_injection() {
 }
 
 #[test]
+fn load_agents_injects_builtin_forge_default() {
+    let workspace = tempdir().unwrap();
+    let user_home = tempdir().unwrap();
+
+    let agents = load_agents(workspace.path(), user_home.path()).unwrap();
+
+    let builtin = agents.iter().find(|a| a.name == FORGE_DEFAULT_AGENT_NAME);
+    assert!(
+        builtin.is_some(),
+        "expected built-in `{FORGE_DEFAULT_AGENT_NAME}` in empty-roster load"
+    );
+}
+
+#[test]
+fn user_agent_overrides_builtin_forge_default() {
+    let workspace = tempdir().unwrap();
+    let user_home = tempdir().unwrap();
+    let user_agents_dir = user_home.path().join(".agents");
+    write_agent(
+        &user_agents_dir,
+        &format!("{FORGE_DEFAULT_AGENT_NAME}.md"),
+        "---\nname: forge-default\ndescription: my override\n---\n\nUser body.",
+    );
+
+    let agents = load_agents(workspace.path(), user_home.path()).unwrap();
+
+    let matches: Vec<&AgentDef> = agents
+        .iter()
+        .filter(|a| a.name == FORGE_DEFAULT_AGENT_NAME)
+        .collect();
+    assert_eq!(matches.len(), 1, "user override should deduplicate built-in");
+    assert_eq!(matches[0].description.as_deref(), Some("my override"));
+    assert!(matches[0].body.contains("User body."));
+}
+
+#[test]
+fn workspace_agent_overrides_builtin_forge_default() {
+    let workspace = tempdir().unwrap();
+    let user_home = tempdir().unwrap();
+    let ws_agents = workspace.path().join(".agents");
+    write_agent(
+        &ws_agents,
+        &format!("{FORGE_DEFAULT_AGENT_NAME}.md"),
+        "---\nname: forge-default\ndescription: workspace override\n---\n\nWS body.",
+    );
+
+    let agents = load_agents(workspace.path(), user_home.path()).unwrap();
+
+    let matches: Vec<&AgentDef> = agents
+        .iter()
+        .filter(|a| a.name == FORGE_DEFAULT_AGENT_NAME)
+        .collect();
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].description.as_deref(), Some("workspace override"));
+}
+
+#[test]
 fn rejects_isolation_trusted_for_user_home_agents() {
     let workspace = tempdir().unwrap();
     let user_home = tempdir().unwrap();
@@ -265,8 +322,18 @@ fn agent_loader_holds_parsed_agents() {
 
     let loader = AgentLoader::load(workspace.path(), user_home.path()).unwrap();
 
-    assert_eq!(loader.agents().len(), 1);
-    assert_eq!(loader.agents()[0].name, "bot");
+    // `load_agents` injects the built-in `forge-default` plus the
+    // workspace-defined `bot` definition — both must surface through the
+    // `AgentLoader` view.
+    let names: Vec<&str> = loader.agents().iter().map(|a| a.name.as_str()).collect();
+    assert!(
+        names.contains(&FORGE_DEFAULT_AGENT_NAME),
+        "expected built-in default in roster: {names:?}"
+    );
+    assert!(
+        names.contains(&"bot"),
+        "expected workspace-defined `bot` in roster: {names:?}"
+    );
 }
 
 #[test]

@@ -41,7 +41,7 @@ The boundary between Forge's shell and its editor is deliberately well-defined: 
 | **Frontend framework** | Solid — fine-grained reactivity fits Forge's streaming UI model |
 | **Terminal backend** | `portable-pty` for PTY lifecycle + `libghostty-vt` for authoritative VT state, wired through `crates/forge-term` |
 | **Terminal rendering** | xterm.js-compatible byte stream, rendered by our Solid app; Rust-side VT state is queryable via `TerminalSession::cursor_position`, `total_rows`, and `scrollback_rows` when `forge-term`'s `ghostty-vt` feature is enabled |
-| **Provider SDKs** | `async-openai`, direct Anthropic SSE impl, OpenAI-compat for Ollama/Mistral/etc. |
+| **Provider SDKs** | `async-openai`, direct Anthropic SSE impl. OpenAI-compatible endpoints (local Ollama via preset, vLLM, Mistral, etc.) are handled by the unified `custom_openai` provider. |
 | **MCP** | `rmcp` (official Rust MCP SDK) |
 | **Agent protocol** | Native impl, MCP-compatible tool patterns |
 | **Persistence** | Filesystem only — JSONL event logs, TOML config files. No SQLite. |

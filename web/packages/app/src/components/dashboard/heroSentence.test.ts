@@ -16,10 +16,10 @@ function session(overrides: Partial<SessionSummary> = {}): SessionSummary {
 
 function provider(overrides: Partial<ProviderEntry> = {}): ProviderEntry {
   return {
-    id: 'ollama',
-    display_name: 'Ollama',
-    credential_required: false,
-    has_credential: false,
+    id: 'anthropic',
+    display_name: 'Anthropic',
+    credential_required: true,
+    has_credential: true,
     model_available: true,
     ...overrides,
   };
@@ -42,10 +42,11 @@ describe('heroSentence (F-728)', () => {
   it('returns the providers-but-no-sessions copy when at least one provider is ready', () => {
     const result = heroSentence(
       state({
-        providers: [provider({ id: 'ollama', display_name: 'Ollama' })],
+        providers: [provider({ id: 'anthropic', display_name: 'Anthropic' })],
+        credentialsPresent: { anthropic: true },
       }),
     );
-    expect(result).toBe('local Ollama connected.');
+    expect(result).toBe('Anthropic connected.');
   });
 
   it('returns the no-connected-providers copy when every provider is awaiting credentials', () => {
@@ -85,9 +86,10 @@ describe('heroSentence (F-728)', () => {
             model_available: true,
           }),
           provider({
-            id: 'ollama',
-            display_name: 'Ollama',
-            credential_required: false,
+            id: 'custom_openai:ollama',
+            display_name: 'custom_openai — ollama',
+            credential_required: true,
+            has_credential: true,
             model_available: true,
           }),
           provider({
@@ -98,11 +100,11 @@ describe('heroSentence (F-728)', () => {
             model_available: true,
           }),
         ],
-        credentialsPresent: { anthropic: true, openai: false },
+        credentialsPresent: { anthropic: true, 'custom_openai:ollama': true, openai: false },
       }),
     );
     expect(result).toBe(
-      'Two sessions active. One agent paused awaiting approval. Anthropic and local Ollama connected — OpenAI awaiting credentials.',
+      'Two sessions active. One agent paused awaiting approval. Anthropic and custom_openai — ollama connected — OpenAI awaiting credentials.',
     );
   });
 
@@ -110,10 +112,11 @@ describe('heroSentence (F-728)', () => {
     const result = heroSentence(
       state({
         sessions: [session({ id: 's1' })],
-        providers: [provider({ id: 'ollama', display_name: 'Ollama' })],
+        providers: [provider({ id: 'anthropic', display_name: 'Anthropic' })],
+        credentialsPresent: { anthropic: true },
       }),
     );
-    expect(result).toBe('One session active. local Ollama connected.');
+    expect(result).toBe('One session active. Anthropic connected.');
   });
 
   it('omits the awaiting-approval fragment when no agents are paused', () => {
@@ -157,10 +160,11 @@ describe('heroSentence (F-728)', () => {
     const result = heroSentence(
       state({
         sessions,
-        providers: [provider({ id: 'ollama', display_name: 'Ollama' })],
+        providers: [provider({ id: 'anthropic', display_name: 'Anthropic' })],
+        credentialsPresent: { anthropic: true },
       }),
     );
-    expect(result).toBe('12 sessions active. local Ollama connected.');
+    expect(result).toBe('12 sessions active. Anthropic connected.');
   });
 
   it('serializes three connected providers with a comma and `and`', () => {
@@ -173,13 +177,18 @@ describe('heroSentence (F-728)', () => {
             credential_required: true,
             has_credential: true,
           }),
-          provider({ id: 'ollama', display_name: 'Ollama' }),
-          provider({ id: 'mistral', display_name: 'Mistral' }),
+          provider({
+            id: 'openai',
+            display_name: 'OpenAI',
+            credential_required: true,
+            has_credential: true,
+          }),
+          provider({ id: 'mistral', display_name: 'Mistral', credential_required: false }),
         ],
-        credentialsPresent: { anthropic: true },
+        credentialsPresent: { anthropic: true, openai: true },
       }),
     );
-    expect(result).toBe('Anthropic, local Ollama and Mistral connected.');
+    expect(result).toBe('Anthropic, OpenAI and Mistral connected.');
   });
 
   it('treats a missing credentialsPresent entry as no credential', () => {
@@ -206,7 +215,12 @@ describe('heroSentence (F-728)', () => {
       state({
         sessions: [session({ id: 's1' })],
         providers: [
-          provider({ id: 'ollama', display_name: 'Ollama', model_available: false }),
+          provider({
+            id: 'anthropic',
+            display_name: 'Anthropic',
+            credential_required: false,
+            model_available: false,
+          }),
         ],
       }),
     );

@@ -6,8 +6,6 @@
 //! - [`window_manager`]: runtime adapter that applies a `WindowSpec` to a live
 //!   `tauri::AppHandle`. Compile-verified; no unit tests (requires a live
 //!   webview runtime).
-//! - [`dashboard`]: Provider status probe + TTL cache for the Dashboard's
-//!   ProviderPanel.
 //! - [`dashboard_sessions`]: Dashboard sessions list + open Tauri commands
 //!   and their pure helpers. The `collect_sessions` helper and `Pinger` trait
 //!   are always compiled so they can be exercised by unit tests under
@@ -36,7 +34,6 @@ pub mod context_fetch;
 // are always compiled — only the `#[tauri::command]` wrappers are gated
 // behind `webview` so non-webview unit tests link without Tauri.
 pub mod credentials_ipc;
-pub mod dashboard;
 pub mod dashboard_sessions;
 // F-597: container lifecycle UI on the Dashboard. Pure helpers
 // (`validate_container_id`, `classify_runtime_status`,
@@ -90,11 +87,6 @@ pub mod window_spec;
 pub mod ipc;
 #[cfg(feature = "webview")]
 pub mod window_manager;
-
-// Linux-only XDG desktop integration so `cargo tauri dev` shows the
-// proper dock/taskbar icon. No-op on macOS and Windows.
-#[cfg(all(feature = "webview", target_os = "linux"))]
-mod dev_desktop_entry;
 
 // Debug-only `tracing` → `log` bridge so `tauri-plugin-log`'s Webview
 // target receives forge-shell's tracing emissions and the user sees

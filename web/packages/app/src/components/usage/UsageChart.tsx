@@ -13,7 +13,7 @@
 import { For, Show, type Component } from 'solid-js';
 
 export interface UsageChartSegment {
-  /** Provider id (anthropic / openai / ollama / custom / …). Drives the swatch color. */
+  /** Provider id (anthropic / openai / local / custom / …). Drives the swatch color. */
   provider: string;
   /** Display label — defaults to `provider` when omitted. */
   label?: string;
@@ -30,7 +30,7 @@ export interface UsageChartProps {
 export function chartProviderClass(provider: string): string {
   const normalised = provider.toLowerCase();
   if (normalised === 'anthropic' || normalised === 'openai') return normalised;
-  if (normalised === 'ollama' || normalised === 'local') return 'local';
+  if (normalised === 'local') return 'local';
   return 'custom';
 }
 

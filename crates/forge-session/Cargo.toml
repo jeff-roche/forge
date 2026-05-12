@@ -152,10 +152,6 @@ name = "archive_shutdown"
 path = "tests/archive_shutdown.rs"
 
 [[test]]
-name = "provider_selection"
-path = "tests/provider_selection.rs"
-
-[[test]]
 name = "pid_file_lifecycle"
 path = "tests/pid_file_lifecycle.rs"
 

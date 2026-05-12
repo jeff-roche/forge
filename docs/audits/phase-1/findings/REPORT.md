@@ -1,3 +1,5 @@
+> **Post-Phase-3.1 note.** Findings M4, M5, H4, and H5 in this audit are all scoped to `crates/forge-providers/src/ollama.rs` (the dedicated `OllamaProvider` NDJSON decoder and URL validation). That crate was removed in Phase 3.1 in favour of a `custom_openai` preset, so those four findings are superseded by the removal itself. The original write-ups are preserved as-is for the historical record.
+
 ## Summary
 
 **Milestone:** Phase 1: Single Provider + GUI

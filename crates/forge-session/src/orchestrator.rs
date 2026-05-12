@@ -22,8 +22,8 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 /// `run_turn` consults `store.get(provider_id)` exactly once at turn start
 /// (before the request loop opens the model step). The result is **not**
 /// passed into the request loop — the [`Provider`] trait doesn't yet take
-/// per-turn auth (Phase 1 ships a keyless `OllamaProvider`; Anthropic /
-/// OpenAI providers are wiring this as their auth-injection seam).
+/// per-turn auth (the Anthropic / OpenAI providers are wiring this as
+/// their auth-injection seam).
 ///
 /// What lands today:
 ///
@@ -900,8 +900,8 @@ struct PendingToolCall {
     /// [`ChatBlock::ToolResult`] so the provider can correlate the
     /// follow-up `tool_result` / `role: "tool"` message back to the
     /// original tool use. Empty for providers that do not carry an id
-    /// on the wire (Ollama, mock); the orchestrator falls back to
-    /// `call_id` in that case via [`PendingToolCall::round_trip_id`].
+    /// on the wire (mock); the orchestrator falls back to `call_id` in
+    /// that case via [`PendingToolCall::round_trip_id`].
     provider_id: String,
 }
 
@@ -910,7 +910,7 @@ impl PendingToolCall {
     /// `ChatBlock::ToolCall` and matching `ChatBlock::ToolResult`.
     /// Prefer the provider-supplied id when present so the provider can
     /// correlate the round-trip; fall back to the orchestrator's
-    /// internal id for providers (Ollama, mock) that surface none.
+    /// internal id for providers (mock) that surface none.
     fn round_trip_id(&self) -> String {
         if self.provider_id.is_empty() {
             self.call_id.to_string()

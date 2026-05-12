@@ -120,9 +120,8 @@ pub trait Provider: Send + Sync {
 
 **Implementations in v1.**
 - `AnthropicProvider` (SSE)
-- `OpenAIProvider` (SSE, works for any OpenAI-compatible endpoint including Mistral, Groq, etc.)
-- `OllamaProvider` (local, OpenAI-compat)
-- `CustomOpenAIProvider` (user-configured base URL)
+- `OpenAIProvider` (SSE, vanilla OpenAI)
+- `CustomOpenAiProvider` (user-configured base URL + auth shape; reuses the OpenAI SSE pipeline). The dashboard's Add Provider modal ships presets — including a "local Ollama" preset that auto-fills `endpoint = http://127.0.0.1:11434/v1`, `model = llama3.2`, and marks the entry keyless — so every OpenAI-compatible target (Ollama, LM Studio, vLLM, Mistral, Groq, …) flows through this one struct.
 
 **Shape of `ChatRequest`.** Provider-agnostic. Internal. Translated to provider-specific requests inside each impl. Uses our own `Message`/`Tool`/`ContextBlock` types, not any provider's SDK types. Includes `parallel_tool_calls_allowed: bool` (true for read-only tool sets).
 

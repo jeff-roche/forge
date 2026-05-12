@@ -35,8 +35,8 @@ pub use ids::{
 pub use mcp_state::{McpStateEvent, ServerState};
 pub use roster::{McpId, McpTransport, RosterEntry, RosterScope, RosterTier, ScopedRosterEntry};
 pub use settings::{
-    AppSettings, AuthShapeSettings, CustomOpenAiEntry, NotificationMode, NotificationsSettings,
-    ProvidersSettings, SessionMode, WindowsSettings,
+    AppSettings, AuthShapeSettings, BuiltinAuthKind, BuiltinInstanceEntry, CustomOpenAiEntry,
+    NotificationMode, NotificationsSettings, ProvidersSettings, SessionMode, WindowsSettings,
 };
 pub use skill::{Skill, SkillId, SkillIdError};
 pub use tool::Tool;

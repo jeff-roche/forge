@@ -6,11 +6,6 @@
 //! and F-584 shipped near-identical helpers in parallel; this module is the
 //! single home those helpers consolidate into.
 //!
-//! Ollama keeps its own [`crate::ollama::ClientConfig`] and helpers — its
-//! public-API surface (used by integration tests) and second `request_client`
-//! both diverge from the SSE-streaming providers and were intentionally left
-//! untouched by the F-679 refactor.
-//!
 //! ## SSRF posture (F-647)
 //!
 //! [`build_stream_client`] is the single construction site for the

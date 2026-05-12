@@ -333,7 +333,7 @@ The current `run_turn` (`crates/forge-session/src/orchestrator.rs:165`) takes an
 - **Files to touch:** `crates/forge-session/src/orchestrator.rs` (the `pull_active_credential` path at line 68), the new sidecar message handlers.
 - **Contract:**
   - Daemon-side: when `CredentialContext` is present, push a `Credentials` frame to the sidecar before sending `RunTurn`.
-  - Sidecar-side: stash the credential in a `SecretString`, hand it to the provider's per-request auth shape (Phase-1 keyless OllamaProvider — no-op; Anthropic/OpenAI when they land).
+  - Sidecar-side: stash the credential in a `SecretString`, hand it to the provider's per-request auth shape (a keyless `custom_openai` preset — no-op; Anthropic / OpenAI / authed `custom_openai` consume it).
 - **Acceptance:** Trace log emits `pushed credential` with `provider_id` + `instance_id`. No credential value appears in any log at any level.
 
 ### Step 7: Crash-dump writer and observability glue (§10) — shipped (#668)

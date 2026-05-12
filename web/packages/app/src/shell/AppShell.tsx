@@ -13,6 +13,7 @@ import { Sidebar } from './Sidebar';
 import { StatusBar } from './StatusBar';
 import { activeOpenFile, activeWorkspaceRoot } from '../stores/session';
 import { CommandPalette, registerBuiltins } from '../commands';
+import { ToastHost } from '../components/ToastHost';
 import './AppShell.css';
 
 /**
@@ -97,6 +98,7 @@ export const AppShell: Component<{ children?: JSX.Element }> = (props) => {
       </div>
       <StatusBar />
       <CommandPalette />
+      <ToastHost />
     </div>
   );
 };
