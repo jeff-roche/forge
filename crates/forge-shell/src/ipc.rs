@@ -3691,12 +3691,13 @@ fn collect_agents(
     user_home: &std::path::Path,
 ) -> Result<Vec<forge_core::ScopedRosterEntry>, String> {
     let workspace_defs = match workspace_root {
-        Some(ws) => forge_agents::load_workspace_agents(ws)
-            .map_err(|e| format!("load agents: {e}"))?,
+        Some(ws) => {
+            forge_agents::load_workspace_agents(ws).map_err(|e| format!("load agents: {e}"))?
+        }
         None => Vec::new(),
     };
-    let user_defs = forge_agents::load_user_agents(user_home)
-        .map_err(|e| format!("load agents: {e}"))?;
+    let user_defs =
+        forge_agents::load_user_agents(user_home).map_err(|e| format!("load agents: {e}"))?;
 
     let workspace_names: std::collections::HashSet<String> =
         workspace_defs.iter().map(|d| d.name.clone()).collect();
