@@ -117,7 +117,7 @@ impl<'a> ParsedProviderId<'a> {
 /// Classify a provider id without consulting settings. The result is used
 /// by validation, routing, and the dashboard list to handle the three
 /// supported id shapes uniformly. Vendor strings are matched against
-/// [`BUILTIN_ADDABLE_KINDS`] — broader than [`BUILTIN_PROVIDERS`] because
+/// [`BUILTIN_ADDABLE_KINDS`] — broader than `BUILTIN_PROVIDERS` because
 /// `mistral` is an addable slug whose runtime adapter has not landed yet
 /// (the schema still recognises it). Anything with the `custom_openai:`
 /// prefix flows through `CustomOpenAi`.
