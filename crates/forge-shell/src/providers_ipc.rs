@@ -330,7 +330,7 @@ pub fn build_provider_list(
             _ => None,
         })
         .collect();
-    named.sort_by(|(a, _), (b, _)| a.cmp(b));
+    named.sort_by_key(|a| a.0);
     for (id, enabled) in named {
         if let ParsedProviderId::BuiltinNamed { vendor, name } = parse_provider_id(id) {
             let auth_kind = instance_auth(vendor, name);
