@@ -151,7 +151,7 @@ describe('TestConnectionButton success path', () => {
           model_count: 7,
         }) satisfies TestProviderConnectionOutput,
     });
-    const toast = vi.fn<[ToastKind, string], void>();
+    const toast = vi.fn<(kind: ToastKind, msg: string) => void>();
     const { getByTestId } = renderButton('anthropic', { toast });
 
     fireEvent.click(getByTestId('test-connection-button-anthropic'));
@@ -171,7 +171,7 @@ describe('TestConnectionButton success path', () => {
     installInvokeStub({
       test: async () => ({ ok: true }) satisfies TestProviderConnectionOutput,
     });
-    const toast = vi.fn<[ToastKind, string], void>();
+    const toast = vi.fn<(kind: ToastKind, msg: string) => void>();
     const { getByTestId } = renderButton('anthropic', { toast });
 
     fireEvent.click(getByTestId('test-connection-button-anthropic'));
@@ -192,7 +192,7 @@ describe('TestConnectionButton error path', () => {
         throw new Error(verbatim);
       },
     });
-    const toast = vi.fn<[ToastKind, string], void>();
+    const toast = vi.fn<(kind: ToastKind, msg: string) => void>();
     const { getByTestId } = renderButton('anthropic', { toast });
 
     fireEvent.click(getByTestId('test-connection-button-anthropic'));
@@ -209,7 +209,7 @@ describe('TestConnectionButton error path', () => {
         throw new Error(verbatim);
       },
     });
-    const toast = vi.fn<[ToastKind, string], void>();
+    const toast = vi.fn<(kind: ToastKind, msg: string) => void>();
     const { getByTestId } = renderButton('anthropic', { toast });
 
     fireEvent.click(getByTestId('test-connection-button-anthropic'));
@@ -247,7 +247,7 @@ describe('TestConnectionButton invoke payload', () => {
         return { ok: true, latency_ms: 10n as unknown as bigint } as TestProviderConnectionOutput;
       },
     });
-    const toast = vi.fn<[ToastKind, string], void>();
+    const toast = vi.fn<(kind: ToastKind, msg: string) => void>();
     const { getByTestId } = renderButton('anthropic', { toast });
 
     fireEvent.click(getByTestId('test-connection-button-anthropic'));

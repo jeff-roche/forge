@@ -257,7 +257,6 @@ const ForgeBrandMark: Component = () => (
     class="sidebar__brand-mark"
     viewBox="0 0 512 512"
     aria-hidden="true"
-    focusable="false"
   >
     <rect x="0" y="0" width="512" height="512" rx="72" ry="72" fill="#2a0800" />
     <g fill="#ff4a12">
