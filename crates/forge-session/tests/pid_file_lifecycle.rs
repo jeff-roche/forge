@@ -90,6 +90,10 @@ async fn forged_writes_two_line_pid_file_with_self_starttime() {
         .env("FORGE_SOCKET_PATH", &sock_path)
         .env("FORGE_WORKSPACE", &workspace)
         .env("FORGE_PID_FILE", &pid_file)
+        // F-743: forged refuses to start without an explicit provider
+        // spec. These tests only exercise the pid-file lifecycle and
+        // never drive a turn, so Mock is the right choice.
+        .env("FORGE_PROVIDER", "mock")
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .spawn()
@@ -150,6 +154,10 @@ async fn forged_removes_pid_file_on_sigterm() {
         .env("FORGE_SOCKET_PATH", &sock_path)
         .env("FORGE_WORKSPACE", &workspace)
         .env("FORGE_PID_FILE", &pid_file)
+        // F-743: forged refuses to start without an explicit provider
+        // spec. These tests only exercise the pid-file lifecycle and
+        // never drive a turn, so Mock is the right choice.
+        .env("FORGE_PROVIDER", "mock")
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .spawn()
@@ -200,6 +208,10 @@ async fn forged_refuses_to_start_when_pid_file_already_exists() {
         .env("FORGE_SOCKET_PATH", &sock_path)
         .env("FORGE_WORKSPACE", &workspace)
         .env("FORGE_PID_FILE", &pid_file)
+        // F-743: pass an explicit provider spec so forged reaches the
+        // pid-file-exists check rather than failing earlier on
+        // provider_spec_required.
+        .env("FORGE_PROVIDER", "mock")
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .output()
