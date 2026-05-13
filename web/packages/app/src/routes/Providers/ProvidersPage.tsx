@@ -180,12 +180,27 @@ function providerBrand(id: string): ProviderBrand {
 
 type PillVariant = 'ready' | 'auth';
 
+/**
+ * F-755: a row is "not ready" whenever the credential probe didn't
+ * return `'present'`. Both `'missing'` (no entry stored) and
+ * `'backend_error'` (keyring locked, Secret Service unreachable) flip
+ * the pill to `auth`; the distinction surfaces only in the tooltip /
+ * remediation copy below.
+ */
+function credentialNotReady(entry: ProviderEntry): boolean {
+  if (!entry.credential_required) return false;
+  // Pre-F-755 fixtures may omit `credential_state`. Fall back to the
+  // legacy `has_credential` bit so historical payloads keep working.
+  const state = entry.credential_state ?? (entry.has_credential ? 'present' : 'missing');
+  return state !== 'present';
+}
+
 function pillVariant(entry: ProviderEntry): PillVariant {
   // Phase B: Vertex-backed rows resolve auth via gcloud ADC at request
   // time and supply the model per request, so the credential /
   // model-availability heuristics do not apply.
   if (entry.auth_kind === 'vertex') return 'ready';
-  if (entry.credential_required && !entry.has_credential) return 'auth';
+  if (credentialNotReady(entry)) return 'auth';
   if (!entry.model_available) return 'auth';
   return 'ready';
 }
@@ -207,6 +222,14 @@ function rowTooltip(entry: ProviderEntry, variant: PillVariant): string {
     return 'Authenticates via gcloud Application Default Credentials. No API key needed — run `gcloud auth application-default login` if requests start failing.';
   }
   if (variant === 'auth') {
+    if (entry.credential_required && entry.credential_state === 'backend_error') {
+      // F-755: the credential probe errored — typically a locked keyring
+      // or a Secret Service backend that isn't running. Pointing the
+      // user at the Add-provider modal here is actively wrong (a key
+      // may already exist), so the tooltip names the failure and lists
+      // OS-specific remediation pointers instead.
+      return `${entry.display_name} credential store is unreachable — unlock your OS keyring (Linux: start \`gnome-keyring-daemon\` or check Secret Service; macOS: unlock the login keychain; Windows: sign in to Credential Manager).`;
+    }
     if (entry.credential_required && !entry.has_credential) {
       return `${entry.display_name} needs an API key — add one via the Add provider modal.`;
     }
