@@ -2437,3 +2437,72 @@ describe('ToolCallCard Phase 3 — CSS drift fixture (F-447)', () => {
     );
   });
 });
+
+describe('ChatPane retry flow (F-749)', () => {
+  it('drops the failed user turn and error card on retry and re-sends the original text', async () => {
+    invokeMock.mockResolvedValue(undefined);
+    // Stage a failed exchange: prior good turn pair + a failing user turn
+    // followed by a `TurnError`. Mirrors the orchestrator's wire ordering
+    // (UserMessage → AssistantMessage(empty, finalised) → TurnError).
+    pushEvent(SID, { kind: 'UserMessage', text: 'hello', message_id: 'msg-good' });
+    pushEvent(SID, { kind: 'AssistantMessage', text: 'hi back', message_id: 'msg-good' });
+    pushEvent(SID, { kind: 'UserMessage', text: 'please fail', message_id: 'msg-fail' });
+    pushEvent(SID, { kind: 'AssistantMessage', text: '', message_id: 'msg-fail' });
+    pushEvent(SID, {
+      kind: 'TurnError',
+      message_id: 'msg-fail',
+      error_kind: 'network',
+      message: 'transport error',
+      retriable: true,
+    });
+
+    const { getByTestId, queryByTestId } = render(() => <ChatPane />);
+    // Sanity: the error card is rendered before retry.
+    expect(getByTestId('turn-error-card-msg-fail')).toBeTruthy();
+
+    // Click Retry. The handler must (a) remove the error card AND the
+    // originating user turn from the transcript, (b) invoke
+    // session_send_message with the original failed-turn text.
+    fireEvent.click(getByTestId('turn-error-retry-msg-fail'));
+
+    // Error card is gone.
+    expect(queryByTestId('turn-error-card-msg-fail')).toBeNull();
+    // The prior good exchange survives; the failing user turn is gone too.
+    // Bubble-text assertions are coarse-grained — Composer + assistant
+    // bubbles share data-testids, so we go through the store directly.
+    const turns = (await import('../../stores/messages')).getMessagesState(SID).turns;
+    // After retry: [user "hello", assistant "hi back"] — the failing
+    // pair was spliced.
+    const userTexts = turns
+      .filter((t) => t.type === 'user')
+      .map((t) => (t as { text: string }).text);
+    expect(userTexts).toEqual(['hello']);
+
+    // session_send_message fired with the original failed-turn text.
+    expect(invokeMock).toHaveBeenCalledWith('session_send_message', {
+      sessionId: SID,
+      text: 'please fail',
+    });
+  });
+
+  it('does not call session_send_message when there is no preceding user turn', () => {
+    // Defensive: the orchestrator's protocol guarantees a UserMessage
+    // precedes every TurnError, but a corrupt replay could theoretically
+    // land a TurnError as the very first turn. The handler must no-op
+    // rather than firing a send with empty text.
+    pushEvent(SID, {
+      kind: 'TurnError',
+      message_id: 'msg-orphan',
+      error_kind: 'network',
+      message: 'transport error',
+      retriable: true,
+    });
+
+    const { getByTestId } = render(() => <ChatPane />);
+    fireEvent.click(getByTestId('turn-error-retry-msg-orphan'));
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      'session_send_message',
+      expect.anything(),
+    );
+  });
+});

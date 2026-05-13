@@ -16,6 +16,7 @@ import {
   activeVariantPosition,
   liveVariantCount,
   neighbourVariantId,
+  removeFailedTurnPair,
   type ChatTurn,
   type BranchGroup,
   type ToolCallStatus,
@@ -1613,6 +1614,14 @@ export const ChatPane: Component<ChatPaneProps> = (props) => {
                 // the transcript to find the nearest user turn before the
                 // error is sufficient. No new IPC primitive needed — the
                 // existing `sessionSendMessage` is the right call site.
+                //
+                // We also strip the failed exchange (user turn + error card)
+                // from the local transcript *before* dispatching the new
+                // send, so the user sees a single fresh attempt rather than
+                // a duplicate user bubble stacked above the new turn. See
+                // `removeFailedTurnPair` for the rationale on doing this
+                // store-side rather than via a new `MessageSuperseded`
+                // event.
                 const turns = state().turns;
                 const errorIdx = turns.findIndex(
                   (t) => t.type === 'turn_error' && t.message_id === turn.message_id,
@@ -1626,10 +1635,15 @@ export const ChatPane: Component<ChatPaneProps> = (props) => {
                 })();
                 const onRetry = (): void => {
                   const id = sessionId();
-                  if (!id || !priorUser) return;
+                  if (!id || !priorUser || errorIdx < 0) return;
+                  // Capture the text BEFORE we splice — the priorUser
+                  // reference survives because `splice` mutates in place
+                  // but the captured `.text` string is a value copy.
+                  const text = priorUser.text;
+                  removeFailedTurnPair(id, errorIdx);
                   setAwaitingResponse(id, true);
                   setUserScrolledUp(false);
-                  sessionSendMessage(id, priorUser.text).catch((err) =>
+                  sessionSendMessage(id, text).catch((err) =>
                     reportInvokeError(id, 'session_send_message', err),
                   );
                 };

@@ -4,6 +4,7 @@ import {
   setAwaitingResponse,
   getMessagesState,
   resetMessagesStore,
+  removeFailedTurnPair,
   liveVariantCount,
   activeVariantPosition,
   neighbourVariantId,
@@ -640,6 +641,53 @@ describe('messages store', () => {
       if (turn.type !== 'turn_error') throw new Error('expected turn_error');
       expect(turn.retry_after_secs).toBe(17);
       expect(turn.raw).toBe('HTTP 429: too many requests');
+    });
+  });
+
+  describe('removeFailedTurnPair (F-749 retry)', () => {
+    it('removes the error card and the immediately preceding user turn', () => {
+      pushEvent(SID, { kind: 'UserMessage', text: 'a', message_id: 'msg-a' });
+      pushEvent(SID, { kind: 'AssistantMessage', text: 'A', message_id: 'msg-a-r' });
+      pushEvent(SID, { kind: 'UserMessage', text: 'b', message_id: 'msg-b' });
+      pushEvent(SID, {
+        kind: 'TurnError',
+        message_id: 'msg-b',
+        error_kind: 'network',
+        message: 'transport',
+        retriable: true,
+      });
+
+      const before = getMessagesState(SID).turns;
+      // Expected: [user a, assistant A, user b, turn_error]
+      expect(before.map((t) => t.type)).toEqual([
+        'user',
+        'assistant',
+        'user',
+        'turn_error',
+      ]);
+
+      // Strip the failed pair (indices 2..3) — leaves the prior exchange intact.
+      removeFailedTurnPair(SID, 3);
+      const after = getMessagesState(SID).turns;
+      expect(after.map((t) => t.type)).toEqual(['user', 'assistant']);
+      expect((after[0]! as { text: string }).text).toBe('a');
+    });
+
+    it('is a no-op when index is out of range', () => {
+      pushEvent(SID, { kind: 'UserMessage', text: 'a', message_id: 'msg-a' });
+      pushEvent(SID, {
+        kind: 'TurnError',
+        message_id: 'msg-a',
+        error_kind: 'network',
+        message: 'transport',
+        retriable: true,
+      });
+      const lenBefore = getMessagesState(SID).turns.length;
+      // index 99 is past the end; defensive guard must return without mutation
+      removeFailedTurnPair(SID, 99);
+      // index 0 would underflow (`errorIdx - 1 == -1`); also a no-op
+      removeFailedTurnPair(SID, 0);
+      expect(getMessagesState(SID).turns).toHaveLength(lenBefore);
     });
   });
 });
