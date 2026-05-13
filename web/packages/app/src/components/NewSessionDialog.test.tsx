@@ -8,6 +8,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, waitFor } from '@solidjs/testing-library';
+import { MemoryRouter, Route } from '@solidjs/router';
 
 // Mock the dialog plugin before importing the SUT — the real plugin throws
 // outside a Tauri runtime. The mock is reset per-test via `mockOpenDialog`.
@@ -343,6 +344,73 @@ describe('NewSessionDialog spawn-failed state', () => {
     // Retry — error clears once submit fires again.
     fireEvent.click(getByTestId('new-session-submit'));
     await waitFor(() => expect(attempts).toBe(2));
+  });
+
+  // F-746: pre-spawn credential validation surfaces a typed error from
+  // session_start with the reason `credentials_missing for provider <id>`.
+  // The dialog parses the provider id out of the message and renders an
+  // inline CTA that deep-links to `/providers#<id>` so the user can
+  // configure the missing credential without leaving the new-session
+  // flow blind. The CTA uses `@solidjs/router`'s `<A>` element, so this
+  // test renders the dialog inside a `MemoryRouter`.
+  it('renders a Configure provider CTA on credentials_missing error', async () => {
+    const errMsg = 'session_start: credentials_missing for provider anthropic';
+    installInvokeStub({
+      sessionStart: async () => {
+        throw new Error(errMsg);
+      },
+    });
+    setActiveWorkspaceRoot('/work/repo');
+    const onClose = vi.fn();
+    const onSpawned = vi.fn();
+    const { getByTestId } = render(() => (
+      <MemoryRouter>
+        <Route
+          path="/"
+          component={() => (
+            <NewSessionDialog open={true} onClose={onClose} onSpawned={onSpawned} />
+          )}
+        />
+      </MemoryRouter>
+    ));
+
+    await waitFor(() => expect(getByTestId('provider-select')).toBeInTheDocument());
+
+    fireEvent.click(getByTestId('new-session-submit'));
+
+    await waitFor(() => expect(getByTestId('new-session-error')).toBeInTheDocument());
+    const alert = getByTestId('new-session-error');
+    expect(alert).toHaveTextContent(errMsg);
+
+    const cta = getByTestId('new-session-error-cta');
+    expect(cta).toBeInTheDocument();
+    expect(cta.getAttribute('href')).toBe('/providers#anthropic');
+
+    // Clicking the CTA closes the dialog so navigation can replace the
+    // dashboard route without the modal lingering on top of it.
+    fireEvent.click(cta);
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  // Non-credential errors must NOT render the CTA — only the verbatim
+  // daemon message. Guards against an over-eager substring match catching
+  // legitimate errors that happen to mention "credentials".
+  it('does not render the CTA for unrelated session_start errors', async () => {
+    installInvokeStub({
+      sessionStart: async () => {
+        throw new Error(
+          'session_start: workspace not accessible: No such file or directory (os error 2)',
+        );
+      },
+    });
+    setActiveWorkspaceRoot('/work/repo');
+    const { getByTestId, queryByTestId } = renderDialog();
+    await waitFor(() => expect(getByTestId('provider-select')).toBeInTheDocument());
+
+    fireEvent.click(getByTestId('new-session-submit'));
+    await waitFor(() => expect(getByTestId('new-session-error')).toBeInTheDocument());
+
+    expect(queryByTestId('new-session-error-cta')).toBeNull();
   });
 
   it('surfaces a client-side error when workspace is whitespace-only', async () => {

@@ -158,6 +158,20 @@
   word-break: break-word;
 }
 
+/* F-746: inline "Configure provider" CTA appended to the error region
+ * when `session_start` rejects with `credentials_missing for provider
+ * <id>`. Routes to `/providers#<id>` so the deep-link scrolls the
+ * Providers page to the offending row. */
+.new-session-dialog__error-cta {
+  color: var(--color-ember-400);
+  text-decoration: underline;
+}
+
+.new-session-dialog__error-cta:hover,
+.new-session-dialog__error-cta:focus-visible {
+  color: var(--color-ember-300);
+}
+
 .new-session-dialog__actions {
   display: flex;
   justify-content: flex-end;
