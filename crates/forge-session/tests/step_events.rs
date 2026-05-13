@@ -110,6 +110,7 @@ async fn capture_turn_events(auto_approve: bool) -> Vec<Event> {
             None, // F-587: keyless test wiring
             None, // F-601: no active agent — memory off in this test
             None,
+            None, // F-752
         )
         .await
         .unwrap();

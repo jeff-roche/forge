@@ -107,6 +107,7 @@ async fn agent_spawn_from_live_turn_registers_child_and_emits_sub_agent_spawned(
         None, // mcp — F-132 (no MCP servers in this test)
         None, // dispatcher_cache — F-567 (test exercises legacy build path)
         None, // credentials — F-587 (this test exercises a keyless mock path)
+        None, // F-752
     )
     .await
     .expect("run_turn should complete");

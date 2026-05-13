@@ -114,6 +114,7 @@ async fn spawn_daemon(dir: &TempDir, scripts: Vec<String>) -> (std::path::PathBu
             None,
             None,
             Some(server_user_home),
+            None, // F-752
         )
         .await
         .unwrap();
@@ -415,6 +416,7 @@ async fn pause_during_tool_approval_does_not_kill_in_flight_tool() {
             None,
             None,
             None,
+            None, // F-752
         )
         .await
         .unwrap();

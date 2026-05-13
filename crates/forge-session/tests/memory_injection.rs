@@ -149,6 +149,7 @@ async fn serve_with_session_accepts_typed_active_agent_parameter() {
             // disable memory and the session continues normally.
             Some("scribe".to_string()),
             None,
+            None, // F-752
         )
         .await
         .unwrap();

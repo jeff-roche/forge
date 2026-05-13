@@ -84,6 +84,7 @@ async fn run_failing_turn(log_path: PathBuf, provider: ErrorProvider) -> Vec<Eve
         None,
         None,
         None,
+        None, // F-752
     )
     .await;
 
