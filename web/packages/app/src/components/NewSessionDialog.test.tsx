@@ -419,10 +419,11 @@ describe('NewSessionDialog spawn-failed state', () => {
     fireEvent.click(submit);
     await waitFor(() => expect(getByTestId('new-session-error')).toBeInTheDocument());
 
-    // Give any scheduled microtask a chance to run; focus must remain on the
-    // submit button because there is no CTA to migrate to.
-    await Promise.resolve();
-    await Promise.resolve();
+    // Yield a full task so every queued microtask drains; focus must remain
+    // on the submit button because there is no CTA to migrate to. A
+    // `setTimeout(0)` is more resilient than chained `Promise.resolve()` —
+    // any future async hop in the impl would still be flushed here.
+    await new Promise((r) => setTimeout(r, 0));
     expect(document.activeElement).toBe(submit);
   });
 
