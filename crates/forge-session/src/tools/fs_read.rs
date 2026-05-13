@@ -65,3 +65,30 @@ impl Tool for FsReadTool {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! F-750: lock the `approval_preview` wire-shape so the front-end
+    //! tool-approval card renders identically regardless of which provider
+    //! (Ollama / Anthropic / OpenAI) emitted the call. The web client
+    //! consumes `description` verbatim — drift here means a regression in
+    //! the user-visible consent text.
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn approval_preview_shows_path() {
+        let preview = FsReadTool.approval_preview(&json!({ "path": "/tmp/foo.txt" }));
+        assert_eq!(preview.description, "Read file '/tmp/foo.txt'");
+    }
+
+    #[test]
+    fn approval_preview_tolerates_missing_path() {
+        // Provider tool-call envelopes occasionally arrive empty (Anthropic
+        // streams `input_json_delta`s; a truncated stream can leave args
+        // empty). The preview must still render so the user sees the consent
+        // prompt rather than a blank card.
+        let preview = FsReadTool.approval_preview(&json!({}));
+        assert_eq!(preview.description, "Read file ''");
+    }
+}

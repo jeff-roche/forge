@@ -61,3 +61,41 @@ impl Tool for FsWriteTool {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! F-750: pin the consent text the web client renders for `fs.write`.
+    //! `forge_fs::write_preview` decides the shape — the assertions here
+    //! verify both that path + content surface through and that empty args
+    //! still produce a non-empty description (avoids a silent "blank
+    //! preview" regression when a provider streams an incomplete envelope).
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn approval_preview_shows_path_and_content_summary() {
+        // Pin the exact wire shape — same DoD contract as the `fs.read`
+        // and `shell.exec` tests in this milestone. `forge_fs::write_preview`
+        // owns the format string; locking it here means a change there fails
+        // this test loudly before it can drift the web client's consent card.
+        let preview = FsWriteTool.approval_preview(&json!({
+            "path": "/tmp/bar.txt",
+            "content": "hello",
+        }));
+        assert_eq!(
+            preview.description,
+            "Write file /tmp/bar.txt (5 bytes)\nhello",
+        );
+    }
+
+    #[test]
+    fn approval_preview_tolerates_missing_args() {
+        // Same defensive contract as fs.read: render *something* so the
+        // approval card surfaces rather than presenting a blank field.
+        let preview = FsWriteTool.approval_preview(&json!({}));
+        assert!(
+            !preview.description.is_empty(),
+            "preview must remain non-empty for missing args",
+        );
+    }
+}

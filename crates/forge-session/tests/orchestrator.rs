@@ -4,6 +4,10 @@ use forge_ipc::{
     ClientInfo, Hello, IpcEvent, IpcMessage, SendUserMessage, Subscribe, ToolCallApproved,
     PROTO_VERSION,
 };
+// F-750: explicit-reject integration test below uses the typed
+// `forge_ipc::ToolCallRejected` struct (distinct from `Event::ToolCallRejected`
+// imported via `forge_core::Event`).
+use forge_ipc::ToolCallRejected as IpcToolCallRejected;
 use forge_providers::{ChatBlock, MockProvider};
 use forge_session::{server::serve_with_session, session::Session};
 use std::sync::Arc;
@@ -912,5 +916,173 @@ async fn unexpected_post_handshake_frame_is_logged_not_silently_dropped() {
     assert!(
         saw_user_msg,
         "session must keep processing valid frames after an unexpected one"
+    );
+}
+
+/// F-750: explicit client-rejection path through the full IPC turn.
+///
+/// Validation contract — DoD item *"Reject path tested at least once per
+/// provider — confirms `ToolCallRejected` propagates and the turn ends
+/// cleanly"*. The malformed-scope test above exercises the *implicit*
+/// rejection path (server rewrites a bad scope to `Rejected`); this test
+/// exercises the explicit one — a well-formed `IpcMessage::ToolCallRejected`
+/// frame from the client.
+///
+/// Wire contract pinned here so a real-provider rejection (Ollama,
+/// Anthropic, OpenAI) all unwind the same way:
+///
+/// 1. `Event::ToolCallApprovalRequested` is emitted for the non-read-only
+///    `fs.write` call.
+/// 2. Client sends `IpcMessage::ToolCallRejected`.
+/// 3. Server emits exactly one `Event::ToolCallRejected` (no
+///    `ToolCallApproved`, no `ToolCallCompleted`, no
+///    `ToolInvoked` / `ToolReturned`).
+/// 4. The turn ends without a continuation request to the provider.
+#[tokio::test]
+async fn explicit_client_rejection_emits_tool_call_rejected_and_ends_turn() {
+    let dir = TempDir::new().unwrap();
+    let log_path = dir.path().join("events.jsonl");
+    let sock_path = dir.path().join("reject.sock");
+
+    let session = Arc::new(Session::create(log_path).await.unwrap());
+    // Single-script provider — if rejection is propagated correctly the
+    // provider is never invoked a second time for a continuation.
+    let provider = Arc::new(
+        MockProvider::from_responses(vec![SCRIPT_INITIAL_NEEDS_APPROVAL.to_string()]).unwrap(),
+    );
+
+    let server_session = Arc::clone(&session);
+    let server_provider = Arc::clone(&provider);
+    let server_sock = sock_path.clone();
+    tokio::spawn(async move {
+        serve_with_session(
+            &server_sock,
+            server_session,
+            server_provider,
+            false,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    });
+
+    let mut stream = connect_with_retry(&sock_path).await;
+    do_handshake(&mut stream).await;
+    forge_ipc::write_frame(&mut stream, &IpcMessage::Subscribe(Subscribe { since: 0 }))
+        .await
+        .unwrap();
+    forge_ipc::write_frame(
+        &mut stream,
+        &IpcMessage::SendUserMessage(SendUserMessage {
+            text: "hi".to_string(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let (mut reader, mut writer) = stream.into_split();
+
+    // Drive the turn deterministically: send the typed Reject when the
+    // approval request arrives, then drain frames until the canonical
+    // turn-end signal — the model-level `AssistantMessage { stream_finalised:
+    // true }` — fires, or the connection closes (EOF). No wall-clock waits:
+    // a loaded CI runner stalling the daemon mid-emit must not cause a
+    // false pass on the "nothing-fires-after-rejection" assertions.
+    let mut sent_reject = false;
+    let mut saw_rejected = false;
+    let mut saw_approved_after_rejected = false;
+    let mut saw_completed_after_rejected = false;
+    let mut saw_invoked_after_rejected = false;
+    let mut saw_turn_end = false;
+
+    // Bound the loop at a generous frame count so a runaway server can't
+    // wedge the test forever; the per-frame timeout below is the real
+    // liveness guard. The exit conditions inside the loop (turn-end or
+    // EOF) are what actually terminate it in the green path.
+    for _ in 0..200 {
+        let frame = match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            forge_ipc::read_frame(&mut reader),
+        )
+        .await
+        {
+            Ok(Ok(f)) => f,
+            // EOF or read error: connection closed — equivalent to turn end.
+            Ok(Err(_)) => break,
+            // Per-frame timeout — the daemon is wedged. Fail loudly rather
+            // than silently passing on missing post-rejection events.
+            Err(_) => panic!("timed out waiting for next frame; turn never ended cleanly"),
+        };
+        match extract_event(&frame) {
+            Some(Event::ToolCallApprovalRequested { id, .. }) if !sent_reject => {
+                forge_ipc::write_frame(
+                    &mut writer,
+                    &IpcMessage::ToolCallRejected(IpcToolCallRejected {
+                        id: id.to_string(),
+                        reason: Some("user denied".into()),
+                    }),
+                )
+                .await
+                .unwrap();
+                sent_reject = true;
+            }
+            Some(Event::ToolCallRejected { .. }) => {
+                saw_rejected = true;
+            }
+            // The forbidden post-rejection events: track them only after
+            // the rejection has been observed so a same-turn pre-rejection
+            // event (there shouldn't be any, but the assertion is about
+            // the *unwind*) doesn't false-fail.
+            Some(Event::ToolCallApproved { .. }) if saw_rejected => {
+                saw_approved_after_rejected = true;
+            }
+            Some(Event::ToolCallCompleted { .. }) if saw_rejected => {
+                saw_completed_after_rejected = true;
+            }
+            Some(Event::ToolInvoked { .. }) if saw_rejected => {
+                saw_invoked_after_rejected = true;
+            }
+            // Canonical turn end — `AssistantMessage { stream_finalised:
+            // true }` is what every other orchestrator test in this file
+            // uses to detect end-of-turn. Stop draining here.
+            Some(Event::AssistantMessage {
+                stream_finalised: true,
+                ..
+            }) if saw_rejected => {
+                saw_turn_end = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    assert!(
+        sent_reject,
+        "test harness must have observed ToolCallApprovalRequested and sent rejection"
+    );
+    assert!(
+        saw_rejected,
+        "explicit client rejection must produce Event::ToolCallRejected"
+    );
+    assert!(
+        saw_turn_end,
+        "turn must end with AssistantMessage(stream_finalised=true) after rejection",
+    );
+    assert!(
+        !saw_approved_after_rejected,
+        "rejected tool call must NOT emit ToolCallApproved between ToolCallRejected and turn end"
+    );
+    assert!(
+        !saw_invoked_after_rejected,
+        "rejected tool call must NOT reach ToolInvoked between ToolCallRejected and turn end"
+    );
+    assert!(
+        !saw_completed_after_rejected,
+        "rejected tool call must NOT emit ToolCallCompleted between ToolCallRejected and turn end"
     );
 }

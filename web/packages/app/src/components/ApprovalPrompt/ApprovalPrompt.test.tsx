@@ -107,6 +107,25 @@ describe('ApprovalPrompt rendering', () => {
     fireEvent.click(getByTestId('approve-dropdown-btn'));
     expect(getByTestId('scope-tool-btn')).toBeInTheDocument();
   });
+
+  // F-750 — defensive: even though the orchestrator auto-approves `fs.read`
+  // (read-only fast-path, #647), the prompt component must still render a
+  // sensible interactive card if the auto-approve path is ever disabled or
+  // pre-empted. The card must show the preview and Once/ThisTool scopes —
+  // but NOT the file-scope options, because `fs.read` is not a mutating
+  // file tool (matches the `isFileTool` allow-list of `fs.edit` / `fs.write`).
+  it('renders fs.read with preview and no file-scope buttons', () => {
+    const { getByTestId, queryByTestId } = renderPrompt({
+      toolName: 'fs.read',
+      argsJson: JSON.stringify({ path: '/tmp/foo.txt' }),
+    });
+    expect(getByTestId('approval-preview')).toBeInTheDocument();
+    fireEvent.click(getByTestId('approve-dropdown-btn'));
+    expect(getByTestId('scope-once-btn')).toBeInTheDocument();
+    expect(getByTestId('scope-tool-btn')).toBeInTheDocument();
+    expect(queryByTestId('scope-file-btn')).not.toBeInTheDocument();
+    expect(queryByTestId('scope-pattern-btn')).not.toBeInTheDocument();
+  });
 });
 
 // ---------------------------------------------------------------------------
