@@ -1,7 +1,13 @@
 use anyhow::Result;
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+use forge_core::credentials::KeyringStore;
+use forge_core::credentials::{Credentials, EnvFallbackStore, LayeredStore};
 use forge_core::Event;
+use forge_providers::anthropic::{AnthropicProvider, DEFAULT_MAX_TOKENS};
 use forge_providers::ollama::OllamaProvider;
+use forge_providers::openai::OpenAiProvider;
 use forge_providers::MockProvider;
+use forge_session::orchestrator::CredentialContext;
 use forge_session::{
     log_bridge,
     pid_file::OwnedPidFile,
@@ -200,7 +206,84 @@ async fn main() -> Result<()> {
             )
             .await
         }
+        // F-745: Anthropic direct API. Constructor `api_key` is the empty
+        // string — the F-744 seam injects the real key per-turn from the
+        // credential store. The orchestrator pulls under `provider_id =
+        // "anthropic"`; with no keyring entry the layered store falls through
+        // to `ANTHROPIC_API_KEY` env. F-746 will add early-fail credential
+        // validation; until then a missing key surfaces as an upstream 401
+        // mapped to `ChatChunk::Error` by the provider.
+        ProviderKind::Anthropic { base_url, model } => {
+            let provider = Arc::new(AnthropicProvider::new(
+                base_url,
+                String::new(),
+                model,
+                DEFAULT_MAX_TOKENS,
+            ));
+            let credentials = build_credential_context("anthropic");
+            serve_with_session(
+                &socket_path,
+                session,
+                provider,
+                auto_approve,
+                ephemeral,
+                workspace,
+                Some(session_id),
+                credentials,
+                active_agent,
+                user_home_override,
+            )
+            .await
+        }
+        // F-745: OpenAI direct API. Same constructor-vs-seam posture as
+        // Anthropic; provider id is `"openai"`, env fallback is
+        // `OPENAI_API_KEY`.
+        ProviderKind::OpenAi { base_url, model } => {
+            let provider = Arc::new(OpenAiProvider::new(base_url, String::new(), model));
+            let credentials = build_credential_context("openai");
+            serve_with_session(
+                &socket_path,
+                session,
+                provider,
+                auto_approve,
+                ephemeral,
+                workspace,
+                Some(session_id),
+                credentials,
+                active_agent,
+                user_home_override,
+            )
+            .await
+        }
     }
+}
+
+/// F-745: build a [`CredentialContext`] for a keyed provider.
+///
+/// Production wiring per the credentials module docs:
+/// `LayeredStore::new(KeyringStore, EnvFallbackStore::default())` — keyring
+/// primary, env fallback. On targets without a platform keyring (none
+/// today; the cfg gates all three desktop OSes), fall back to the
+/// env-only store.
+fn build_credential_context(provider_id: &'static str) -> Option<CredentialContext> {
+    let store: Arc<dyn Credentials> = {
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+        {
+            Arc::new(LayeredStore::new(
+                KeyringStore::new(),
+                EnvFallbackStore::default(),
+            ))
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+        {
+            Arc::new(EnvFallbackStore::default())
+        }
+    };
+    Some(CredentialContext {
+        store,
+        provider_id: provider_id.to_string(),
+        sidecar_push: None,
+    })
 }
 
 /// Parse `--flag value` from a flat argv. Returns None if the flag isn't
