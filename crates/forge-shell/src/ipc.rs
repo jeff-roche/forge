@@ -776,6 +776,11 @@ pub fn build_invoke_handler<R: Runtime>() -> Box<dyn Fn(tauri::ipc::Invoke<R>) -
         // `require_window_label` gate inside the command rejects every
         // window label other than `dashboard`.
         crate::git_ipc::git_branch,
+        // F-748: crash-restart prompt target — re-spawns the daemon for a
+        // session whose UDS pump died. Session-window-scoped (the matching
+        // `session-<id>` window only); the gate inside the command body
+        // rejects every other window label.
+        crate::session_restart_ipc::session_restart,
     ])
 }
 
