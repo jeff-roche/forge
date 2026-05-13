@@ -31,6 +31,7 @@ Navigation hub for all Forge documentation. One topic per file; use the table be
 | File | Description |
 |---|---|
 | [overview.md](architecture/overview.md) | Tech stack rationale, full dependency matrix, configuration conventions |
+| [sessions-end-to-end.md](architecture/sessions-end-to-end.md) | Full session lifecycle: + New session click → composer send → streamed token, with code map and error paths |
 | [window-hierarchy.md](architecture/window-hierarchy.md) | Dashboard window, Session window, Command palette |
 | [session-layout.md](architecture/session-layout.md) | Pane types, layout rules, and full CLI surface for sessions |
 | [isolation-model.md](architecture/isolation-model.md) | Three isolation levels, approval model, and sandboxing implementation |
