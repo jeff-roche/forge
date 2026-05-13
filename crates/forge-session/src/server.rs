@@ -664,7 +664,7 @@ pub async fn serve(path: &Path, auto_approve: bool, ephemeral: bool) -> Result<(
 /// The daemon's `IpcMessage::SwitchProvider` arm calls this to materialise
 /// a swap target without re-entering the dashboard's settings/credential
 /// flow. Rebuilding Anthropic / OpenAI / CustomOpenAI live needs settings
-/// + keyring access that is not plumbed into the daemon today and lands
+/// and keyring access that is not plumbed into the daemon today and lands
 /// with the Phase 3.5 bootstrap work; integration tests bypass this helper
 /// and drive [`SwappableProvider::swap`] directly with a
 /// `RuntimeProvider::Mock`.

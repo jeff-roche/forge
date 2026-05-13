@@ -14,6 +14,7 @@
 //   message without preempting in-flight speech.
 
 import { type Component, For, onCleanup, onMount } from 'solid-js';
+import { IconButton } from '@forge/design';
 import { type Toast, type ToastKind, dismissToast, toasts } from './toast';
 import './ToastHost.css';
 
@@ -54,15 +55,15 @@ const ToastItem: Component<ToastItemProps> = (props) => {
       role={props.toast.kind === 'error' ? 'alert' : 'status'}
     >
       <span class="toast__message">{props.toast.message}</span>
-      <button
-        type="button"
+      <IconButton
+        variant="ghost"
+        size="sm"
         class="toast__close"
-        aria-label="Dismiss notification"
+        label="Dismiss notification"
         data-testid={`toast-dismiss-${props.toast.id}`}
         onClick={() => dismissToast(props.toast.id)}
-      >
-        ×
-      </button>
+        icon={<span class="toast__close-glyph" aria-hidden="true" />}
+      />
     </li>
   );
 };

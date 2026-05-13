@@ -1,0 +1,2 @@
+{"model":"llama3.2","created_at":"2026-05-12T00:00:00Z","message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"fs.read","arguments":{"path":"hello.txt"}}}]},"done":false}
+{"model":"llama3.2","created_at":"2026-05-12T00:00:01Z","message":{"role":"assistant","content":""},"done":true,"done_reason":"tool_use"}

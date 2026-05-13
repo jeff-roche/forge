@@ -117,7 +117,7 @@ impl<'a> ParsedProviderId<'a> {
 /// Classify a provider id without consulting settings. The result is used
 /// by validation, routing, and the dashboard list to handle the three
 /// supported id shapes uniformly. Vendor strings are matched against
-/// [`BUILTIN_ADDABLE_KINDS`] — broader than [`BUILTIN_PROVIDERS`] because
+/// [`BUILTIN_ADDABLE_KINDS`] — broader than `BUILTIN_PROVIDERS` because
 /// `mistral` is an addable slug whose runtime adapter has not landed yet
 /// (the schema still recognises it). Anything with the `custom_openai:`
 /// prefix flows through `CustomOpenAi`.
@@ -272,42 +272,45 @@ pub fn build_provider_list(
                    instance_name: Option<&str>,
                    enabled: bool,
                    auth_kind: Option<forge_core::BuiltinAuthKind>| {
-        BUILTIN_PROVIDERS.iter().find(|b| b.id == vendor).map(|descriptor| {
-            let display_name = match instance_name {
-                Some(name) => format!("{} — {name}", descriptor.display_name),
-                None => descriptor.display_name.to_string(),
-            };
-            // Vertex instances bypass the keychain — gcloud ADC supplies
-            // an access token at request time. Report `credential_required
-            // = false` so the dashboard does NOT prompt for an API key.
-            let is_vertex = matches!(auth_kind, Some(forge_core::BuiltinAuthKind::Vertex));
-            let effective_credential_required = descriptor.credential_required && !is_vertex;
-            ProviderEntry {
-                id: id.to_string(),
-                display_name,
-                credential_required: effective_credential_required,
-                // Probe the keychain only when a credential is actually
-                // required — ADC-backed (Vertex) rows report `false` and
-                // the dashboard's pill predicate
-                // (`credential_required && !has_credential`) trivially
-                // falls through to `ready`.
-                has_credential: if effective_credential_required {
-                    cred_present(id)
-                } else {
-                    false
-                },
-                // Built-ins always claim a model is available — the daemon
-                // ships a default and the orchestrator resolves the concrete
-                // model id at request time. Per-instance overrides land via
-                // `[providers.<vendor>.<name>]` once that schema grows a
-                // `model` field; for now the daemon default is the source.
-                model_available: true,
-                model: None,
-                endpoint: None,
-                enabled,
-                auth_kind,
-            }
-        })
+        BUILTIN_PROVIDERS
+            .iter()
+            .find(|b| b.id == vendor)
+            .map(|descriptor| {
+                let display_name = match instance_name {
+                    Some(name) => format!("{} — {name}", descriptor.display_name),
+                    None => descriptor.display_name.to_string(),
+                };
+                // Vertex instances bypass the keychain — gcloud ADC supplies
+                // an access token at request time. Report `credential_required
+                // = false` so the dashboard does NOT prompt for an API key.
+                let is_vertex = matches!(auth_kind, Some(forge_core::BuiltinAuthKind::Vertex));
+                let effective_credential_required = descriptor.credential_required && !is_vertex;
+                ProviderEntry {
+                    id: id.to_string(),
+                    display_name,
+                    credential_required: effective_credential_required,
+                    // Probe the keychain only when a credential is actually
+                    // required — ADC-backed (Vertex) rows report `false` and
+                    // the dashboard's pill predicate
+                    // (`credential_required && !has_credential`) trivially
+                    // falls through to `ready`.
+                    has_credential: if effective_credential_required {
+                        cred_present(id)
+                    } else {
+                        false
+                    },
+                    // Built-ins always claim a model is available — the daemon
+                    // ships a default and the orchestrator resolves the concrete
+                    // model id at request time. Per-instance overrides land via
+                    // `[providers.<vendor>.<name>]` once that schema grows a
+                    // `model` field; for now the daemon default is the source.
+                    model_available: true,
+                    model: None,
+                    endpoint: None,
+                    enabled,
+                    auth_kind,
+                }
+            })
     };
 
     for descriptor in BUILTIN_PROVIDERS.iter() {
@@ -327,7 +330,7 @@ pub fn build_provider_list(
             _ => None,
         })
         .collect();
-    named.sort_by(|(a, _), (b, _)| a.cmp(b));
+    named.sort_by_key(|a| a.0);
     for (id, enabled) in named {
         if let ParsedProviderId::BuiltinNamed { vendor, name } = parse_provider_id(id) {
             let auth_kind = instance_auth(vendor, name);
@@ -422,11 +425,7 @@ pub const SET_PROVIDER_ENABLED_ERROR: &str = "set_provider_enabled: ";
 /// `mistral` is admitted here ahead of a dedicated runtime adapter: the
 /// dashboard add-provider form ships it as a built-in kind so the schema
 /// keeps room for a future first-class adapter without a wire break.
-pub const BUILTIN_ADDABLE_KINDS: &[&str] = &[
-    PROVIDER_ANTHROPIC,
-    PROVIDER_OPENAI,
-    "mistral",
-];
+pub const BUILTIN_ADDABLE_KINDS: &[&str] = &[PROVIDER_ANTHROPIC, PROVIDER_OPENAI, "mistral"];
 
 /// Validate the shape of an instance name suffix. Shared by
 /// `custom_openai:<name>` and built-in `<vendor>:<name>` ids so the two id
@@ -466,9 +465,7 @@ pub fn validate_provider_id(provider_id: &str) -> Result<(), String> {
         ParsedProviderId::BuiltinNamed { vendor, name } => {
             validate_instance_name(name, &format!("{vendor}{NAMED_INSTANCE_SEPARATOR}"))
         }
-        ParsedProviderId::CustomOpenAi(name) => {
-            validate_instance_name(name, CUSTOM_OPENAI_PREFIX)
-        }
+        ParsedProviderId::CustomOpenAi(name) => validate_instance_name(name, CUSTOM_OPENAI_PREFIX),
         // Some downstream paths (e.g. `set_active_provider`) call
         // `validate_provider_id` to guard the size cap on ids they later
         // probe through `is_known_provider_id`. Returning `Ok` here keeps
@@ -1130,9 +1127,7 @@ async fn probe_http_request(
                 })
                 .collect::<Vec<String>>()
         });
-    let model_count = models
-        .as_ref()
-        .and_then(|m| u32::try_from(m.len()).ok());
+    let model_count = models.as_ref().and_then(|m| u32::try_from(m.len()).ok());
     // Log up to the first five ids so a misconfigured endpoint reads
     // obviously in the log without bloating the line for a 200-model
     // response.
@@ -1200,9 +1195,9 @@ async fn dispatch_probe(
     // header shape; the full `provider_id` keys credential lookup so
     // named instances pull their own API key from the keychain.
     let parsed = parse_provider_id(provider_id);
-    let vendor = parsed
-        .vendor()
-        .ok_or_else(|| format!("{TEST_PROVIDER_CONNECTION_ERROR}unknown provider: {provider_id}"))?;
+    let vendor = parsed.vendor().ok_or_else(|| {
+        format!("{TEST_PROVIDER_CONNECTION_ERROR}unknown provider: {provider_id}")
+    })?;
 
     // Phase B: Anthropic instances may be configured for Google Vertex
     // AI via `[providers.anthropic.<name>] auth_kind = "vertex"`. In
@@ -1270,9 +1265,7 @@ async fn probe_anthropic_vertex(
         .await
         .map_err(|e| format!("{TEST_PROVIDER_CONNECTION_ERROR}vertex token join failed: {e}"))?
         .map_err(|e| format!("{TEST_PROVIDER_CONNECTION_ERROR}vertex auth: {e}"))?;
-    let url = format!(
-        "https://aiplatform.googleapis.com/v1/projects/{project}/locations/{region}"
-    );
+    let url = format!("https://aiplatform.googleapis.com/v1/projects/{project}/locations/{region}");
     probe_http_request(
         client,
         &url,
@@ -2158,8 +2151,7 @@ mod tests {
     #[test]
     fn add_provider_validates_named_builtin() {
         validate_add_provider_input(&add_input("anthropic:work", None)).expect("anthropic:work");
-        validate_add_provider_input(&add_input("openai:personal", None))
-            .expect("openai:personal");
+        validate_add_provider_input(&add_input("openai:personal", None)).expect("openai:personal");
     }
 
     #[test]
@@ -2916,7 +2908,13 @@ mod dispatch_tests {
         assert_eq!(out.model_count, Some(3));
         assert_eq!(
             out.models.as_deref(),
-            Some(&["model-a".to_string(), "model-b".to_string(), "model-c".to_string()][..])
+            Some(
+                &[
+                    "model-a".to_string(),
+                    "model-b".to_string(),
+                    "model-c".to_string()
+                ][..]
+            )
         );
         assert!(out.latency_ms.is_some());
     }

@@ -207,8 +207,12 @@ async fn register_workspace_if_missing_appends_to_existing_entries() {
     let path_a = workspace_a.path().canonicalize().unwrap();
     let path_b = workspace_b.path().canonicalize().unwrap();
 
-    register_workspace_if_missing(&registry, &path_a).await.unwrap();
-    register_workspace_if_missing(&registry, &path_b).await.unwrap();
+    register_workspace_if_missing(&registry, &path_a)
+        .await
+        .unwrap();
+    register_workspace_if_missing(&registry, &path_b)
+        .await
+        .unwrap();
     let loaded = read_workspaces(&registry).await.unwrap();
     assert_eq!(loaded.len(), 2);
     let paths: Vec<_> = loaded.iter().map(|e| e.path.clone()).collect();

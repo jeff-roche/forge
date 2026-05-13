@@ -265,7 +265,7 @@ pub async fn list_agent_memory<R: Runtime>(
     let workspace_path =
         crate::ipc::resolve_workspace_root_for_command(webview.label(), &workspace_root, &state)
             .await?;
-    let user_home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    let user_home = crate::ipc::resolve_user_home_dir(&state);
     let defs = forge_agents::load_agents(&workspace_path, &user_home).map_err(|e| {
         tracing::warn!(
             target: "forge_shell::memory",

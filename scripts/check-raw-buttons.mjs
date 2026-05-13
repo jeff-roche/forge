@@ -41,6 +41,9 @@ export const ALLOWLIST = [
   'web/packages/app/src/components/SubAgentBanner.tsx',        // state chip
   'web/packages/app/src/components/SubAgentDetailsPopover.tsx',// popover footer action
   'web/packages/app/src/routes/Session/ChatPane.tsx',          // tool-call card "show more"
+  // ARIA combobox trigger — needs custom label/chevron layout and listbox
+  // semantics that a Button primitive would override visually.
+  'web/packages/app/src/components/Dropdown.tsx',              // combobox trigger
 ];
 
 /** Recursively yield absolute paths of non-test `.tsx` files under `dir`. */

@@ -903,6 +903,30 @@ pub(crate) fn resolve_user_config_dir(state: &BridgeState) -> Option<PathBuf> {
     dirs::config_dir()
 }
 
+/// Resolve the user-scope home dir used by the `.agents/`, `.agent-skills/`,
+/// and `.mcp.json` loaders, honoring the `webview-test` override when
+/// present. In production this is the platform `$HOME` (or `%USERPROFILE%`
+/// on Windows). Returns `PathBuf::from("/")` only when both the override
+/// and the platform resolver fail — callers tolerate an empty root
+/// because each loader skips missing directories.
+///
+/// Tests rely on the override to isolate user-tier agent/skill/mcp
+/// definitions from the developer's real `~/.agents/`, `~/.agent-skills/`,
+/// and `~/.mcp.json`. Without it, those loaders would silently merge the
+/// host machine's personal agents into the test fixture and break
+/// length-sensitive assertions.
+pub(crate) fn resolve_user_home_dir(state: &BridgeState) -> PathBuf {
+    #[cfg(feature = "webview-test")]
+    {
+        if let Some(override_dir) = state.test_user_config_dir_override.as_ref() {
+            return override_dir.clone();
+        }
+    }
+    #[cfg(not(feature = "webview-test"))]
+    let _ = state;
+    dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"))
+}
+
 /// F-349: resolve the workspaces registry TOML path, honoring the
 /// `webview-test` override when present. Production falls back to the
 /// canonical `~/.config/forge/workspaces.toml` path via
@@ -3691,12 +3715,13 @@ fn collect_agents(
     user_home: &std::path::Path,
 ) -> Result<Vec<forge_core::ScopedRosterEntry>, String> {
     let workspace_defs = match workspace_root {
-        Some(ws) => forge_agents::load_workspace_agents(ws)
-            .map_err(|e| format!("load agents: {e}"))?,
+        Some(ws) => {
+            forge_agents::load_workspace_agents(ws).map_err(|e| format!("load agents: {e}"))?
+        }
         None => Vec::new(),
     };
-    let user_defs = forge_agents::load_user_agents(user_home)
-        .map_err(|e| format!("load agents: {e}"))?;
+    let user_defs =
+        forge_agents::load_user_agents(user_home).map_err(|e| format!("load agents: {e}"))?;
 
     let workspace_names: std::collections::HashSet<String> =
         workspace_defs.iter().map(|d| d.name.clone()).collect();
@@ -3862,7 +3887,7 @@ pub async fn list_skills<R: Runtime>(
     } else {
         Some(resolve_workspace_root_for_command(webview.label(), &workspace_root, &state).await?)
     };
-    let user_home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    let user_home = resolve_user_home_dir(&state);
     let entries = collect_skills(workspace_path.as_deref(), &user_home)?;
     Ok(entries.into_iter().filter(|e| e.matches(&scope)).collect())
 }

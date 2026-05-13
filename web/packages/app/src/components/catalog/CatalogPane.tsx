@@ -781,9 +781,6 @@ const CatalogRowView: Component<CatalogRowViewProps> = (props) => {
             </For>
           </span>
         </Show>
-        <Show when={props.row.kind === 'providers' && props.row.meta}>
-          <span class="catalog-row__meta">{props.row.meta}</span>
-        </Show>
       </div>
       <CatalogEnabledToggle
         kind={props.row.kind}

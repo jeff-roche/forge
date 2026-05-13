@@ -15,6 +15,8 @@ pub mod anthropic;
 // F-679: shared HTTP / SSE helpers used by Anthropic and the OpenAI family.
 // Crate-private — the only consumers are sibling provider modules.
 pub(crate) mod http_util;
+// F-743: Ollama — keyless, NDJSON-streamed `/api/chat`.
+pub mod ollama;
 pub mod openai;
 // F-593: static price-table parser + cost calculator. The committed
 // `data/prices.toml` is `include_str!`-embedded so every binary that links

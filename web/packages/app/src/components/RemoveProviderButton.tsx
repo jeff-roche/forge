@@ -16,7 +16,7 @@
 // the active setting before returning. Callers only need to refetch.
 
 import { type Component, createSignal, onCleanup, onMount, Show } from 'solid-js';
-import { Button } from '@forge/design';
+import { Button, IconButton } from '@forge/design';
 import type { RemoveProviderInput } from '@forge/ipc';
 import { invoke } from '../lib/tauri';
 import { useFocusTrap } from '../lib/useFocusTrap';
@@ -64,16 +64,14 @@ export const RemoveProviderButton: Component<RemoveProviderButtonProps> = (
 
   return (
     <>
-      <button
-        type="button"
-        class="remove-provider__trigger"
+      <IconButton
+        variant="danger"
+        size="sm"
         data-testid={`remove-provider-trigger-${props.providerId}`}
-        title={`Remove ${props.providerId}`}
-        aria-label={`Remove ${props.providerId}`}
+        label={`Remove ${props.providerId}`}
         onClick={open}
-      >
-        <TrashIcon />
-      </button>
+        icon={<TrashIcon />}
+      />
       <Show when={state() === 'confirming' || state() === 'removing' || state() === 'failed'}>
         <ConfirmDialog
           providerId={props.providerId}

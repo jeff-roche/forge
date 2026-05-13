@@ -173,6 +173,11 @@ async fn persistent_sigterm_archives_session_dir_and_meta() {
         .env("FORGE_SESSION_ID", session_id)
         .env("FORGE_SOCKET_PATH", &sock_path)
         .env("FORGE_WORKSPACE", &workspace)
+        // F-743: an explicit provider spec is required since the production
+        // path no longer falls back to `MockProvider`. This test only
+        // exercises SIGTERM lifecycle and never drives a turn, so Mock is
+        // the right choice.
+        .env("FORGE_PROVIDER", "mock")
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .spawn()

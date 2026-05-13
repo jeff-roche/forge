@@ -52,6 +52,9 @@ async fn bound_socket_has_mode_0600() {
         .arg("--auto-approve-unsafe")
         .env("FORGE_SESSION_ID", "permtest00000001")
         .env("FORGE_SOCKET_PATH", &sock_path)
+        // F-743: forged requires an explicit provider spec; this test
+        // exercises UDS socket permission bits and never drives a turn.
+        .env("FORGE_PROVIDER", "mock")
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .spawn()

@@ -107,37 +107,12 @@
 }
 
 /* Pencil edit trigger — paired with the trash Remove trigger as the
- * row's icon-only terminal cluster. Same dimensions / hover lift as
- * `.remove-provider__trigger`; hover routes to the ember accent rather
- * than the error palette since edit is non-destructive. */
-.edit-provider__trigger {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: var(--sp-6);
-  height: var(--sp-6);
-  padding: 0;
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: var(--r-sm);
-  color: var(--color-text-secondary);
-  cursor: pointer;
-  transition: var(--ease);
-}
-
-.edit-provider__trigger:hover:not(:disabled) {
-  color: var(--color-text-primary);
+ * row's icon-only terminal cluster. The trigger itself is a
+ * `@forge/design` IconButton (`ghost` / `sm`); this rule swaps the
+ * baseline neutral hover border for the ember accent so edit reads as
+ * non-destructive next to the danger-tinted remove icon. */
+.edit-provider__trigger.forge-icon-button--ghost:hover:not(:disabled):not([aria-disabled='true']) {
   border-color: var(--color-ember-400);
-}
-
-.edit-provider__trigger:focus-visible {
-  outline: 2px solid var(--color-ember-400);
-  outline-offset: 2px;
-}
-
-.edit-provider__trigger:disabled {
-  cursor: default;
-  opacity: 0.4;
 }
 
 .edit-provider__icon {

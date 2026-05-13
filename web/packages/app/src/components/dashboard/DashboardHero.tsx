@@ -43,7 +43,7 @@ export const FORGE_ADJECTIVES = [
 
 export function pickForgeAdjective(): string {
   const idx = Math.floor(Math.random() * FORGE_ADJECTIVES.length);
-  return FORGE_ADJECTIVES[idx];
+  return FORGE_ADJECTIVES[idx] ?? FORGE_ADJECTIVES[0];
 }
 
 export interface DashboardHeroProps {

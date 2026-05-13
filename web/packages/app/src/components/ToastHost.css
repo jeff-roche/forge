@@ -70,42 +70,37 @@
   line-height: 1.4;
 }
 
+/* Close affordance rendered by the `@forge/design` IconButton (`ghost`,
+ * `sm`). The X glyph itself is a CSS-only span — the toast doesn't ship an
+ * SVG asset for it. */
 .toast__close {
   flex-shrink: 0;
-  width: var(--sp-5);
-  height: var(--sp-5);
+}
+
+.toast__close-glyph {
   position: relative;
-  background: transparent;
-  border: 0;
-  padding: 0;
-  color: var(--color-text-secondary);
-  cursor: pointer;
-  border-radius: var(--r-sm);
-  font-size: 0;
+  display: inline-block;
+  width: var(--sp-3);
+  height: var(--sp-3);
 }
 
-.toast__close:hover {
-  color: var(--color-text-primary);
-  background: var(--color-surface-3);
-}
-
-.toast__close::before,
-.toast__close::after {
+.toast__close-glyph::before,
+.toast__close-glyph::after {
   content: '';
   position: absolute;
   top: 50%;
   left: 50%;
-  width: var(--sp-3);
+  width: 100%;
   height: 2px;
   background: currentColor;
   border-radius: 1px;
 }
 
-.toast__close::before {
+.toast__close-glyph::before {
   transform: translate(-50%, -50%) rotate(45deg);
 }
 
-.toast__close::after {
+.toast__close-glyph::after {
   transform: translate(-50%, -50%) rotate(-45deg);
 }
 

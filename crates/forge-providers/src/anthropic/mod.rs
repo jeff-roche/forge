@@ -198,10 +198,7 @@ impl Provider for AnthropicProvider {
                         .map_err(|e| anyhow::anyhow!("vertex token join failed: {e}"))?
                         .map_err(|e| anyhow::anyhow!("vertex auth: {e}"))?;
                     builder = builder
-                        .header(
-                            reqwest::header::AUTHORIZATION,
-                            format!("Bearer {token}"),
-                        )
+                        .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
                         .header("anthropic-version", VERTEX_ANTHROPIC_VERSION);
                 }
             }

@@ -229,7 +229,11 @@ fn user_agent_overrides_builtin_forge_default() {
         .iter()
         .filter(|a| a.name == FORGE_DEFAULT_AGENT_NAME)
         .collect();
-    assert_eq!(matches.len(), 1, "user override should deduplicate built-in");
+    assert_eq!(
+        matches.len(),
+        1,
+        "user override should deduplicate built-in"
+    );
     assert_eq!(matches[0].description.as_deref(), Some("my override"));
     assert!(matches[0].body.contains("User body."));
 }
@@ -252,7 +256,10 @@ fn workspace_agent_overrides_builtin_forge_default() {
         .filter(|a| a.name == FORGE_DEFAULT_AGENT_NAME)
         .collect();
     assert_eq!(matches.len(), 1);
-    assert_eq!(matches[0].description.as_deref(), Some("workspace override"));
+    assert_eq!(
+        matches[0].description.as_deref(),
+        Some("workspace override")
+    );
 }
 
 #[test]

@@ -69,6 +69,9 @@ async fn symlink_at_bind_path_is_not_unlinked_and_rebound() {
         .arg("--auto-approve-unsafe")
         .env("FORGE_SESSION_ID", "f056symlink00001")
         .env("FORGE_SOCKET_PATH", &sock_path)
+        // F-743: forged requires an explicit provider spec; this test
+        // exercises UDS bind safety and never drives a turn.
+        .env("FORGE_PROVIDER", "mock")
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .spawn()
@@ -121,6 +124,9 @@ async fn dangling_symlink_at_bind_path_is_not_unlinked_and_rebound() {
         .arg("--auto-approve-unsafe")
         .env("FORGE_SESSION_ID", "f056dangling0001")
         .env("FORGE_SOCKET_PATH", &sock_path)
+        // F-743: forged requires an explicit provider spec; this test
+        // exercises UDS bind safety and never drives a turn.
+        .env("FORGE_PROVIDER", "mock")
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .spawn()
@@ -158,6 +164,9 @@ async fn regular_file_at_bind_path_is_not_unlinked_and_rebound() {
         .arg("--auto-approve-unsafe")
         .env("FORGE_SESSION_ID", "f056regfile00001")
         .env("FORGE_SOCKET_PATH", &sock_path)
+        // F-743: forged requires an explicit provider spec; this test
+        // exercises UDS bind safety and never drives a turn.
+        .env("FORGE_PROVIDER", "mock")
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .spawn()

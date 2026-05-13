@@ -317,7 +317,10 @@ mod tests {
             transport: Some(McpTransport::Http),
         };
         let json = serde_json::to_string(&entry).unwrap();
-        assert_eq!(json, "{\"type\":\"Mcp\",\"id\":\"remote\",\"transport\":\"http\"}");
+        assert_eq!(
+            json,
+            "{\"type\":\"Mcp\",\"id\":\"remote\",\"transport\":\"http\"}"
+        );
         let back: RosterEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(back, entry);
     }
