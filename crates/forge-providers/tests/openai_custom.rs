@@ -263,15 +263,38 @@ async fn http_error_propagates_with_status_and_body() {
     )
     .expect("provider construction");
 
-    let err = provider
-        .chat(req())
-        .await
-        .err()
-        .expect("HTTP 401 must map to Err");
-    let msg = format!("{err}");
-    assert!(msg.contains("401"), "error should mention status: {msg}");
-    assert!(
-        msg.contains("invalid api key"),
-        "error should include body: {msg}"
+    // F-749: HTTP non-2xx surfaces as a terminal `ChatChunk::Error` carrying
+    // the wire status code so the orchestrator's classifier can route it
+    // onto `TurnErrorKind::Auth` without re-parsing the message text.
+    let mut stream = provider.chat(req()).await.expect("chat returns Ok stream");
+    let chunks: Vec<ChatChunk> = {
+        let mut v = Vec::new();
+        while let Some(c) = stream.next().await {
+            v.push(c);
+        }
+        v
+    };
+    assert_eq!(
+        chunks.len(),
+        1,
+        "expected exactly one error chunk: {chunks:?}"
     );
+    match &chunks[0] {
+        ChatChunk::Error {
+            kind,
+            message,
+            status,
+            retry_after_secs,
+        } => {
+            assert_eq!(*status, Some(401), "status must carry the wire code");
+            assert!(matches!(kind, forge_providers::StreamErrorKind::Transport));
+            assert!(
+                message.contains("401") && message.contains("invalid api key"),
+                "message should carry the body: {message}"
+            );
+            // F-749: 401 isn't a rate-limit, so the parser doesn't run.
+            assert_eq!(*retry_after_secs, None);
+        }
+        other => panic!("expected ChatChunk::Error, got {other:?}"),
+    }
 }

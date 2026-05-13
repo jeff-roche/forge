@@ -168,6 +168,83 @@
   border-radius: var(--r-sm);
 }
 
+/* F-749: provider-error card. Renders inline in the transcript at the
+   failing turn's slot. Warning/danger surface tint; no provider/model
+   avatar (reserved for real assistant messages). Action treatment is
+   keyed by `data-error-kind` in the component layer; the surface
+   doesn't change tint by kind today — kind drives the action chrome,
+   not the card shell. */
+.turn-error-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--color-error-bg);
+  border: 1px solid var(--color-error-border);
+  border-radius: var(--r-sm);
+}
+
+.turn-error-card__header {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.turn-error-card__icon {
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-sm);
+  color: var(--color-error);
+}
+
+.turn-error-card__kind {
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-sm);
+  color: var(--color-accent-danger);
+  text-transform: lowercase;
+  letter-spacing: 0.04em;
+}
+
+.turn-error-card__message {
+  margin: 0;
+  font-size: var(--type-body-sm);
+  color: var(--color-text-primary);
+  word-break: break-word;
+}
+
+.turn-error-card__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+}
+
+.turn-error-card__details-toggle {
+  background: transparent;
+  border: none;
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-sm);
+  cursor: pointer;
+  padding: var(--sp-1) var(--sp-2);
+}
+
+.turn-error-card__details-toggle:hover {
+  color: var(--color-text-primary);
+}
+
+.turn-error-card__raw,
+.turn-error-card__raw-empty {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--color-surface-1, rgba(0, 0, 0, 0.2));
+  border-radius: var(--r-sm);
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-sm);
+  color: var(--color-text-secondary);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
 .turn__error-icon {
   flex: 0 0 auto;
   font-family: var(--font-mono);

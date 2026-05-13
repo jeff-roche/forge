@@ -19,6 +19,10 @@ bytes = "1"
 dirs = "6.0.0"
 forge-core = { path = "../forge-core" }
 futures = "0.3"
+# F-749: parse the HTTP-date form of the `Retry-After` response header on 429
+# rate-limit replies. Already present transitively via reqwest's hyper
+# dependency tree; declared directly here for first-class use.
+httpdate = "1"
 # `parking_lot::Mutex` for `MockProvider` interior state — its guards are not
 # poisoned on holder-thread panic, so a panicking test does not cascade into
 # every subsequent `.lock()` call. Already present transitively via reqwest's

@@ -26,7 +26,7 @@
 //!   the chain length, since user-supplied OpenAI-compatible gateways may
 //!   legitimately redirect.
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use crate::sse::SseError;
 use crate::StreamErrorKind;
@@ -88,6 +88,33 @@ pub(crate) fn map_sse_error(e: &SseError) -> StreamErrorKind {
     }
 }
 
+/// F-749: parse a `Retry-After` HTTP response header value into seconds-from-now.
+///
+/// RFC 9110 §10.2.3 allows two forms:
+///
+/// - **delta-seconds** — a non-negative integer count of seconds (`"120"`).
+/// - **HTTP-date** — an absolute timestamp (`"Wed, 21 Oct 2026 07:28:00 GMT"`).
+///
+/// The delta-seconds branch is tried first because it's the common case for
+/// 429 replies from Anthropic / OpenAI / Ollama. The HTTP-date branch falls
+/// back to [`httpdate::parse_http_date`] and converts the resulting
+/// [`SystemTime`] into a delta against `now`.
+///
+/// Returns `None` for missing headers, non-ASCII / non-UTF-8 byte sequences,
+/// negative deltas, deltas past `u32::MAX`, or HTTP-dates that are in the
+/// past. The caller is expected to be defensive: a malformed value collapses
+/// to "we don't know how long to wait", not an error.
+pub(crate) fn parse_retry_after(value: &reqwest::header::HeaderValue) -> Option<u32> {
+    let s = value.to_str().ok()?.trim();
+    if let Ok(secs) = s.parse::<u32>() {
+        return Some(secs);
+    }
+    let when = httpdate::parse_http_date(s).ok()?;
+    let now = SystemTime::now();
+    let dur = when.duration_since(now).ok()?;
+    u32::try_from(dur.as_secs()).ok()
+}
+
 /// UTF-8-safe prefix truncation for HTTP error-body logging. Walks character
 /// boundaries so a multi-byte codepoint is never split (a naive `&s[..max]`
 /// would panic on input like `"héllo"` when `max == 2`).
@@ -146,6 +173,59 @@ mod tests {
         let out = truncate("abcdefgh", 3);
         assert!(out.ends_with('…'));
         assert!(out.starts_with("abc"));
+    }
+
+    #[test]
+    fn parse_retry_after_delta_seconds() {
+        let h = reqwest::header::HeaderValue::from_static("120");
+        assert_eq!(parse_retry_after(&h), Some(120));
+    }
+
+    #[test]
+    fn parse_retry_after_delta_seconds_zero() {
+        let h = reqwest::header::HeaderValue::from_static("0");
+        assert_eq!(parse_retry_after(&h), Some(0));
+    }
+
+    #[test]
+    fn parse_retry_after_delta_seconds_with_whitespace() {
+        let h = reqwest::header::HeaderValue::from_static("  42  ");
+        assert_eq!(parse_retry_after(&h), Some(42));
+    }
+
+    #[test]
+    fn parse_retry_after_garbage_returns_none() {
+        let h = reqwest::header::HeaderValue::from_static("not-a-number-nor-a-date");
+        assert_eq!(parse_retry_after(&h), None);
+    }
+
+    #[test]
+    fn parse_retry_after_negative_returns_none() {
+        let h = reqwest::header::HeaderValue::from_static("-30");
+        // `u32::parse` rejects the leading sign and httpdate rejects the
+        // shape — defensively `None`.
+        assert_eq!(parse_retry_after(&h), None);
+    }
+
+    #[test]
+    fn parse_retry_after_past_http_date_returns_none() {
+        let h = reqwest::header::HeaderValue::from_static("Wed, 21 Oct 1970 07:28:00 GMT");
+        // The date is in the past, so `duration_since(now)` errors out.
+        assert_eq!(parse_retry_after(&h), None);
+    }
+
+    #[test]
+    fn parse_retry_after_future_http_date_yields_seconds_from_now() {
+        // Build a future timestamp by going +60s from now and formatting it.
+        let future = SystemTime::now() + Duration::from_secs(60);
+        let formatted = httpdate::fmt_http_date(future);
+        let h = reqwest::header::HeaderValue::from_str(&formatted).unwrap();
+        let secs = parse_retry_after(&h).expect("future http-date must parse");
+        // Allow a wide tolerance — system clock and the test's wall clock
+        // race by a few ms. The load-bearing claim is that the result is
+        // positive and within an order of magnitude of the input.
+        assert!(secs <= 60, "secs={secs} should be <= input window");
+        assert!(secs >= 55, "secs={secs} should be near 60");
     }
 
     #[test]

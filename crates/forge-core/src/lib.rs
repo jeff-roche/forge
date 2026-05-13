@@ -25,7 +25,10 @@ pub mod workspaces;
 pub use approvals::{ApprovalConfig, ApprovalEntry};
 pub use credentials::{Credentials, EnvFallbackStore, LayeredStore, MemoryStore};
 pub use error::{ForgeError, Result};
-pub use event::{ApprovalPreview, ApprovalSource, ContextRef, EndReason, Event, LogLineLevel};
+pub use event::{
+    ApprovalPreview, ApprovalSource, ContextRef, EndReason, Event, LogLineLevel, TurnErrorKind,
+    TURN_ERROR_RAW_CAP_BYTES,
+};
 pub use event_log::{read_since, EventLog, MAX_LINE_BYTES};
 pub use event_sink::EventSink;
 pub use ids::{

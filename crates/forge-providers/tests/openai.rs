@@ -124,17 +124,40 @@ async fn chat_maps_http_errors() {
         parallel_tool_calls_allowed: false,
     };
 
-    let err = provider
-        .chat(req)
-        .await
-        .err()
-        .expect("HTTP 401 must map to Err");
-    let msg = format!("{err}");
-    assert!(msg.contains("401"), "error should mention status: {msg}");
-    assert!(
-        msg.contains("invalid api key"),
-        "error should include body: {msg}"
+    // F-749: HTTP non-2xx surfaces as a terminal `ChatChunk::Error` carrying
+    // the wire status code rather than collapsing into an opaque `Err`.
+    let mut stream = provider.chat(req).await.expect("chat returns Ok stream");
+    let chunks: Vec<ChatChunk> = {
+        let mut v = Vec::new();
+        while let Some(c) = stream.next().await {
+            v.push(c);
+        }
+        v
+    };
+    assert_eq!(
+        chunks.len(),
+        1,
+        "expected exactly one error chunk: {chunks:?}"
     );
+    match &chunks[0] {
+        ChatChunk::Error {
+            kind,
+            message,
+            status,
+            retry_after_secs,
+        } => {
+            assert_eq!(*status, Some(401), "status must carry the wire code");
+            assert!(matches!(kind, StreamErrorKind::Transport));
+            assert!(
+                message.contains("401") && message.contains("invalid api key"),
+                "message should carry the body: {message}"
+            );
+            // F-749: 401 isn't a rate-limit, so the parser doesn't run and the
+            // field stays `None`.
+            assert_eq!(*retry_after_secs, None);
+        }
+        other => panic!("expected ChatChunk::Error, got {other:?}"),
+    }
 }
 
 /// A peer that opens a 200 response with valid SSE prelude, emits one event,
@@ -397,15 +420,68 @@ async fn chat_does_not_follow_redirects() {
         messages: vec![user_msg("hi")],
         parallel_tool_calls_allowed: false,
     };
-    let err = match provider.chat(req).await {
-        Ok(_) => panic!("redirect must surface as an error, not be followed"),
-        Err(e) => e,
+    // F-749: redirect surfaces as a terminal `ChatChunk::Error` (not a
+    // followed redirect, not an opaque `Err`).
+    let mut stream = provider.chat(req).await.expect("chat returns Ok stream");
+    let chunks: Vec<ChatChunk> = {
+        let mut v = Vec::new();
+        while let Some(c) = stream.next().await {
+            v.push(c);
+        }
+        v
     };
-    let msg = format!("{err}");
-    assert!(
-        msg.contains("302"),
-        "error must reflect the upstream 302 status: {msg}"
-    );
+    let last = chunks.last().expect("at least one chunk");
+    match last {
+        ChatChunk::Error {
+            message, status, ..
+        } => {
+            assert_eq!(*status, Some(302), "status must reflect the wire 302");
+            assert!(message.contains("302"), "message echoes status: {message}");
+        }
+        other => panic!("expected ChatChunk::Error, got {other:?}"),
+    }
+}
+
+/// F-749: a 429 response with a delta-seconds `Retry-After` header must
+/// surface that value on `ChatChunk::Error.retry_after_secs` so the
+/// orchestrator can thread it onto `TurnErrorKind::RateLimit` and the UI
+/// countdown lights up against a real provider value.
+#[tokio::test(flavor = "multi_thread")]
+async fn chat_429_with_retry_after_delta_seconds_threads_value_onto_chunk() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("retry-after", "45")
+                .set_body_string("rate limited"),
+        )
+        .mount(&server)
+        .await;
+
+    let provider = OpenAiProvider::new(server.uri(), "sk-test", "gpt-4o");
+    let req = ChatRequest {
+        system: None,
+        messages: vec![user_msg("hi")],
+        parallel_tool_calls_allowed: false,
+    };
+    let mut stream = provider.chat(req).await.expect("chat returns Ok stream");
+    let chunk = stream.next().await.expect("at least one chunk");
+    match chunk {
+        ChatChunk::Error {
+            status,
+            retry_after_secs,
+            ..
+        } => {
+            assert_eq!(status, Some(429));
+            assert_eq!(
+                retry_after_secs,
+                Some(45),
+                "delta-seconds value must round-trip onto the error chunk"
+            );
+        }
+        other => panic!("expected ChatChunk::Error, got {other:?}"),
+    }
 }
 
 /// Manual smoke test against the real OpenAI API.
@@ -453,7 +529,7 @@ async fn chat_against_real_openai() {
             ChatChunk::ToolCall { .. } => {
                 // unexpected for this prompt — model shouldn't request a tool
             }
-            ChatChunk::Error { kind, message } => {
+            ChatChunk::Error { kind, message, .. } => {
                 panic!("openai returned error: kind={kind:?}, message={message}")
             }
         }

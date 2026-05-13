@@ -368,6 +368,77 @@ export function fromRustEvent(rustEvent: unknown): SessionEvent | null {
     };
   }
 
+  // F-749: provider-error surfacing — maps the Rust `turn_error` event to
+  // the store's `TurnError` shape so `ChatPane` can render an inline error
+  // card at the failing turn's slot.
+  //
+  // Wire shape pinned by `crates/forge-core/tests/event_wire_shape.rs`:
+  //   { "type": "turn_error", "id": "<MessageId>", "at": "<RFC3339>",
+  //     "kind": { "kind": "auth" | "rate_limit" | ..., ... },
+  //     "message": "<string>", "retriable": <bool>, "raw"?: "<string>" }
+  //
+  // `kind` is an internally-tagged enum; the inner discriminator key (also
+  // called `kind`) drives the card's render variant. `retry_after_secs`
+  // rides on the `rate_limit` arm only.
+  if (type === 'turn_error') {
+    const id = ev['id'];
+    const message = ev['message'];
+    const retriable = ev['retriable'];
+    const kindRaw = ev['kind'];
+    if (!isString(id)) {
+      warnDrop('turn_error', 'id missing or not a string');
+      return null;
+    }
+    if (!isString(message)) {
+      warnDrop('turn_error', 'message missing or not a string');
+      return null;
+    }
+    if (typeof retriable !== 'boolean') {
+      warnDrop('turn_error', 'retriable missing or not a boolean');
+      return null;
+    }
+    if (!isObjectWith(kindRaw, 'kind') || !isString(kindRaw.kind)) {
+      warnDrop('turn_error', 'kind missing or not a tagged variant');
+      return null;
+    }
+    const variant = kindRaw.kind;
+    const knownKinds = [
+      'auth',
+      'rate_limit',
+      'network',
+      'server',
+      'malformed_response',
+      'unknown',
+    ];
+    const errorKind = knownKinds.includes(variant)
+      ? (variant as
+          | 'auth'
+          | 'rate_limit'
+          | 'network'
+          | 'server'
+          | 'malformed_response'
+          | 'unknown')
+      : 'unknown';
+    const out: SessionEvent = {
+      kind: 'TurnError',
+      message_id: id,
+      error_kind: errorKind,
+      message,
+      retriable,
+    };
+    if (errorKind === 'rate_limit') {
+      const retryAfter = (kindRaw as Record<string, unknown>)['retry_after_secs'];
+      if (typeof retryAfter === 'number' && Number.isFinite(retryAfter)) {
+        out.retry_after_secs = retryAfter;
+      }
+    }
+    const raw = ev['raw'];
+    if (isString(raw)) {
+      out.raw = raw;
+    }
+    return out;
+  }
+
   // F-145: branch deletion — tombstones a variant.
   if (type === 'branch_deleted') {
     const parent = ev['parent'];

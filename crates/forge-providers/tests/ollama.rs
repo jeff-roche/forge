@@ -272,8 +272,13 @@ async fn chat_against_local_ollama() {
             ChatChunk::ToolCall { .. } => {
                 // unexpected for this prompt — model shouldn't request a tool
             }
-            ChatChunk::Error { kind, message } => {
-                panic!("ollama returned error: kind={kind:?}, message={message}")
+            ChatChunk::Error {
+                kind,
+                message,
+                status,
+                retry_after_secs: _,
+            } => {
+                panic!("ollama returned error: kind={kind:?}, status={status:?}, message={message}")
             }
         }
     }
@@ -306,12 +311,20 @@ async fn chat_maps_http_error_to_typed_chunk() {
 
     let first = stream.next().await.expect("first chunk");
     match first {
-        ChatChunk::Error { kind, message } => {
+        ChatChunk::Error {
+            kind,
+            message,
+            status,
+            retry_after_secs,
+        } => {
             assert!(matches!(kind, forge_providers::StreamErrorKind::Transport));
+            assert_eq!(status, Some(500), "status must carry the wire code");
             assert!(
                 message.contains("500"),
                 "message should mention status: {message}"
             );
+            // F-749: 500 isn't a rate-limit, so the parser doesn't run.
+            assert_eq!(retry_after_secs, None);
         }
         other => panic!("expected Error chunk, got {other:?}"),
     }

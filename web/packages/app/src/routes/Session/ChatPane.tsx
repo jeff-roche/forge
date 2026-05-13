@@ -6,6 +6,7 @@ import {
   Show,
   createMemo,
 } from 'solid-js';
+import { useNavigate } from '@solidjs/router';
 import { Button } from '@forge/design';
 import { activeSessionId, activeWorkspaceRoot } from '../../stores/session';
 import {
@@ -16,6 +17,7 @@ import {
   activeVariantPosition,
   liveVariantCount,
   neighbourVariantId,
+  removeFailedTurnPair,
   type ChatTurn,
   type BranchGroup,
   type ToolCallStatus,
@@ -53,6 +55,7 @@ import {
 import { ApprovalPrompt } from '../../components/ApprovalPrompt/ApprovalPrompt';
 import { WhitelistedPill } from '../../components/ApprovalPrompt/WhitelistedPill';
 import { CompactButton } from './CompactButton';
+import { TurnErrorCard } from './TurnErrorCard';
 import {
   ContextPicker,
   detectAtTrigger,
@@ -1350,6 +1353,26 @@ export interface ChatPaneProps {
 
 export const ChatPane: Component<ChatPaneProps> = (props) => {
   const sessionId = () => activeSessionId();
+  // F-749: route navigator captured here so `<TurnErrorCard>` can stay a
+  // pure presentation component without its own router-context dependency.
+  // The production app always mounts ChatPane inside `<Router>`, but the
+  // `ChatPane.test.tsx` suite renders it bare for fast iteration —
+  // calling `useNavigate()` without a router throws "<A> and 'use'
+  // router primitives can be only used inside a Route." The try/catch
+  // collapses that into a `null` navigator; the auth CTA becomes a no-op
+  // in non-router renders, which matches the test fixtures' expectations
+  // (they assert via injected stub on `<TurnErrorCard onOpenProviderSettings>`).
+  // The try/catch lives at the boundary that owns the navigation intent
+  // (ChatPane) rather than leaking into every leaf that wants to navigate.
+  let navigate: ((to: string) => void) | null = null;
+  try {
+    navigate = useNavigate();
+  } catch {
+    navigate = null;
+  }
+  const openProviderSettings = (): void => {
+    navigate?.('/providers');
+  };
   const state = createMemo(() => {
     const id = sessionId();
     if (!id) return { turns: [], awaitingResponse: false, streamingMessageId: null, branchGroups: {} };
@@ -1604,6 +1627,55 @@ export const ChatPane: Component<ChatPaneProps> = (props) => {
                 // the banner's `children` prop when they arrive with a
                 // matching `instance_id`; today the list is empty.
                 return <SubAgentBanner turn={turn} />;
+              case 'turn_error': {
+                // F-749: retry re-sends the originating user message as a
+                // new turn. The orchestrator's protocol guarantees the
+                // failing turn's `message_id` ties to the **immediately
+                // preceding** UserMessage event, so walking back through
+                // the transcript to find the nearest user turn before the
+                // error is sufficient. No new IPC primitive needed — the
+                // existing `sessionSendMessage` is the right call site.
+                //
+                // We also strip the failed exchange (user turn + error card)
+                // from the local transcript *before* dispatching the new
+                // send, so the user sees a single fresh attempt rather than
+                // a duplicate user bubble stacked above the new turn. See
+                // `removeFailedTurnPair` for the rationale on doing this
+                // store-side rather than via a new `MessageSuperseded`
+                // event.
+                const turns = state().turns;
+                const errorIdx = turns.findIndex(
+                  (t) => t.type === 'turn_error' && t.message_id === turn.message_id,
+                );
+                const priorUser = (() => {
+                  for (let i = errorIdx - 1; i >= 0; i--) {
+                    const t = turns[i];
+                    if (t && t.type === 'user') return t;
+                  }
+                  return null;
+                })();
+                const onRetry = (): void => {
+                  const id = sessionId();
+                  if (!id || !priorUser || errorIdx < 0) return;
+                  // Capture the text BEFORE we splice — the priorUser
+                  // reference survives because `splice` mutates in place
+                  // but the captured `.text` string is a value copy.
+                  const text = priorUser.text;
+                  removeFailedTurnPair(id, errorIdx);
+                  setAwaitingResponse(id, true);
+                  setUserScrolledUp(false);
+                  sessionSendMessage(id, text).catch((err) =>
+                    reportInvokeError(id, 'session_send_message', err),
+                  );
+                };
+                return (
+                  <TurnErrorCard
+                    turn={turn}
+                    onRetry={onRetry}
+                    onOpenProviderSettings={openProviderSettings}
+                  />
+                );
+              }
               case 'context_compacted':
                 // F-598: inline summary marker. Anchors the user's eye to
                 // the boundary between summarized history (now collapsed

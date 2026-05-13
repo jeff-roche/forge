@@ -690,3 +690,160 @@ describe('fromRustEvent — context_compacted (F-598)', () => {
     ).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// F-749 — turn_error
+// ---------------------------------------------------------------------------
+
+describe('fromRustEvent — turn_error', () => {
+  it('maps auth wire shape onto TurnError with retriable=false', () => {
+    expect(
+      fromRustEvent({
+        type: 'turn_error',
+        id: 'mid-9',
+        at: '2026-04-18T10:00:00Z',
+        kind: { kind: 'auth' },
+        message: 'Provider rejected the credential.',
+        retriable: false,
+        raw: 'HTTP 401: invalid api key',
+      }),
+    ).toEqual({
+      kind: 'TurnError',
+      message_id: 'mid-9',
+      error_kind: 'auth',
+      message: 'Provider rejected the credential.',
+      retriable: false,
+      raw: 'HTTP 401: invalid api key',
+    });
+  });
+
+  it('maps rate_limit with retry_after_secs onto TurnError', () => {
+    expect(
+      fromRustEvent({
+        type: 'turn_error',
+        id: 'mid-10',
+        at: '2026-04-18T10:00:00Z',
+        kind: { kind: 'rate_limit', retry_after_secs: 42 },
+        message: 'Provider rate limit hit.',
+        retriable: true,
+      }),
+    ).toEqual({
+      kind: 'TurnError',
+      message_id: 'mid-10',
+      error_kind: 'rate_limit',
+      message: 'Provider rate limit hit.',
+      retriable: true,
+      retry_after_secs: 42,
+    });
+  });
+
+  it('omits retry_after_secs when absent', () => {
+    expect(
+      fromRustEvent({
+        type: 'turn_error',
+        id: 'mid-11',
+        at: '2026-04-18T10:00:00Z',
+        kind: { kind: 'rate_limit' },
+        message: 'Provider rate limit hit.',
+        retriable: true,
+      }),
+    ).toEqual({
+      kind: 'TurnError',
+      message_id: 'mid-11',
+      error_kind: 'rate_limit',
+      message: 'Provider rate limit hit.',
+      retriable: true,
+    });
+  });
+
+  it('maps network / server / malformed_response / unknown variants', () => {
+    const cases: Array<{
+      variant: string;
+      expected:
+        | 'network'
+        | 'server'
+        | 'malformed_response'
+        | 'unknown';
+    }> = [
+      { variant: 'network', expected: 'network' },
+      { variant: 'server', expected: 'server' },
+      { variant: 'malformed_response', expected: 'malformed_response' },
+      { variant: 'unknown', expected: 'unknown' },
+    ];
+    for (const c of cases) {
+      const out = fromRustEvent({
+        type: 'turn_error',
+        id: `mid-${c.variant}`,
+        at: '2026-04-18T10:00:00Z',
+        kind: { kind: c.variant },
+        message: 'fail',
+        retriable: true,
+      });
+      expect(out).toMatchObject({
+        kind: 'TurnError',
+        error_kind: c.expected,
+        retriable: true,
+      });
+    }
+  });
+
+  it('falls back to `unknown` when the wire kind is unrecognised', () => {
+    expect(
+      fromRustEvent({
+        type: 'turn_error',
+        id: 'mid-x',
+        at: '2026-04-18T10:00:00Z',
+        kind: { kind: 'not_a_real_kind' },
+        message: 'fail',
+        retriable: true,
+      }),
+    ).toMatchObject({
+      kind: 'TurnError',
+      error_kind: 'unknown',
+    });
+  });
+
+  it('drops malformed payloads (missing id / message / retriable / kind)', () => {
+    // missing id
+    expect(
+      fromRustEvent({
+        type: 'turn_error',
+        at: '2026-04-18T10:00:00Z',
+        kind: { kind: 'auth' },
+        message: 'm',
+        retriable: false,
+      }),
+    ).toBeNull();
+    // missing message
+    expect(
+      fromRustEvent({
+        type: 'turn_error',
+        id: 'mid',
+        at: '2026-04-18T10:00:00Z',
+        kind: { kind: 'auth' },
+        retriable: false,
+      }),
+    ).toBeNull();
+    // missing retriable
+    expect(
+      fromRustEvent({
+        type: 'turn_error',
+        id: 'mid',
+        at: '2026-04-18T10:00:00Z',
+        kind: { kind: 'auth' },
+        message: 'm',
+      }),
+    ).toBeNull();
+    // missing kind tag
+    expect(
+      fromRustEvent({
+        type: 'turn_error',
+        id: 'mid',
+        at: '2026-04-18T10:00:00Z',
+        kind: {},
+        message: 'm',
+        retriable: false,
+      }),
+    ).toBeNull();
+  });
+});

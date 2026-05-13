@@ -477,7 +477,86 @@ pub enum Event {
         target: String,
         message: String,
     },
+
+    /// F-749: typed provider-call failure surfaced inline in the chat
+    /// transcript.
+    ///
+    /// Emitted by `Orchestrator::run_turn` (and the rerun paths) when a real
+    /// provider call fails — HTTP non-2xx, transport / SSE / NDJSON error,
+    /// or a malformed stream payload — so the UI can render an error card
+    /// at the position where the assistant response would have appeared.
+    /// The card is durable across crash-restart because the event lives on
+    /// the session's event log alongside the originating `UserMessage`.
+    ///
+    /// `id` is the `MessageId` of the failing turn — the same id used by
+    /// the orchestrator for the (never-finalised) `AssistantMessage` and
+    /// the originating `UserMessage`, so subscribers can position the
+    /// card inline at the turn's slot.
+    ///
+    /// `kind` is the classified failure category the UI dispatches on
+    /// (`auth_error` → "Open provider settings" CTA, `rate_limit` →
+    /// disabled Retry + countdown, etc.). `message` is a human-readable
+    /// summary; `raw` (capped) carries the provider's verbatim error
+    /// text for the "Show details" disclosure. `retriable` is the
+    /// orchestrator's verdict on whether the same user message can be
+    /// re-sent productively — `false` for auth errors (the credential
+    /// must change first), `true` for transient classes.
+    TurnError {
+        id: MessageId,
+        at: DateTime<Utc>,
+        kind: TurnErrorKind,
+        message: String,
+        retriable: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        raw: Option<String>,
+    },
 }
+
+/// F-749: failure category the UI dispatches `TurnErrorCard` rendering on.
+///
+/// Wire shape is the standard internally-tagged form: each variant
+/// serializes as `{"kind": "<snake_case>"}` with any per-variant fields
+/// alongside (e.g. `{"kind":"rate_limit","retry_after_secs":42}`). The
+/// `Retry-After` value rides on the `RateLimit` variant so the UI can
+/// show a live countdown without re-parsing the message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TurnErrorKind {
+    /// HTTP 401 / 403 — credential rejected by the provider. The user
+    /// must change the active credential before retrying; the card hides
+    /// the Retry button and surfaces an "Open provider settings" CTA.
+    Auth,
+    /// HTTP 429 — provider rate limit hit. `retry_after_secs` carries the
+    /// parsed `Retry-After` response-header value when present so the UI
+    /// can render a live countdown; absent means "unknown — Retry is
+    /// disabled until the user re-engages."
+    RateLimit {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_after_secs: Option<u32>,
+    },
+    /// Transport-level failure: connection refused, DNS, TLS, idle /
+    /// wall-clock timeout, or generic SSE reader error. Retry is offered
+    /// immediately — the user is the best judge of whether the network
+    /// has recovered.
+    Network,
+    /// HTTP 5xx — provider-side server error. Retry is offered immediately.
+    Server,
+    /// Stream payload failed to parse or violated a framing invariant
+    /// (NDJSON decode error, oversized SSE line, malformed event shape).
+    /// Retry is offered immediately — the failure may be a transient
+    /// gateway glitch.
+    MalformedResponse,
+    /// Failure that did not match any of the above categories. Retry is
+    /// offered immediately; the "Show details" disclosure carries the
+    /// raw provider error so the user can self-diagnose.
+    Unknown,
+}
+
+/// F-749: max byte budget for the `raw` field on a `TurnError` event. Caps
+/// runaway provider error bodies so the on-disk event log cannot be inflated
+/// by a misbehaving upstream. Producers MUST truncate before constructing
+/// the event; consumers can rely on the field being within this bound.
+pub const TURN_ERROR_RAW_CAP_BYTES: usize = 4096;
 
 /// Severity bucket for [`Event::LogLine`]. Wire shape is the lowercase
 /// `tracing::Level` name so the TS adapter can drop it straight into a

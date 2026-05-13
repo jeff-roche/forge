@@ -105,6 +105,27 @@ export type SessionEvent =
       summary_msg_id: string;
       summarized_turns: number;
       trigger: 'AutoAt98Pct' | 'UserRequested';
+    }
+  // F-749: typed provider-call failure surfaced inline in the transcript.
+  // ChatPane renders a `<TurnErrorCard>` for each turn that hits this state
+  // at the position where the assistant response would have appeared. The
+  // store discards any partial assistant turn at `message_id` because the
+  // orchestrator's protocol guarantees no `AssistantDelta` lands after a
+  // `TurnError` — the empty bubble would otherwise dangle.
+  | {
+      kind: 'TurnError';
+      message_id: string;
+      error_kind:
+        | 'auth'
+        | 'rate_limit'
+        | 'network'
+        | 'server'
+        | 'malformed_response'
+        | 'unknown';
+      message: string;
+      retriable: boolean;
+      retry_after_secs?: number;
+      raw?: string;
     };
 
 // ---------------------------------------------------------------------------
@@ -187,6 +208,23 @@ export type ChatTurn =
       summary_msg_id: string;
       summarized_turns: number;
       trigger: 'AutoAt98Pct' | 'UserRequested';
+    }
+  // F-749: failed-turn marker. ChatPane renders the `<TurnErrorCard>` at
+  // this turn's position with action buttons keyed off `error_kind`.
+  | {
+      type: 'turn_error';
+      message_id: string;
+      error_kind:
+        | 'auth'
+        | 'rate_limit'
+        | 'network'
+        | 'server'
+        | 'malformed_response'
+        | 'unknown';
+      message: string;
+      retriable: boolean;
+      retry_after_secs?: number;
+      raw?: string;
     };
 
 // ---------------------------------------------------------------------------
@@ -267,6 +305,47 @@ export function cancelStream(sessionId: SessionId): void {
   ensureSession(sessionId);
   setMessagesStore(sessionId, 'awaitingResponse', false);
   setMessagesStore(sessionId, 'streamingMessageId', null);
+}
+
+/**
+ * F-749: locally drop the failed exchange (the originating user turn + the
+ * error card) before retrying. The orchestrator's protocol pairs each
+ * `TurnError` with the immediately preceding `UserMessage` event, so the
+ * range we splice is exactly `[errorIdx - 1, errorIdx]`.
+ *
+ * Why store-side and not orchestrator-side (`MessageSuperseded`):
+ *
+ * The orchestrator-side path would emit a new `MessageSuperseded { old_id }`
+ * event from a new `rerun_user_message` IPC primitive, and the existing
+ * `MessageSuperseded` handler would filter the old turns visually. That's
+ * architecturally cleaner — it keeps the log authoritative and the UI a
+ * pure projection — but it's a much larger change: new IPC method, new
+ * event variant, new orchestrator code path, plus the new event has to
+ * survive replay across daemon restart. For F-749 the failed exchange is
+ * known-bad and the user is explicitly asking to discard it; the store-side
+ * splice produces an identical user-visible transcript without the IPC
+ * surface-area expansion. If we later need cross-replay durability for
+ * "this turn was retried", we can lift this into `MessageSuperseded` then.
+ *
+ * The local-only nature of the splice is also why this isn't a SessionEvent
+ * — there's no wire payload to dispatch, just a UI-state mutation.
+ */
+export function removeFailedTurnPair(
+  sessionId: SessionId,
+  errorTurnIndex: number,
+): void {
+  ensureSession(sessionId);
+  setMessagesStore(
+    sessionId,
+    produce((state: MessagesState) => {
+      // Defensive bounds — `errorTurnIndex` should always be >= 1 (there's
+      // always a `UserMessage` immediately before a `TurnError` per the
+      // orchestrator's protocol), but a stale index from a re-render race
+      // would otherwise splice off the start of the array silently.
+      if (errorTurnIndex < 1 || errorTurnIndex >= state.turns.length) return;
+      state.turns.splice(errorTurnIndex - 1, 2);
+    }),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -703,6 +782,55 @@ export function pushEvent(sessionId: SessionId, event: SessionEvent): void {
             summarized_turns: event.summarized_turns,
             trigger: event.trigger,
           });
+        }),
+      );
+      break;
+    }
+
+    // F-749: failed turn — replace the empty/streaming assistant placeholder
+    // (the orchestrator emits an `AssistantMessage(stream_finalised=true,
+    // text="")` immediately before the `TurnError`) with the typed error
+    // turn so the card lands at the exact transcript slot the user
+    // expects. The originating user turn stays untouched.
+    //
+    // Event-ordering assumption: the orchestrator emits the finalised
+    // (empty) `AssistantMessage` BEFORE the `TurnError` on every error
+    // path — see `orchestrator.rs` `ChatChunk::Error` arm. That ordering
+    // is what lets us "replace" the assistant slot via the `idx >= 0`
+    // branch. The fallback `idx < 0` branch covers out-of-order delivery
+    // (replay glitches, log truncation between AssistantMessage and
+    // TurnError, or a future orchestrator path that emits TurnError
+    // standalone): we append the error card as a fresh turn rather than
+    // dropping the failure on the floor, and we still clear
+    // `streamingMessageId` + `awaitingResponse` so the composer unlocks
+    // regardless of which arm fires.
+    case 'TurnError': {
+      setMessagesStore(
+        produce((s) => {
+          const state = s[sessionId]!;
+          const idx = state.turns.findIndex(
+            (t) => t.type === 'assistant' && t.message_id === event.message_id,
+          );
+          const next: Extract<ChatTurn, { type: 'turn_error' }> = {
+            type: 'turn_error',
+            message_id: event.message_id,
+            error_kind: event.error_kind,
+            message: event.message,
+            retriable: event.retriable,
+          };
+          if (event.retry_after_secs !== undefined) {
+            next.retry_after_secs = event.retry_after_secs;
+          }
+          if (event.raw !== undefined) {
+            next.raw = event.raw;
+          }
+          if (idx >= 0) {
+            state.turns[idx] = next;
+          } else {
+            state.turns.push(next);
+          }
+          state.streamingMessageId = null;
+          state.awaitingResponse = false;
         }),
       );
       break;

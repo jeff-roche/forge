@@ -87,13 +87,32 @@ impl Provider for OllamaProvider {
                 .map_err(|e| anyhow::anyhow!("ollama chat request failed: {e}"))?;
 
             if !resp.status().is_success() {
+                // F-749: surface the HTTP status code on the error envelope
+                // so the orchestrator can classify Ollama 4xx/5xx into the
+                // matching `TurnErrorKind` (auth / rate_limit / server)
+                // without parsing the message string.
                 let status = resp.status();
+                let code = status.as_u16();
+                // F-749: Ollama is keyless and self-hosted, so 429 is rare —
+                // but a fronting reverse proxy may add rate-limiting and
+                // emit a standards-compliant `Retry-After`. Read it the same
+                // way the cloud providers do so the UI countdown lights up
+                // uniformly across all backends.
+                let retry_after_secs = if code == 429 {
+                    resp.headers()
+                        .get(reqwest::header::RETRY_AFTER)
+                        .and_then(http_util::parse_retry_after)
+                } else {
+                    None
+                };
                 let body_text = resp.text().await.unwrap_or_default();
                 let preview = http_util::truncate(&body_text, 256);
                 return Ok(Box::pin(stream::once(async move {
                     ChatChunk::Error {
                         kind: StreamErrorKind::Transport,
                         message: format!("ollama HTTP {status}: {preview}"),
+                        status: Some(code),
+                        retry_after_secs,
                     }
                 })) as BoxStream<'static, ChatChunk>);
             }
@@ -110,11 +129,18 @@ impl Provider for OllamaProvider {
                         Err(e) => vec![ChatChunk::Error {
                             kind: StreamErrorKind::Transport,
                             message: format!("ollama NDJSON parse error: {e}"),
+                            // F-749: NDJSON decode failure has no HTTP status
+                            // attached; the orchestrator will classify on
+                            // `kind` instead and emit `MalformedResponse`.
+                            status: None,
+                            retry_after_secs: None,
                         }],
                     },
                     Err(e) => vec![ChatChunk::Error {
                         kind: StreamErrorKind::Transport,
                         message: format!("ollama stream read error: {e}"),
+                        status: None,
+                        retry_after_secs: None,
                     }],
                 };
                 stream::iter(chunks)
