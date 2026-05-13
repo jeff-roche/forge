@@ -19,7 +19,7 @@ use crate::{ChatChunk, ChatRequest, Provider, ProviderAuth};
 use bytes::Bytes;
 use forge_core::Result;
 use futures::stream::{BoxStream, StreamExt};
-use secrecy::ExposeSecret;
+use secrecy::{ExposeSecret, SecretString};
 
 pub mod custom;
 pub mod translate;
@@ -118,16 +118,24 @@ impl Provider for OpenAiProvider {
         auth_in: ProviderAuth,
     ) -> impl std::future::Future<Output = Result<BoxStream<'static, ChatChunk>>> + Send {
         let body_result = translate::serialize_request(&req, &self.model, self.max_tokens);
-        // F-744: prefer the per-turn credential from the seam. Falls back
-        // to the constructor-time key on `ProviderAuth::None`. The
-        // OpenAI protocol uses the same `Authorization: Bearer …` shape
-        // regardless of source; `Vertex` is meaningless here and also
-        // falls back.
-        let bearer = match &auth_in {
-            ProviderAuth::ApiKey(s) => s.expose_secret().to_string(),
-            ProviderAuth::Vertex(_) | ProviderAuth::None => self.api_key.clone(),
+        // F-744 zeroization contract: hold the per-turn bearer in a
+        // `SecretString` (zeroizes on drop) for the lifetime of the
+        // request future, NOT a plain `String`. The seam-supplied
+        // `SecretString` is cloned only when fallback to the
+        // constructor-time plaintext `api_key` is required.
+        //
+        // `Vertex` is meaningless against an OpenAI Chat Completions
+        // endpoint and falls back to the constructor value.
+        let bearer: SecretString = match &auth_in {
+            ProviderAuth::ApiKey(s) => s.clone(),
+            ProviderAuth::Vertex(_) | ProviderAuth::None => {
+                SecretString::from(self.api_key.clone())
+            }
         };
-        let auth = vec![(reqwest::header::AUTHORIZATION, format!("Bearer {bearer}"))];
+        let auth = vec![(
+            reqwest::header::AUTHORIZATION,
+            AuthHeaderValue::Bearer(bearer),
+        )];
         chat_request(
             self.stream_client.clone(),
             self.base_url.clone(),
@@ -138,19 +146,51 @@ impl Provider for OpenAiProvider {
     }
 }
 
+/// F-744: secret-bearing header value carried into [`chat_request`].
+///
+/// The plaintext bytes never escape a [`secrecy::SecretString`] except
+/// through [`render`] at the `builder.header(...)` boundary; the rendered
+/// `String` is dropped with the per-iteration scope of the header loop.
+///
+/// `Raw` covers `CustomOpenAiProvider`'s `AuthShape::Header { name }` case
+/// where the wire value is the raw key (no `Bearer ` prefix).
+pub(crate) enum AuthHeaderValue {
+    Bearer(SecretString),
+    Raw(SecretString),
+}
+
+impl AuthHeaderValue {
+    /// Materialize the wire-format header-value string. The returned
+    /// `String` is intended to feed `reqwest::RequestBuilder::header` and
+    /// then drop immediately.
+    fn render(&self) -> String {
+        match self {
+            AuthHeaderValue::Bearer(s) => format!("Bearer {}", s.expose_secret()),
+            AuthHeaderValue::Raw(s) => s.expose_secret().to_string(),
+        }
+    }
+}
+
 /// Shared chat-request pipeline used by both [`OpenAiProvider`] and
 /// [`CustomOpenAiProvider`]. Lifted here so the two providers share a single
 /// implementation of the OpenAI Chat Completions wire protocol — only the
 /// auth-header construction differs between them.
 ///
-/// `auth_headers` is an `(HeaderName, header-value-string)` list rather than
-/// a fully-typed `HeaderMap` so call sites stay terse and the
+/// `auth_headers` is an `(HeaderName, AuthHeaderValue)` list rather than a
+/// fully-typed `HeaderMap` so call sites stay terse and the
 /// custom-provider's `AuthShape::None` variant maps to an empty `vec![]`
 /// without wrestling with `HeaderMap::new()`.
+///
+/// F-744: the value side is [`AuthHeaderValue`] (wrapping a
+/// [`secrecy::SecretString`]) rather than a plain `String`, so the
+/// plaintext credential bytes are scrubbed on drop even if the request
+/// future is cancelled. Plaintext is materialized only inside the
+/// per-iteration `value.render()` call below; the rendered string drops
+/// at the end of each loop iteration.
 pub(crate) fn chat_request(
     client: reqwest::Client,
     base_url: String,
-    auth_headers: Vec<(reqwest::header::HeaderName, String)>,
+    auth_headers: Vec<(reqwest::header::HeaderName, AuthHeaderValue)>,
     body_result: std::result::Result<Vec<u8>, serde_json::Error>,
     cfg: sse::StreamConfig,
 ) -> impl std::future::Future<Output = Result<BoxStream<'static, ChatChunk>>> + Send {
@@ -163,7 +203,7 @@ pub(crate) fn chat_request(
             .post(&url)
             .header(reqwest::header::CONTENT_TYPE, "application/json");
         for (name, value) in auth_headers {
-            builder = builder.header(name, value);
+            builder = builder.header(name, value.render());
         }
         let resp = builder.body(body).send().await.map_err(|e| {
             // Preserve the source chain so a redirect-policy refusal

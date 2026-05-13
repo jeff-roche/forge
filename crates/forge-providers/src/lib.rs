@@ -264,7 +264,13 @@ pub trait Provider: Send + Sync {
         req: ChatRequest,
     ) -> impl std::future::Future<Output = Result<BoxStream<'static, ChatChunk>>> + Send;
 
-    /// F-744: authenticated chat entry point.
+    /// F-744: authenticated chat entry point. **Preferred entry point for
+    /// credential-aware callers** — `chat()` is retained for compatibility
+    /// with callers that don't thread per-turn credentials (tests, the
+    /// `SwappableProvider` trampolines, the keyless `MockProvider`); new
+    /// code should call `chat_with_auth` so the seam is exercised end to
+    /// end. The trait keeps both methods because adding `#[deprecated]`
+    /// would noise up every `SwappableProvider::chat` trampoline.
     ///
     /// The orchestrator calls this with the credential pulled from the
     /// keyring for the active provider on every turn. Implementations:

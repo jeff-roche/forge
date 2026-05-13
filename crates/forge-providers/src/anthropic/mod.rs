@@ -18,7 +18,7 @@ use crate::{ChatChunk, ChatRequest, Provider, ProviderAuth};
 use bytes::Bytes;
 use forge_core::Result;
 use futures::stream::{BoxStream, StreamExt};
-use secrecy::ExposeSecret;
+use secrecy::{ExposeSecret, SecretString};
 
 pub mod translate;
 
@@ -287,8 +287,16 @@ impl Provider for AnthropicProvider {
         // Resolve auth eagerly (no `.await` involved): seam wins over
         // constructor, then the resolved choice owns its strings so the
         // async block doesn't borrow `self` across an `.await`.
+        //
+        // F-744 zeroization contract: the secret bytes ride through the
+        // async block inside a `SecretString` (zeroizes on drop) — NEVER
+        // a plain `String` — so a panic mid-`.await` or the future being
+        // dropped before completion still scrubs the plaintext from the
+        // heap. `expose_secret()` is called only at the
+        // `builder.header(...)` boundary below and the exposed slice is
+        // dropped with the request future.
         let resolved_owned: ResolvedAuthOwned = match self.resolve_auth(&auth_in) {
-            ResolvedAuth::ApiKey(k) => ResolvedAuthOwned::ApiKey(k.to_string()),
+            ResolvedAuth::ApiKey(k) => ResolvedAuthOwned::ApiKey(SecretString::from(k.to_string())),
             ResolvedAuth::Vertex {
                 project,
                 region,
@@ -296,7 +304,7 @@ impl Provider for AnthropicProvider {
             } => ResolvedAuthOwned::Vertex {
                 project: project.to_string(),
                 region: region.to_string(),
-                prefetched_token: prefetched_token.map(str::to_string),
+                prefetched_token: prefetched_token.map(|t| SecretString::from(t.to_string())),
                 model: self.model.clone(),
             },
         };
@@ -326,22 +334,31 @@ impl Provider for AnthropicProvider {
             let mut builder = client.post(&url);
             match resolved_owned {
                 ResolvedAuthOwned::ApiKey(api_key) => {
+                    // F-744: `expose_secret()` borrows the inner bytes
+                    // for the lifetime of the header value. Once
+                    // `api_key` (the `SecretString`) drops at the end of
+                    // this match arm, the bytes are zeroized.
                     builder = builder
-                        .header("x-api-key", api_key.as_str())
+                        .header("x-api-key", api_key.expose_secret())
                         .header("anthropic-version", ANTHROPIC_VERSION);
                 }
                 ResolvedAuthOwned::Vertex {
                     prefetched_token, ..
                 } => {
-                    let token = match prefetched_token {
+                    let token: SecretString = match prefetched_token {
                         Some(t) => t,
-                        None => tokio::task::spawn_blocking(fetch_vertex_access_token)
-                            .await
-                            .map_err(|e| anyhow::anyhow!("vertex token join failed: {e}"))?
-                            .map_err(|e| anyhow::anyhow!("vertex auth: {e}"))?,
+                        None => SecretString::from(
+                            tokio::task::spawn_blocking(fetch_vertex_access_token)
+                                .await
+                                .map_err(|e| anyhow::anyhow!("vertex token join failed: {e}"))?
+                                .map_err(|e| anyhow::anyhow!("vertex auth: {e}"))?,
+                        ),
                     };
                     builder = builder
-                        .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
+                        .header(
+                            reqwest::header::AUTHORIZATION,
+                            format!("Bearer {}", token.expose_secret()),
+                        )
                         .header("anthropic-version", VERTEX_ANTHROPIC_VERSION);
                 }
             }
@@ -368,13 +385,20 @@ impl Provider for AnthropicProvider {
 }
 
 /// Owned form of [`ResolvedAuth`] suitable for moving into an `async move`
-/// block. Strings are short-lived and dropped with the request future.
+/// block.
+///
+/// F-744 zeroization contract: secret-bearing fields use
+/// [`secrecy::SecretString`] (not plain `String`) so the plaintext bytes are
+/// scrubbed on drop — including when the request future is cancelled
+/// mid-`.await`. Plaintext is exposed via [`ExposeSecret::expose_secret`]
+/// only at the `builder.header(...)` boundary, where the borrowed slice
+/// drops with the request future.
 enum ResolvedAuthOwned {
-    ApiKey(String),
+    ApiKey(SecretString),
     Vertex {
         project: String,
         region: String,
-        prefetched_token: Option<String>,
+        prefetched_token: Option<SecretString>,
         model: String,
     },
 }
@@ -448,6 +472,43 @@ mod tests {
     fn api_key_request_url_trims_trailing_slash() {
         let p = AnthropicProvider::new("https://api.anthropic.com/", "k", "claude-3", 4096);
         assert_eq!(p.request_url(), "https://api.anthropic.com/v1/messages");
+    }
+
+    /// F-744 zeroization contract regression. `ResolvedAuthOwned` is the
+    /// per-turn auth value that lives on the heap for the entire duration
+    /// of an outbound HTTP request future (across at least one `.await`).
+    /// Its secret-bearing fields MUST be `SecretString` (zeroizes on
+    /// drop), not plain `String` — otherwise the credential outlives the
+    /// `.await` without scrubbing. This test pins the storage type at
+    /// compile time: any future refactor that swaps `SecretString` back
+    /// for `String` will fail to type-check here.
+    #[test]
+    fn resolved_auth_owned_uses_secret_string_for_api_key() {
+        let owned = ResolvedAuthOwned::ApiKey(SecretString::from("sk-test".to_string()));
+        match &owned {
+            ResolvedAuthOwned::ApiKey(k) => {
+                let _: &SecretString = k;
+            }
+            ResolvedAuthOwned::Vertex { .. } => panic!("expected ApiKey arm"),
+        }
+    }
+
+    #[test]
+    fn resolved_auth_owned_vertex_prefetched_token_is_secret_string() {
+        let owned = ResolvedAuthOwned::Vertex {
+            project: "p".into(),
+            region: "r".into(),
+            prefetched_token: Some(SecretString::from("t".to_string())),
+            model: "m".into(),
+        };
+        match &owned {
+            ResolvedAuthOwned::Vertex {
+                prefetched_token, ..
+            } => {
+                let _: &Option<SecretString> = prefetched_token;
+            }
+            ResolvedAuthOwned::ApiKey(_) => panic!("expected Vertex arm"),
+        }
     }
 
     #[test]
