@@ -40,7 +40,8 @@ graph LR
     Dash -- "invoke('session_start')" --> Cmds
     SW -- "session_hello / subscribe" --> Cmds
     CP -- "session_send_message" --> Cmds
-    Cmds <--> Bridge
+    Cmds -- "dispatch (sync)" --> Bridge
+    Bridge -- "event pump (async)" --> Cmds
     Bridge <-- "length-prefixed JSON over UDS" --> Accept
     Accept --> Loop
     Loop --> Orch
@@ -130,11 +131,11 @@ Each row pins a step from the sequence diagram to its concrete entry point. Symb
 | 5 | Daemon spawn | forge-cli | `crates/forge-cli/src/spawn.rs` | `spawn_forged_session`, `spawn_forged_session_with_id`, `find_forged_binary`, `wait_for_socket` | Allocates a `SessionId`, composes socket + pid paths, forks `forged`, waits up to 5 s for the UDS to appear. |
 | 6 | Daemon startup | forge-session | `crates/forge-session/src/main.rs` | `main` | Reads `FORGE_SESSION_ID`, `FORGE_SOCKET_PATH`, `FORGE_WORKSPACE`, `FORGE_PID_FILE`, `FORGE_ACTIVE_AGENT`. Refuses to start without `--provider` or `FORGE_PROVIDER` (F-743). |
 | 7 | Provider grammar | forge-session | `crates/forge-session/src/provider_spec.rs` | `resolve_provider_kind`, `ProviderKind`, `parse_provider_spec` | Grammar: `<kind>[:<model>[@<base_url>]]`. Built-ins: `mock`, `ollama`, `anthropic`, `openai`. |
-| 8 | Credential context build | forge-session | `crates/forge-session/src/main.rs` | `build_credential_context` | `LayeredStore::new(KeyringStore, EnvFallbackStore)` for keyed providers; `None` for Mock / Ollama. |
+| 8 | Credential context build | forge-session | `crates/forge-session/src/main.rs` | `build_credential_context` (crate-private) | `LayeredStore::new(KeyringStore, EnvFallbackStore)` for keyed providers; `None` for Mock / Ollama. The `CredentialContext` type itself is defined in `crates/forge-session/src/orchestrator.rs`. |
 | 9 | UDS bind + accept | forge-session | `crates/forge-session/src/server.rs` | `serve_with_session`, `serve_with_session_swappable` | Chmod parent dir 0o700, socket 0o600 (F-044). |
 | 10 | Event-log path | forge-session | `crates/forge-session/src/server.rs` | `event_log_path` | `<workspace>/.forge/sessions/<id>/events.jsonl`. |
 | 11 | Session create / resume | forge-session | `crates/forge-session/src/session.rs` | `Session::create`, `Session::resume` | `resume` reuses the existing log on restart (F-748). |
-| 12 | UDS handshake | forge-ipc | `crates/forge-ipc/src/lib.rs` | `IpcMessage::Hello`, `HelloAck`, `Subscribe`, `read_frame_with_deadline`, `write_frame`, `MAX_FRAME_SIZE` | 4 MiB frame cap; cap is enforced during serialization via `CapWriter`. |
+| 12 | UDS handshake | forge-ipc | `crates/forge-ipc/src/lib.rs` | `IpcMessage::Hello`, `HelloAck`, `Subscribe`, `read_frame_with_deadline`, `write_frame`, `MAX_FRAME_SIZE` (crate-private) | 4 MiB frame cap; cap is enforced during serialization via `CapWriter`. |
 | 13 | Shell-side connect | forge-shell | `crates/forge-shell/src/bridge.rs` | `SessionBridge::hello` | `UnixStream::connect`, write `Hello`, read `HelloAck`, cache canonicalized workspace root (F-122). |
 | 14 | Open SessionWindow | forge-shell | `crates/forge-shell/src/dashboard_sessions.rs`, `crates/forge-shell/src/window_manager.rs` | `open_session`, `WindowManager::open_session` | Spawns a Tauri webview window with label `session-<id>`. |
 | 15 | SessionWindow mount | webview | `web/packages/app/src/routes/Session/SessionWindow.tsx` | `SessionWindow` | Calls `sessionHello`, `sessionSubscribe`, registers `onSessionEvent` + `onSessionCrashed`. |
@@ -145,7 +146,7 @@ Each row pins a step from the sequence diagram to its concrete entry point. Symb
 | 20 | `session_send_message` cmd | forge-shell | `crates/forge-shell/src/ipc.rs` | `session_send_message`, `MAX_MESSAGE_TEXT_BYTES` | 128 KiB cap on `text` before any frame is allocated. |
 | 21 | Send-message bridge | forge-shell | `crates/forge-shell/src/bridge.rs` | `SessionBridge::send_message` | Frames `IpcMessage::SendUserMessage { text }` to the daemon. |
 | 22 | Daemon dispatch | forge-session | `crates/forge-session/src/server.rs` | Connection `select!` loop, `IpcMessage::SendUserMessage` arm | Spawns `run_turn` on a tokio task. |
-| 23 | Run turn | forge-session | `crates/forge-session/src/orchestrator.rs` | `run_turn`, `CredentialContext`, `pull_active_credential`, `build_provider_auth` | F-587 / F-744: one credential pull per turn; secret never logged. |
+| 23 | Run turn | forge-session | `crates/forge-session/src/orchestrator.rs` | `run_turn` (module-level fn), `CredentialContext`, `pull_active_credential`, `build_provider_auth` | F-587 / F-744: one credential pull per turn; secret never logged. |
 | 24 | Provider auth seam | forge-providers | `crates/forge-providers/src/lib.rs` | `Provider::chat_with_auth`, `ProviderAuth` | `ApiKey(SecretString)` / `Vertex(SecretString)` / `None`. `Debug` is redacted; `Display` and `Serialize` are intentionally absent. |
 | 25 | Provider impls | forge-providers | `crates/forge-providers/src/anthropic/mod.rs`, `crates/forge-providers/src/openai/mod.rs`, `crates/forge-providers/src/ollama/mod.rs` | `AnthropicProvider`, `OpenAiProvider`, `OllamaProvider` | F-745 verticals. Ollama ignores the credential. |
 | 26 | Streaming chunks | forge-providers | `crates/forge-providers/src/lib.rs`, `crates/forge-providers/src/sse.rs` | `ChatChunk::{TextDelta, ToolCall, Done, Error}`, `StreamErrorKind` | Provider implementations parse SSE / NDJSON into this canonical chunk type. |
@@ -153,7 +154,7 @@ Each row pins a step from the sequence diagram to its concrete entry point. Symb
 | 28 | Persist + broadcast | forge-session | `crates/forge-session/src/session.rs` | `Session::emit` | Appends to `EventLog`, then broadcasts `(seq, Event)` over a tokio broadcast channel. |
 | 29 | UDS broadcast write | forge-session | `crates/forge-session/src/server.rs` | Connection loop's `live_rx.recv()` arm, `forge_ipc::write_frame(&mut writer, &IpcMessage::Event(IpcEvent { seq, event }))` | One frame per event; flushes monotonically by `seq`. |
 | 30 | Shell reader pump | forge-shell | `crates/forge-shell/src/bridge.rs` | `pump_events`, `EventSink::emit`, `EventSink::on_crash` | Per-connection task. Tracks `last_seq` for crash-restart. |
-| 31 | Tauri event emit | forge-shell | `crates/forge-shell/src/ipc.rs` | `AppHandleSink::emit`, `SessionEventPayload`, `SESSION_EVENT` | `app.emit_to(EventTarget::webview_window("session-<id>"), "session:event", payload)` — targeted, not broadcast (F-062). |
+| 31 | Tauri event emit | forge-shell | `crates/forge-shell/src/ipc.rs` | `AppHandleSink::emit`, `SessionEventPayload` | Emits the Tauri event `"session:event"` (string literal here) scoped to the matching webview via `app.emit_to(EventTarget::webview_window("session-<id>"), …)` — targeted, not broadcast (F-062). The canonical TS-side constant `SESSION_EVENT` lives in Row 18. |
 | 32 | Webview listener | webview | `web/packages/app/src/routes/Session/SessionWindow.tsx`, `web/packages/app/src/ipc/events.ts` | `onSessionEvent`, `fromRustEvent`, `setSessionEvents`, `pushEvent`, `routeTelemetryEvent` | Routes payload into the session-event store and per-turn timeline. |
 | 33 | ChatPane render | webview | `web/packages/app/src/routes/Session/ChatPane.tsx` | streaming-text render for `AssistantDelta`, `TurnErrorCard` for `TurnError` | The composer's "awaiting response" lock clears on `AssistantMessage { stream_finalised: true }`. |
 
