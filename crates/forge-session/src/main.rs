@@ -133,8 +133,11 @@ async fn main() -> Result<()> {
     // `forged` subprocesses in integration tests set `FORGE_USER_HOME_FOR_TEST`
     // to a tempdir so `load_mcp_manager` does not see the developer's real
     // `~/.mcp.json` (CI passes because `$HOME` is clean; local runs leak).
-    // Gated on `debug_assertions` so release builds never honour the
-    // override — production resolves through `dirs::home_dir()` only.
+    //
+    // Gated on `debug_assertions`: disabled in the default release profile;
+    // a profiling build with `[profile.release] debug-assertions = true`
+    // would still honour it. The `FOR_TEST` naming convention is the real
+    // safety contract — never set this env var in production.
     let user_home_override = if cfg!(debug_assertions) {
         std::env::var("FORGE_USER_HOME_FOR_TEST")
             .ok()
@@ -173,9 +176,9 @@ async fn main() -> Result<()> {
                 // F-601: typed active-agent — `None` here keeps memory off.
                 active_agent,
                 // Test isolation: `Some(tempdir)` when
-                // `FORGE_USER_HOME_FOR_TEST` is set in a debug build; `None`
-                // in release builds where the loader falls back to
-                // `dirs::home_dir()`.
+                // `FORGE_USER_HOME_FOR_TEST` is set in a build with
+                // `debug_assertions = true`; `None` otherwise, in which case
+                // `load_mcp_manager` falls back to `dirs::home_dir()`.
                 user_home_override,
             )
             .await
