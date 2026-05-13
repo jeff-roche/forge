@@ -241,6 +241,17 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
     }
   });
 
+  // Memoize the credentials-missing parse so the `<Show>` guard and the
+  // child `href` share a single evaluation per render. Solid evaluates
+  // `when` and the child render expression independently, so calling
+  // `extractMissingCredentialProviderId(error())` in both places would
+  // re-parse the same string twice — a `createMemo` is the idiomatic
+  // fix and also lets the child callback receive the non-null id
+  // directly (no `?? ''` fallback).
+  const missingCredentialProvider = createMemo(() =>
+    extractMissingCredentialProviderId(error()),
+  );
+
   // Focus-trap. Spec §Trigger calls for the workspace field to receive
   // focus on open — the field is the first interactive element either way.
   let dialogRef: HTMLDivElement | undefined;
@@ -455,16 +466,20 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
                 data-testid="new-session-error"
               >
                 {error()}
-                <Show when={extractMissingCredentialProviderId(error()) !== null}>
-                  {' '}
-                  <A
-                    class="new-session-dialog__error-cta"
-                    data-testid="new-session-error-cta"
-                    href={`/providers#${extractMissingCredentialProviderId(error()) ?? ''}`}
-                    onClick={() => props.onClose()}
-                  >
-                    Configure provider
-                  </A>
+                <Show when={missingCredentialProvider()}>
+                  {(id) => (
+                    <>
+                      {' '}
+                      <A
+                        class="new-session-dialog__error-cta"
+                        data-testid="new-session-error-cta"
+                        href={`/providers#${id()}`}
+                        onClick={() => props.onClose()}
+                      >
+                        Configure provider
+                      </A>
+                    </>
+                  )}
                 </Show>
               </div>
             </Show>
