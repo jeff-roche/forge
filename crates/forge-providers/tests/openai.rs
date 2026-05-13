@@ -309,6 +309,94 @@ async fn chat_line_too_long_yields_typed_error_and_terminates() {
     );
 }
 
+/// F-745 DoD #3: a continuation turn that carries a prior assistant
+/// `ChatBlock::ToolCall` plus a user `ChatBlock::ToolResult` must serialize
+/// onto the wire as OpenAI's `tool_calls` array (inside the assistant
+/// message) and a paired `role: "tool"` message keyed by `tool_call_id`.
+/// Asserts on the actual HTTP request body the mock server received — so
+/// a future refactor that breaks the wire shape surfaces here.
+#[tokio::test(flavor = "multi_thread")]
+async fn tool_call_and_result_round_trip_through_request_body() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(TEXT_AND_TOOL_USE_FIXTURE),
+        )
+        .mount(&server)
+        .await;
+
+    let provider = OpenAiProvider::new(server.uri(), "sk-test", "gpt-4o");
+    let req = ChatRequest {
+        system: None,
+        messages: vec![
+            ChatMessage {
+                role: ChatRole::User,
+                content: vec![ChatBlock::Text("what is the weather in sf".into())],
+            },
+            ChatMessage {
+                role: ChatRole::Assistant,
+                content: vec![
+                    ChatBlock::Text("checking".into()),
+                    ChatBlock::ToolCall {
+                        id: "call_round_trip".into(),
+                        name: "get_weather".into(),
+                        args: serde_json::json!({"city": "sf"}),
+                    },
+                ],
+            },
+            ChatMessage {
+                role: ChatRole::User,
+                content: vec![ChatBlock::ToolResult {
+                    id: "call_round_trip".into(),
+                    result: serde_json::json!({"temp": 60}),
+                }],
+            },
+        ],
+        parallel_tool_calls_allowed: false,
+    };
+    let mut stream = provider.chat(req).await.expect("chat ok");
+    while stream.next().await.is_some() {}
+
+    let received = server.received_requests().await.expect("received");
+    assert_eq!(received.len(), 1);
+    let body: serde_json::Value = serde_json::from_slice(&received[0].body).expect("json body");
+    let messages = body["messages"].as_array().expect("messages array");
+
+    // Assistant message must carry a sibling `tool_calls` array.
+    let assistant_msg = messages
+        .iter()
+        .find(|m| m["role"] == "assistant")
+        .expect("assistant message must be present");
+    let tcs = assistant_msg["tool_calls"]
+        .as_array()
+        .expect("assistant message must carry a structured tool_calls array");
+    assert_eq!(tcs.len(), 1, "expected exactly one tool_call");
+    assert_eq!(tcs[0]["id"], "call_round_trip");
+    assert_eq!(tcs[0]["type"], "function");
+    assert_eq!(tcs[0]["function"]["name"], "get_weather");
+    // OpenAI carries arguments as a JSON-encoded string — round-trip through
+    // `from_str` to verify the encoded value.
+    let args_str = tcs[0]["function"]["arguments"]
+        .as_str()
+        .expect("arguments is a JSON string per OpenAI's wire shape");
+    let parsed_args: serde_json::Value = serde_json::from_str(args_str).expect("nested args json");
+    assert_eq!(parsed_args, serde_json::json!({"city": "sf"}));
+
+    // The follow-up tool result becomes a dedicated `role: "tool"` message
+    // keyed by `tool_call_id`.
+    let tool_msg = messages
+        .iter()
+        .find(|m| m["role"] == "tool")
+        .expect("dedicated tool role message expected");
+    assert_eq!(tool_msg["tool_call_id"], "call_round_trip");
+    let payload = tool_msg["content"].as_str().expect("content string");
+    let parsed: serde_json::Value = serde_json::from_str(payload).expect("nested json");
+    assert_eq!(parsed, serde_json::json!({"temp": 60}));
+}
+
 // F-647: OpenAI provider must not follow HTTP redirects. A misconfigured
 // proxy or network-layer attacker can inject `302 Location: 169.254.169.254`
 // and the default reqwest client would follow blindly to IMDS or another
@@ -394,4 +482,62 @@ async fn chat_429_with_retry_after_delta_seconds_threads_value_onto_chunk() {
         }
         other => panic!("expected ChatChunk::Error, got {other:?}"),
     }
+}
+
+/// Manual smoke test against the real OpenAI API.
+///
+/// Skipped by default. To run:
+///
+/// ```bash
+/// FORGE_OPENAI_SMOKE_API_KEY=sk-... \
+///   cargo test -p forge-providers --test openai \
+///   -- --ignored chat_against_real_openai
+/// ```
+///
+/// Verifies the full request → stream → typed chunks path against the
+/// production OpenAI endpoint. CI never runs this — it depends on a
+/// live API key and is documented as evidence for F-745 DoD #5 ("smoke
+/// test against each provider").
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn chat_against_real_openai() {
+    let api_key = std::env::var("FORGE_OPENAI_SMOKE_API_KEY")
+        .expect("set FORGE_OPENAI_SMOKE_API_KEY to a valid OpenAI API key");
+    let base_url = std::env::var("FORGE_OPENAI_SMOKE_URL")
+        .unwrap_or_else(|_| "https://api.openai.com".to_string());
+    // `gpt-4o-mini` is the cheapest stable GPT-4-family model. Override with
+    // FORGE_OPENAI_SMOKE_MODEL.
+    let model =
+        std::env::var("FORGE_OPENAI_SMOKE_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string());
+
+    let provider = OpenAiProvider::new(&base_url, &api_key, &model);
+    let req = ChatRequest {
+        system: Some(std::sync::Arc::from(
+            "You are a terse assistant. Reply with one short sentence.",
+        )),
+        messages: vec![user_msg("Say hello in five words or fewer.")],
+        parallel_tool_calls_allowed: false,
+    };
+
+    let mut stream = provider.chat(req).await.expect("chat call succeeds");
+    let mut accumulated = String::new();
+    let mut saw_done = false;
+    while let Some(chunk) = stream.next().await {
+        match chunk {
+            ChatChunk::TextDelta(delta) => accumulated.push_str(&delta),
+            ChatChunk::Done(_) => saw_done = true,
+            ChatChunk::ToolCall { .. } => {
+                // unexpected for this prompt — model shouldn't request a tool
+            }
+            ChatChunk::Error { kind, message } => {
+                panic!("openai returned error: kind={kind:?}, message={message}")
+            }
+        }
+    }
+    assert!(saw_done, "expected a final Done chunk");
+    assert!(
+        !accumulated.trim().is_empty(),
+        "expected non-empty assistant text"
+    );
+    eprintln!("openai replied: {accumulated}");
 }

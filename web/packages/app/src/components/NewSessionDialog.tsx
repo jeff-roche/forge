@@ -36,6 +36,7 @@ import {
   Show,
 } from 'solid-js';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
+import { A } from '@solidjs/router';
 import { Button } from '@forge/design';
 import type {
   RosterTier,
@@ -96,6 +97,28 @@ function toProviderOptions(entries: ProviderEntry[]): ProviderOption[] {
         enabled: !blocked && p.model_available,
       };
     });
+}
+
+/**
+ * F-746: stable wire-error suffix the daemon emits when
+ * `session_start`'s pre-spawn credential check rejects. The full error
+ * shape is
+ * `session_start: credentials_missing for provider <provider_id>` —
+ * extracting `<provider_id>` lets the dialog deep-link the recovery
+ * CTA to `/providers#<id>`. Both the "no entry stored" and the
+ * "keyring backend unreachable" branches collapse onto this single
+ * reason on the daemon side; the Providers page surfaces the more
+ * specific message after the user lands there.
+ */
+const CREDENTIALS_MISSING_REASON = 'credentials_missing for provider ';
+
+/** Return the provider id when `msg` is a `credentials_missing` rejection. */
+function extractMissingCredentialProviderId(msg: string | null): string | null {
+  if (msg === null) return null;
+  const idx = msg.indexOf(CREDENTIALS_MISSING_REASON);
+  if (idx === -1) return null;
+  const id = msg.slice(idx + CREDENTIALS_MISSING_REASON.length).trim();
+  return id.length > 0 ? id : null;
 }
 
 /** Pick the default provider id per spec §Fields. */
@@ -217,6 +240,17 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
       }
     }
   });
+
+  // Memoize the credentials-missing parse so the `<Show>` guard and the
+  // child `href` share a single evaluation per render. Solid evaluates
+  // `when` and the child render expression independently, so calling
+  // `extractMissingCredentialProviderId(error())` in both places would
+  // re-parse the same string twice — a `createMemo` is the idiomatic
+  // fix and also lets the child callback receive the non-null id
+  // directly (no `?? ''` fallback).
+  const missingCredentialProvider = createMemo(() =>
+    extractMissingCredentialProviderId(error()),
+  );
 
   // Focus-trap. Spec §Trigger calls for the workspace field to receive
   // focus on open — the field is the first interactive element either way.
@@ -432,6 +466,21 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
                 data-testid="new-session-error"
               >
                 {error()}
+                <Show when={missingCredentialProvider()}>
+                  {(id) => (
+                    <>
+                      {' '}
+                      <A
+                        class="new-session-dialog__error-cta"
+                        data-testid="new-session-error-cta"
+                        href={`/providers#${id()}`}
+                        onClick={() => props.onClose()}
+                      >
+                        Configure provider
+                      </A>
+                    </>
+                  )}
+                </Show>
               </div>
             </Show>
 
