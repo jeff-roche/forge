@@ -377,6 +377,17 @@ impl Provider for AnthropicProvider {
                 // single uniform error pathway and the typed status threads
                 // straight to `TurnErrorKind` (auth / rate_limit / server).
                 let code = status.as_u16();
+                // F-749: parse `Retry-After` for 429s so the UI's countdown
+                // fires against a real provider value. Header is read off the
+                // response *before* the body is consumed because `resp.text()`
+                // moves the response and headers along with it.
+                let retry_after_secs = if code == 429 {
+                    resp.headers()
+                        .get(reqwest::header::RETRY_AFTER)
+                        .and_then(http_util::parse_retry_after)
+                } else {
+                    None
+                };
                 let body = resp.text().await.unwrap_or_default();
                 let preview = http_util::truncate(&body, 500);
                 let message = format!("anthropic chat HTTP {status}: {preview}");
@@ -385,6 +396,7 @@ impl Provider for AnthropicProvider {
                         kind: StreamErrorKind::Transport,
                         message,
                         status: Some(code),
+                        retry_after_secs,
                     }
                 })) as BoxStream<'static, ChatChunk>);
             }
@@ -444,6 +456,7 @@ where
                 kind: http_util::map_sse_error(&e),
                 message: e.to_string(),
                 status: None,
+                retry_after_secs: None,
             }],
         };
         futures::stream::iter(chunks)

@@ -276,6 +276,7 @@ async fn chat_against_local_ollama() {
                 kind,
                 message,
                 status,
+                retry_after_secs: _,
             } => {
                 panic!("ollama returned error: kind={kind:?}, status={status:?}, message={message}")
             }
@@ -314,6 +315,7 @@ async fn chat_maps_http_error_to_typed_chunk() {
             kind,
             message,
             status,
+            retry_after_secs,
         } => {
             assert!(matches!(kind, forge_providers::StreamErrorKind::Transport));
             assert_eq!(status, Some(500), "status must carry the wire code");
@@ -321,6 +323,8 @@ async fn chat_maps_http_error_to_typed_chunk() {
                 message.contains("500"),
                 "message should mention status: {message}"
             );
+            // F-749: 500 isn't a rate-limit, so the parser doesn't run.
+            assert_eq!(retry_after_secs, None);
         }
         other => panic!("expected Error chunk, got {other:?}"),
     }

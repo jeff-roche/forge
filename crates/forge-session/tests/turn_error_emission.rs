@@ -27,6 +27,7 @@ struct ErrorProvider {
     kind: StreamErrorKind,
     message: String,
     status: Option<u16>,
+    retry_after_secs: Option<u32>,
 }
 
 impl Provider for ErrorProvider {
@@ -38,11 +39,13 @@ impl Provider for ErrorProvider {
         let kind = self.kind;
         let message = self.message.clone();
         let status = self.status;
+        let retry_after_secs = self.retry_after_secs;
         async move {
             let chunk = ChatChunk::Error {
                 kind,
                 message,
                 status,
+                retry_after_secs,
             };
             Ok(Box::pin(stream::iter(vec![chunk])) as BoxStream<'static, ChatChunk>)
         }
@@ -110,6 +113,7 @@ async fn http_401_maps_to_auth_kind_with_retriable_false() {
             kind: StreamErrorKind::Transport,
             message: "anthropic chat HTTP 401: invalid api key".into(),
             status: Some(401),
+            retry_after_secs: None,
         },
     )
     .await;
@@ -145,6 +149,7 @@ async fn http_403_also_maps_to_auth_kind() {
             kind: StreamErrorKind::Transport,
             message: "openai chat HTTP 403: forbidden".into(),
             status: Some(403),
+            retry_after_secs: None,
         },
     )
     .await;
@@ -170,6 +175,7 @@ async fn http_429_maps_to_rate_limit_kind() {
             kind: StreamErrorKind::Transport,
             message: "anthropic chat HTTP 429: rate limited".into(),
             status: Some(429),
+            retry_after_secs: None,
         },
     )
     .await;
@@ -193,6 +199,99 @@ async fn http_429_maps_to_rate_limit_kind() {
 }
 
 #[tokio::test]
+async fn http_429_retry_after_secs_flows_through_to_turn_error() {
+    // F-749: when the provider parses `Retry-After: 30` into `Some(30)` on
+    // the `ChatChunk::Error` envelope, the orchestrator must thread that
+    // onto `TurnErrorKind::RateLimit.retry_after_secs` so the UI's
+    // countdown lights up against a real value.
+    let dir = TempDir::new().unwrap();
+    let log = dir.path().join("events.jsonl");
+
+    let events = run_failing_turn(
+        log,
+        ErrorProvider {
+            kind: StreamErrorKind::Transport,
+            message: "anthropic chat HTTP 429: rate limited".into(),
+            status: Some(429),
+            retry_after_secs: Some(30),
+        },
+    )
+    .await;
+
+    let err = first_turn_error(&events);
+    let Event::TurnError { kind, .. } = err else {
+        unreachable!()
+    };
+    assert_eq!(
+        *kind,
+        TurnErrorKind::RateLimit {
+            retry_after_secs: Some(30)
+        },
+        "retry_after_secs must flow from ChatChunk::Error through to TurnErrorKind::RateLimit"
+    );
+}
+
+#[tokio::test]
+async fn http_429_without_retry_after_yields_none_on_turn_error() {
+    // When the provider returns no `Retry-After` header (or a malformed one),
+    // the value stays `None` and the UI falls back to an immediately-available
+    // Retry button rather than an indefinite countdown.
+    let dir = TempDir::new().unwrap();
+    let log = dir.path().join("events.jsonl");
+
+    let events = run_failing_turn(
+        log,
+        ErrorProvider {
+            kind: StreamErrorKind::Transport,
+            message: "anthropic chat HTTP 429: rate limited".into(),
+            status: Some(429),
+            retry_after_secs: None,
+        },
+    )
+    .await;
+
+    let err = first_turn_error(&events);
+    let Event::TurnError { kind, .. } = err else {
+        unreachable!()
+    };
+    assert_eq!(
+        *kind,
+        TurnErrorKind::RateLimit {
+            retry_after_secs: None
+        }
+    );
+}
+
+#[tokio::test]
+async fn wall_clock_timeout_maps_to_network() {
+    // F-749: parity with the IdleTimeout case. Wall-clock timeouts share the
+    // same UI affordance (retry available immediately, generic network copy)
+    // because both are best-modeled as "transient connectivity issue".
+    let dir = TempDir::new().unwrap();
+    let log = dir.path().join("events.jsonl");
+
+    let events = run_failing_turn(
+        log,
+        ErrorProvider {
+            kind: StreamErrorKind::WallClockTimeout,
+            message: "stream exceeded wall-clock budget".into(),
+            status: None,
+            retry_after_secs: None,
+        },
+    )
+    .await;
+    let err = first_turn_error(&events);
+    let Event::TurnError {
+        kind, retriable, ..
+    } = err
+    else {
+        unreachable!()
+    };
+    assert_eq!(*kind, TurnErrorKind::Network);
+    assert!(*retriable);
+}
+
+#[tokio::test]
 async fn http_500_maps_to_server_kind() {
     let dir = TempDir::new().unwrap();
     let log = dir.path().join("events.jsonl");
@@ -203,6 +302,7 @@ async fn http_500_maps_to_server_kind() {
             kind: StreamErrorKind::Transport,
             message: "openai chat HTTP 500: internal server error".into(),
             status: Some(500),
+            retry_after_secs: None,
         },
     )
     .await;
@@ -228,6 +328,7 @@ async fn http_503_maps_to_server_kind() {
             kind: StreamErrorKind::Transport,
             message: "anthropic chat HTTP 503: service unavailable".into(),
             status: Some(503),
+            retry_after_secs: None,
         },
     )
     .await;
@@ -249,6 +350,7 @@ async fn transport_without_status_maps_to_network() {
             kind: StreamErrorKind::Transport,
             message: "connection refused".into(),
             status: None,
+            retry_after_secs: None,
         },
     )
     .await;
@@ -274,6 +376,7 @@ async fn idle_timeout_maps_to_network() {
             kind: StreamErrorKind::IdleTimeout,
             message: "stream idle".into(),
             status: None,
+            retry_after_secs: None,
         },
     )
     .await;
@@ -295,6 +398,7 @@ async fn line_too_long_maps_to_malformed_response() {
             kind: StreamErrorKind::LineTooLong,
             message: "sse line exceeded cap".into(),
             status: None,
+            retry_after_secs: None,
         },
     )
     .await;
@@ -320,6 +424,7 @@ async fn unrecognized_status_maps_to_unknown() {
             kind: StreamErrorKind::Transport,
             message: "anthropic chat HTTP 418: i am a teapot".into(),
             status: Some(418),
+            retry_after_secs: None,
         },
     )
     .await;
@@ -345,6 +450,7 @@ async fn turn_error_id_matches_originating_user_message() {
             kind: StreamErrorKind::Transport,
             message: "HTTP 500".into(),
             status: Some(500),
+            retry_after_secs: None,
         },
     )
     .await;
@@ -377,6 +483,7 @@ async fn turn_error_raw_is_capped_at_4kib() {
             kind: StreamErrorKind::Transport,
             message: big.clone(),
             status: Some(500),
+            retry_after_secs: None,
         },
     )
     .await;

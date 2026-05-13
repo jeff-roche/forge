@@ -144,6 +144,7 @@ async fn chat_maps_http_errors() {
             kind,
             message,
             status,
+            retry_after_secs,
         } => {
             assert_eq!(*status, Some(401), "status must carry the wire code");
             assert!(matches!(kind, StreamErrorKind::Transport));
@@ -151,6 +152,9 @@ async fn chat_maps_http_errors() {
                 message.contains("401") && message.contains("invalid api key"),
                 "message should carry the body: {message}"
             );
+            // F-749: 401 isn't a rate-limit, so the parser doesn't run and the
+            // field stays `None`.
+            assert_eq!(*retry_after_secs, None);
         }
         other => panic!("expected ChatChunk::Error, got {other:?}"),
     }
@@ -345,6 +349,48 @@ async fn chat_does_not_follow_redirects() {
         } => {
             assert_eq!(*status, Some(302), "status must reflect the wire 302");
             assert!(message.contains("302"), "message echoes status: {message}");
+        }
+        other => panic!("expected ChatChunk::Error, got {other:?}"),
+    }
+}
+
+/// F-749: a 429 response with a delta-seconds `Retry-After` header must
+/// surface that value on `ChatChunk::Error.retry_after_secs` so the
+/// orchestrator can thread it onto `TurnErrorKind::RateLimit` and the UI
+/// countdown lights up against a real provider value.
+#[tokio::test(flavor = "multi_thread")]
+async fn chat_429_with_retry_after_delta_seconds_threads_value_onto_chunk() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("retry-after", "45")
+                .set_body_string("rate limited"),
+        )
+        .mount(&server)
+        .await;
+
+    let provider = OpenAiProvider::new(server.uri(), "sk-test", "gpt-4o");
+    let req = ChatRequest {
+        system: None,
+        messages: vec![user_msg("hi")],
+        parallel_tool_calls_allowed: false,
+    };
+    let mut stream = provider.chat(req).await.expect("chat returns Ok stream");
+    let chunk = stream.next().await.expect("at least one chunk");
+    match chunk {
+        ChatChunk::Error {
+            status,
+            retry_after_secs,
+            ..
+        } => {
+            assert_eq!(status, Some(429));
+            assert_eq!(
+                retry_after_secs,
+                Some(45),
+                "delta-seconds value must round-trip onto the error chunk"
+            );
         }
         other => panic!("expected ChatChunk::Error, got {other:?}"),
     }

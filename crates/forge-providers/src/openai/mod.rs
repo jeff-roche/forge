@@ -222,6 +222,18 @@ pub(crate) fn chat_request(
             // re-parsing the message text. See the matching branch on
             // `AnthropicProvider::chat_with_auth`.
             let code = status.as_u16();
+            // F-749: parse `Retry-After` for 429s. Both vanilla OpenAI and
+            // every OpenAI-compatible gateway routed through this helper
+            // (CustomOpenAi, Together, Anyscale, vLLM, LiteLLM, …) emit the
+            // header per RFC 9110 §10.2.3 — handling here covers all of them
+            // in one place rather than duplicating in each provider.
+            let retry_after_secs = if code == 429 {
+                resp.headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(http_util::parse_retry_after)
+            } else {
+                None
+            };
             let body = resp.text().await.unwrap_or_default();
             let preview = http_util::truncate(&body, 500);
             let message = format!("openai chat HTTP {status}: {preview}");
@@ -230,6 +242,7 @@ pub(crate) fn chat_request(
                     kind: StreamErrorKind::Transport,
                     message,
                     status: Some(code),
+                    retry_after_secs,
                 }
             })) as BoxStream<'static, ChatChunk>);
         }
@@ -269,6 +282,7 @@ where
                 kind: http_util::map_sse_error(&e),
                 message: e.to_string(),
                 status: None,
+                retry_after_secs: None,
             }],
         };
         futures::stream::iter(chunks)

@@ -203,16 +203,20 @@ fn build_provider_auth(provider_id: &str, pulled: Option<secrecy::SecretString>)
 /// `retriable` mirrors the spec: false for auth (the credential must change
 /// first) and true for everything else. The UI gates the Retry button
 /// directly on this verdict so the classification stays in one place.
-fn classify_chunk_error(kind: StreamErrorKind, status: Option<u16>) -> (TurnErrorKind, bool) {
+///
+/// `retry_after_secs` is the parsed `Retry-After` header value from the
+/// provider — populated by the provider-layer 429 branch — and is forwarded
+/// onto [`TurnErrorKind::RateLimit`]. Ignored for every other status / kind
+/// because the wire shape only carries it on `RateLimit`.
+fn classify_chunk_error(
+    kind: StreamErrorKind,
+    status: Option<u16>,
+    retry_after_secs: Option<u32>,
+) -> (TurnErrorKind, bool) {
     if let Some(code) = status {
         return match code {
             401 | 403 => (TurnErrorKind::Auth, false),
-            429 => (
-                TurnErrorKind::RateLimit {
-                    retry_after_secs: None,
-                },
-                true,
-            ),
+            429 => (TurnErrorKind::RateLimit { retry_after_secs }, true),
             500..=599 => (TurnErrorKind::Server, true),
             _ => (TurnErrorKind::Unknown, true),
         };
@@ -781,6 +785,7 @@ pub(crate) async fn run_request_loop<P: Provider>(
                     kind,
                     message,
                     status,
+                    retry_after_secs,
                 } => {
                     // Stream aborted under a provider-layer bound (HTTP non-2xx,
                     // line cap, idle timeout, wall-clock timeout, transport
@@ -792,8 +797,12 @@ pub(crate) async fn run_request_loop<P: Provider>(
                     // the failure as an inline error card at the turn's slot.
                     // The classifier maps HTTP status (when present) onto
                     // `Auth` / `RateLimit` / `Server` and falls back on the
-                    // stream-error kind for transport / SSE classes.
-                    let (error_kind, retriable) = classify_chunk_error(kind, status);
+                    // stream-error kind for transport / SSE classes; the
+                    // provider-parsed `Retry-After` value rides through onto
+                    // `TurnErrorKind::RateLimit.retry_after_secs` so the UI's
+                    // countdown fires against a real value.
+                    let (error_kind, retriable) =
+                        classify_chunk_error(kind, status, retry_after_secs);
                     let raw = truncate_raw_error(&message);
                     let user_facing = match &error_kind {
                         TurnErrorKind::Auth => {

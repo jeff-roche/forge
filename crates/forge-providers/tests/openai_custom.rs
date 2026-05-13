@@ -284,6 +284,7 @@ async fn http_error_propagates_with_status_and_body() {
             kind,
             message,
             status,
+            retry_after_secs,
         } => {
             assert_eq!(*status, Some(401), "status must carry the wire code");
             assert!(matches!(kind, forge_providers::StreamErrorKind::Transport));
@@ -291,6 +292,8 @@ async fn http_error_propagates_with_status_and_body() {
                 message.contains("401") && message.contains("invalid api key"),
                 "message should carry the body: {message}"
             );
+            // F-749: 401 isn't a rate-limit, so the parser doesn't run.
+            assert_eq!(*retry_after_secs, None);
         }
         other => panic!("expected ChatChunk::Error, got {other:?}"),
     }

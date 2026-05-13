@@ -140,10 +140,19 @@ pub enum ChatChunk {
     /// the orchestrator so the UI's `TurnErrorKind` classifier can distinguish
     /// `Auth` (401) / `RateLimit` (429) / `Server` (5xx) from non-status
     /// failures without parsing the human-readable message text.
+    ///
+    /// `retry_after_secs` carries the parsed `Retry-After` HTTP response header
+    /// when the failure was a 429 rate-limit and the provider returned a
+    /// well-formed `Retry-After` value (either a delta-seconds integer or an
+    /// HTTP-date, both per RFC 9110 §10.2.3). `None` for every other failure
+    /// class, and `None` when the header was missing or malformed. The
+    /// orchestrator routes this onto `TurnErrorKind::RateLimit { retry_after_secs }`
+    /// so the UI's countdown can fire against a real provider value.
     Error {
         kind: StreamErrorKind,
         message: String,
         status: Option<u16>,
+        retry_after_secs: Option<u32>,
     },
 }
 

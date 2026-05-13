@@ -408,12 +408,14 @@ pub async fn compact<P: Provider>(
                 kind,
                 message,
                 status,
+                retry_after_secs,
             } => {
-                // F-749: status is informational here — compaction is a
-                // privileged background path that already collapses every
-                // failure into one Err; the orchestrator's TurnError path
-                // doesn't route through this call.
+                // F-749: status and retry_after_secs are informational here —
+                // compaction is a privileged background path that already
+                // collapses every failure into one Err; the orchestrator's
+                // TurnError path doesn't route through this call.
                 let _ = status;
+                let _ = retry_after_secs;
                 return Err(anyhow!(
                     "compact: provider stream aborted ({kind:?}): {message}"
                 ));
