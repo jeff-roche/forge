@@ -351,4 +351,51 @@ mod tests {
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0], ("FOO", "bar"));
     }
+
+    // F-750: lock the consent text the web client renders for `shell.exec`.
+    // The user must see the exact command line being requested — `command`
+    // and any `args` join with a single space — and `cwd` must surface when
+    // present so the directory context is part of the consent decision.
+    use super::ShellExecTool;
+    use crate::tools::Tool;
+
+    #[test]
+    fn approval_preview_shows_command_only() {
+        let preview = ShellExecTool.approval_preview(&json!({ "command": "/bin/echo" }));
+        assert_eq!(preview.description, "Run command: /bin/echo");
+    }
+
+    #[test]
+    fn approval_preview_joins_command_and_args() {
+        let preview = ShellExecTool.approval_preview(&json!({
+            "command": "/bin/echo",
+            "args": ["hi", "there"],
+        }));
+        assert_eq!(preview.description, "Run command: /bin/echo hi there");
+    }
+
+    #[test]
+    fn approval_preview_surfaces_cwd_when_present() {
+        let preview = ShellExecTool.approval_preview(&json!({
+            "command": "/bin/ls",
+            "args": ["-la"],
+            "cwd": "/tmp/work",
+        }));
+        assert!(
+            preview.description.contains("(cwd: /tmp/work)"),
+            "preview must surface cwd for consent: {}",
+            preview.description,
+        );
+    }
+
+    #[test]
+    fn approval_preview_tolerates_missing_command() {
+        // A provider streaming a partial tool-call envelope should still
+        // produce a renderable approval card — never a blank line.
+        let preview = ShellExecTool.approval_preview(&json!({}));
+        assert!(
+            !preview.description.is_empty(),
+            "preview must remain non-empty for missing args",
+        );
+    }
 }

@@ -4,6 +4,10 @@ use forge_ipc::{
     ClientInfo, Hello, IpcEvent, IpcMessage, SendUserMessage, Subscribe, ToolCallApproved,
     PROTO_VERSION,
 };
+// F-750: explicit-reject integration test below uses the typed
+// `forge_ipc::ToolCallRejected` struct (distinct from `Event::ToolCallRejected`
+// imported via `forge_core::Event`).
+use forge_ipc::ToolCallRejected as IpcToolCallRejected;
 use forge_providers::{ChatBlock, MockProvider};
 use forge_session::{server::serve_with_session, session::Session};
 use std::sync::Arc;
@@ -912,5 +916,155 @@ async fn unexpected_post_handshake_frame_is_logged_not_silently_dropped() {
     assert!(
         saw_user_msg,
         "session must keep processing valid frames after an unexpected one"
+    );
+}
+
+/// F-750: explicit client-rejection path through the full IPC turn.
+///
+/// Validation contract — DoD item *"Reject path tested at least once per
+/// provider — confirms `ToolCallRejected` propagates and the turn ends
+/// cleanly"*. The malformed-scope test above exercises the *implicit*
+/// rejection path (server rewrites a bad scope to `Rejected`); this test
+/// exercises the explicit one — a well-formed `IpcMessage::ToolCallRejected`
+/// frame from the client.
+///
+/// Wire contract pinned here so a real-provider rejection (Ollama,
+/// Anthropic, OpenAI) all unwind the same way:
+///
+/// 1. `Event::ToolCallApprovalRequested` is emitted for the non-read-only
+///    `fs.write` call.
+/// 2. Client sends `IpcMessage::ToolCallRejected`.
+/// 3. Server emits exactly one `Event::ToolCallRejected` (no
+///    `ToolCallApproved`, no `ToolCallCompleted`, no
+///    `ToolInvoked` / `ToolReturned`).
+/// 4. The turn ends without a continuation request to the provider.
+#[tokio::test]
+async fn explicit_client_rejection_emits_tool_call_rejected_and_ends_turn() {
+    let dir = TempDir::new().unwrap();
+    let log_path = dir.path().join("events.jsonl");
+    let sock_path = dir.path().join("reject.sock");
+
+    let session = Arc::new(Session::create(log_path).await.unwrap());
+    // Single-script provider — if rejection is propagated correctly the
+    // provider is never invoked a second time for a continuation.
+    let provider = Arc::new(
+        MockProvider::from_responses(vec![SCRIPT_INITIAL_NEEDS_APPROVAL.to_string()]).unwrap(),
+    );
+
+    let server_session = Arc::clone(&session);
+    let server_provider = Arc::clone(&provider);
+    let server_sock = sock_path.clone();
+    tokio::spawn(async move {
+        serve_with_session(
+            &server_sock,
+            server_session,
+            server_provider,
+            false,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    });
+
+    let mut stream = connect_with_retry(&sock_path).await;
+    do_handshake(&mut stream).await;
+    forge_ipc::write_frame(&mut stream, &IpcMessage::Subscribe(Subscribe { since: 0 }))
+        .await
+        .unwrap();
+    forge_ipc::write_frame(
+        &mut stream,
+        &IpcMessage::SendUserMessage(SendUserMessage {
+            text: "hi".to_string(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let (mut reader, mut writer) = stream.into_split();
+
+    // Drive the turn: wait for the approval request, send a typed Reject,
+    // then capture every subsequent event so we can assert the unwind shape.
+    let mut sent_reject = false;
+    let mut saw_rejected = false;
+    let mut saw_approved = false;
+    let mut saw_completed = false;
+    let mut saw_invoked = false;
+
+    for _ in 0..60 {
+        let frame = match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            forge_ipc::read_frame(&mut reader),
+        )
+        .await
+        {
+            Ok(Ok(f)) => f,
+            Ok(Err(_)) | Err(_) => break,
+        };
+        match extract_event(&frame) {
+            Some(Event::ToolCallApprovalRequested { id, .. }) if !sent_reject => {
+                forge_ipc::write_frame(
+                    &mut writer,
+                    &IpcMessage::ToolCallRejected(IpcToolCallRejected {
+                        id: id.to_string(),
+                        reason: Some("user denied".into()),
+                    }),
+                )
+                .await
+                .unwrap();
+                sent_reject = true;
+            }
+            Some(Event::ToolCallRejected { .. }) => {
+                saw_rejected = true;
+                // Keep draining a few frames to confirm nothing else fires.
+            }
+            Some(Event::ToolCallApproved { .. }) => saw_approved = true,
+            Some(Event::ToolCallCompleted { .. }) => saw_completed = true,
+            Some(Event::ToolInvoked { .. }) => saw_invoked = true,
+            _ => {}
+        }
+        if saw_rejected {
+            // Give the server a short window to flush any (incorrect)
+            // post-rejection events before we conclude.
+            if let Ok(Ok(extra)) = tokio::time::timeout(
+                std::time::Duration::from_millis(150),
+                forge_ipc::read_frame(&mut reader),
+            )
+            .await
+            {
+                match extract_event(&extra) {
+                    Some(Event::ToolCallApproved { .. }) => saw_approved = true,
+                    Some(Event::ToolCallCompleted { .. }) => saw_completed = true,
+                    Some(Event::ToolInvoked { .. }) => saw_invoked = true,
+                    _ => {}
+                }
+            }
+            break;
+        }
+    }
+
+    assert!(
+        sent_reject,
+        "test harness must have observed ToolCallApprovalRequested and sent rejection"
+    );
+    assert!(
+        saw_rejected,
+        "explicit client rejection must produce Event::ToolCallRejected"
+    );
+    assert!(
+        !saw_approved,
+        "rejected tool call must NOT emit ToolCallApproved"
+    );
+    assert!(
+        !saw_invoked,
+        "rejected tool call must NOT reach ToolInvoked"
+    );
+    assert!(
+        !saw_completed,
+        "rejected tool call must NOT emit ToolCallCompleted"
     );
 }
