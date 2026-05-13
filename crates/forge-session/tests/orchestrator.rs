@@ -987,15 +987,24 @@ async fn explicit_client_rejection_emits_tool_call_rejected_and_ends_turn() {
 
     let (mut reader, mut writer) = stream.into_split();
 
-    // Drive the turn: wait for the approval request, send a typed Reject,
-    // then capture every subsequent event so we can assert the unwind shape.
+    // Drive the turn deterministically: send the typed Reject when the
+    // approval request arrives, then drain frames until the canonical
+    // turn-end signal — the model-level `AssistantMessage { stream_finalised:
+    // true }` — fires, or the connection closes (EOF). No wall-clock waits:
+    // a loaded CI runner stalling the daemon mid-emit must not cause a
+    // false pass on the "nothing-fires-after-rejection" assertions.
     let mut sent_reject = false;
     let mut saw_rejected = false;
-    let mut saw_approved = false;
-    let mut saw_completed = false;
-    let mut saw_invoked = false;
+    let mut saw_approved_after_rejected = false;
+    let mut saw_completed_after_rejected = false;
+    let mut saw_invoked_after_rejected = false;
+    let mut saw_turn_end = false;
 
-    for _ in 0..60 {
+    // Bound the loop at a generous frame count so a runaway server can't
+    // wedge the test forever; the per-frame timeout below is the real
+    // liveness guard. The exit conditions inside the loop (turn-end or
+    // EOF) are what actually terminate it in the green path.
+    for _ in 0..200 {
         let frame = match tokio::time::timeout(
             std::time::Duration::from_secs(5),
             forge_ipc::read_frame(&mut reader),
@@ -1003,7 +1012,11 @@ async fn explicit_client_rejection_emits_tool_call_rejected_and_ends_turn() {
         .await
         {
             Ok(Ok(f)) => f,
-            Ok(Err(_)) | Err(_) => break,
+            // EOF or read error: connection closed — equivalent to turn end.
+            Ok(Err(_)) => break,
+            // Per-frame timeout — the daemon is wedged. Fail loudly rather
+            // than silently passing on missing post-rejection events.
+            Err(_) => panic!("timed out waiting for next frame; turn never ended cleanly"),
         };
         match extract_event(&frame) {
             Some(Event::ToolCallApprovalRequested { id, .. }) if !sent_reject => {
@@ -1020,30 +1033,31 @@ async fn explicit_client_rejection_emits_tool_call_rejected_and_ends_turn() {
             }
             Some(Event::ToolCallRejected { .. }) => {
                 saw_rejected = true;
-                // Keep draining a few frames to confirm nothing else fires.
             }
-            Some(Event::ToolCallApproved { .. }) => saw_approved = true,
-            Some(Event::ToolCallCompleted { .. }) => saw_completed = true,
-            Some(Event::ToolInvoked { .. }) => saw_invoked = true,
+            // The forbidden post-rejection events: track them only after
+            // the rejection has been observed so a same-turn pre-rejection
+            // event (there shouldn't be any, but the assertion is about
+            // the *unwind*) doesn't false-fail.
+            Some(Event::ToolCallApproved { .. }) if saw_rejected => {
+                saw_approved_after_rejected = true;
+            }
+            Some(Event::ToolCallCompleted { .. }) if saw_rejected => {
+                saw_completed_after_rejected = true;
+            }
+            Some(Event::ToolInvoked { .. }) if saw_rejected => {
+                saw_invoked_after_rejected = true;
+            }
+            // Canonical turn end — `AssistantMessage { stream_finalised:
+            // true }` is what every other orchestrator test in this file
+            // uses to detect end-of-turn. Stop draining here.
+            Some(Event::AssistantMessage {
+                stream_finalised: true,
+                ..
+            }) if saw_rejected => {
+                saw_turn_end = true;
+                break;
+            }
             _ => {}
-        }
-        if saw_rejected {
-            // Give the server a short window to flush any (incorrect)
-            // post-rejection events before we conclude.
-            if let Ok(Ok(extra)) = tokio::time::timeout(
-                std::time::Duration::from_millis(150),
-                forge_ipc::read_frame(&mut reader),
-            )
-            .await
-            {
-                match extract_event(&extra) {
-                    Some(Event::ToolCallApproved { .. }) => saw_approved = true,
-                    Some(Event::ToolCallCompleted { .. }) => saw_completed = true,
-                    Some(Event::ToolInvoked { .. }) => saw_invoked = true,
-                    _ => {}
-                }
-            }
-            break;
         }
     }
 
@@ -1056,15 +1070,19 @@ async fn explicit_client_rejection_emits_tool_call_rejected_and_ends_turn() {
         "explicit client rejection must produce Event::ToolCallRejected"
     );
     assert!(
-        !saw_approved,
-        "rejected tool call must NOT emit ToolCallApproved"
+        saw_turn_end,
+        "turn must end with AssistantMessage(stream_finalised=true) after rejection",
     );
     assert!(
-        !saw_invoked,
-        "rejected tool call must NOT reach ToolInvoked"
+        !saw_approved_after_rejected,
+        "rejected tool call must NOT emit ToolCallApproved between ToolCallRejected and turn end"
     );
     assert!(
-        !saw_completed,
-        "rejected tool call must NOT emit ToolCallCompleted"
+        !saw_invoked_after_rejected,
+        "rejected tool call must NOT reach ToolInvoked between ToolCallRejected and turn end"
+    );
+    assert!(
+        !saw_completed_after_rejected,
+        "rejected tool call must NOT emit ToolCallCompleted between ToolCallRejected and turn end"
     );
 }
