@@ -321,6 +321,13 @@ mod tests {
         assert!(parse_provider_spec("anthropic:claude-3-5-sonnet@").is_err());
     }
 
+    #[test]
+    fn rejects_anthropic_with_empty_rest() {
+        // Mirror of `rejects_ollama_with_empty_model`: a bare colon after the
+        // kind implies an empty model — `parse_model_at_url` errors here.
+        assert!(parse_provider_spec("anthropic:").is_err());
+    }
+
     // F-745: OpenAI provider spec parsing.
 
     #[test]
@@ -367,6 +374,13 @@ mod tests {
     #[test]
     fn rejects_openai_with_empty_url() {
         assert!(parse_provider_spec("openai:gpt-4o-mini@").is_err());
+    }
+
+    #[test]
+    fn rejects_openai_with_empty_rest() {
+        // Mirror of `rejects_ollama_with_empty_model`: a bare colon after the
+        // kind implies an empty model — `parse_model_at_url` errors here.
+        assert!(parse_provider_spec("openai:").is_err());
     }
 
     // F-745: the resolver returns the correct kind for both new providers.
