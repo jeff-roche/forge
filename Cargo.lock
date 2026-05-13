@@ -1709,6 +1709,7 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "bytes",
+ "chrono",
  "dirs 6.0.0",
  "forge-core",
  "futures",
@@ -1722,6 +1723,7 @@ dependencies = [
  "tokio-util",
  "toml 0.8.23",
  "tracing",
+ "tracing-subscriber",
  "uuid",
  "wiremock",
 ]

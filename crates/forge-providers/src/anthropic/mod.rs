@@ -14,10 +14,11 @@
 
 use crate::http_util::{self, HttpClientConfig};
 use crate::sse::{self, SseError, SseEvent};
-use crate::{ChatChunk, ChatRequest, Provider};
+use crate::{ChatChunk, ChatRequest, Provider, ProviderAuth};
 use bytes::Bytes;
 use forge_core::Result;
 use futures::stream::{BoxStream, StreamExt};
+use secrecy::ExposeSecret;
 
 pub mod translate;
 
@@ -35,7 +36,11 @@ pub const VERTEX_ANTHROPIC_VERSION: &str = "vertex-2023-10-16";
 /// Anthropic API calls (`ApiKey`) and Google Vertex AI (`Vertex`). The
 /// Vertex variant retargets the base URL and replaces `x-api-key` with
 /// `Authorization: Bearer <gcloud-access-token>`.
-#[derive(Clone, Debug)]
+///
+/// `Debug` is hand-rolled (not derived) so the API key bytes never
+/// surface in trace / log output. The variant tag is preserved for
+/// diagnostic value; the credential is rendered as `"<redacted>"`.
+#[derive(Clone)]
 pub enum AuthMode {
     /// Direct Anthropic API: `x-api-key: <api_key>` against
     /// `https://api.anthropic.com/v1/messages`.
@@ -53,6 +58,22 @@ pub enum AuthMode {
     },
 }
 
+impl std::fmt::Debug for AuthMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AuthMode::ApiKey { .. } => f
+                .debug_struct("ApiKey")
+                .field("api_key", &"<redacted>")
+                .finish(),
+            AuthMode::Vertex { project, region } => f
+                .debug_struct("Vertex")
+                .field("project", project)
+                .field("region", region)
+                .finish(),
+        }
+    }
+}
+
 pub struct AnthropicProvider {
     base_url: String,
     auth: AuthMode,
@@ -60,6 +81,22 @@ pub struct AnthropicProvider {
     max_tokens: u32,
     stream_client: reqwest::Client,
     stream_cfg: sse::StreamConfig,
+}
+
+/// Hand-rolled `Debug` so the API key embedded in `auth` is never written
+/// to log output. Non-secret fields (`base_url`, `model`, `max_tokens`,
+/// `auth` variant tag with redacted credential) are surfaced for diagnostic
+/// value. Mirrors [`crate::openai::custom::CustomOpenAiProvider`]'s
+/// redaction posture (SEC-1).
+impl std::fmt::Debug for AnthropicProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AnthropicProvider")
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            .field("max_tokens", &self.max_tokens)
+            .field("auth", &self.auth)
+            .finish_non_exhaustive()
+    }
 }
 
 impl AnthropicProvider {
@@ -150,6 +187,60 @@ pub fn fetch_vertex_access_token() -> anyhow::Result<String> {
     Ok(token)
 }
 
+/// Effective auth choice resolved for one outbound Anthropic request.
+///
+/// F-744: the seam supplies a per-turn credential through
+/// [`ProviderAuth`]; when the variant is `None` the provider falls back to
+/// its constructor-time [`AuthMode`]. This enum captures the resolved
+/// choice so the request-building code below is one match arm regardless
+/// of where the credential came from.
+enum ResolvedAuth<'a> {
+    /// `x-api-key` shape. The key is borrowed for the lifetime of the
+    /// request builder so we never copy the bytes into a longer-lived
+    /// allocation.
+    ApiKey(&'a str),
+    /// Vertex AI: same shape regardless of source (no seam path supplies
+    /// project/region — those are constructor-time configuration). The
+    /// seam's `ProviderAuth::Vertex` variant carries a pre-fetched token,
+    /// short-circuiting the gcloud shell-out.
+    Vertex {
+        project: &'a str,
+        region: &'a str,
+        prefetched_token: Option<&'a str>,
+    },
+}
+
+impl AnthropicProvider {
+    /// Resolve the effective auth for one outbound request, preferring the
+    /// per-turn `ProviderAuth` over the constructor-time `AuthMode`. Falls
+    /// back to the constructor value on `ProviderAuth::None`.
+    fn resolve_auth<'a>(&'a self, seam: &'a ProviderAuth) -> ResolvedAuth<'a> {
+        match (seam, &self.auth) {
+            (ProviderAuth::ApiKey(secret), _) => ResolvedAuth::ApiKey(secret.expose_secret()),
+            (ProviderAuth::Vertex(token), AuthMode::Vertex { project, region }) => {
+                ResolvedAuth::Vertex {
+                    project,
+                    region,
+                    prefetched_token: Some(token.expose_secret()),
+                }
+            }
+            // Seam `Vertex` against a non-Vertex constructor: fall back to
+            // constructor auth — calling Vertex against an API-key
+            // configuration is a configuration error the upstream layer
+            // (orchestrator + provider spec) must reject, not the provider.
+            (ProviderAuth::Vertex(_), AuthMode::ApiKey { api_key }) => {
+                ResolvedAuth::ApiKey(api_key)
+            }
+            (ProviderAuth::None, AuthMode::ApiKey { api_key }) => ResolvedAuth::ApiKey(api_key),
+            (ProviderAuth::None, AuthMode::Vertex { project, region }) => ResolvedAuth::Vertex {
+                project,
+                region,
+                prefetched_token: None,
+            },
+        }
+    }
+}
+
 impl Provider for AnthropicProvider {
     /// F-682: `#[instrument]` enables ops-level latency attribution for the
     /// per-turn chat path. `skip_all` keeps the request body (and any
@@ -167,7 +258,23 @@ impl Provider for AnthropicProvider {
         &self,
         req: ChatRequest,
     ) -> impl std::future::Future<Output = Result<BoxStream<'static, ChatChunk>>> + Send {
-        let url = self.request_url();
+        // F-744: route the legacy `chat()` path through the auth seam so
+        // there's a single code path. `ProviderAuth::None` falls back to
+        // the constructor-time [`AuthMode`], preserving the pre-F-744
+        // behaviour exactly for callers that haven't wired the seam.
+        self.chat_with_auth(req, ProviderAuth::None)
+    }
+
+    #[tracing::instrument(
+        name = "provider.chat",
+        skip_all,
+        fields(provider = "anthropic", model = %self.model),
+    )]
+    fn chat_with_auth(
+        &self,
+        req: ChatRequest,
+        auth_in: ProviderAuth,
+    ) -> impl std::future::Future<Output = Result<BoxStream<'static, ChatChunk>>> + Send {
         let body_result = translate::serialize_request(
             &req,
             &self.model,
@@ -176,27 +283,63 @@ impl Provider for AnthropicProvider {
         );
         let client = self.stream_client.clone();
         let cfg = self.stream_cfg;
-        let auth = self.auth.clone();
+
+        // Resolve auth eagerly (no `.await` involved): seam wins over
+        // constructor, then the resolved choice owns its strings so the
+        // async block doesn't borrow `self` across an `.await`.
+        let resolved_owned: ResolvedAuthOwned = match self.resolve_auth(&auth_in) {
+            ResolvedAuth::ApiKey(k) => ResolvedAuthOwned::ApiKey(k.to_string()),
+            ResolvedAuth::Vertex {
+                project,
+                region,
+                prefetched_token,
+            } => ResolvedAuthOwned::Vertex {
+                project: project.to_string(),
+                region: region.to_string(),
+                prefetched_token: prefetched_token.map(str::to_string),
+                model: self.model.clone(),
+            },
+        };
+        // Build the URL after resolution so Vertex can read project/region
+        // from the resolved form (handles the seam-overrides-constructor
+        // case, though no current call site exercises it).
+        let url = match &resolved_owned {
+            ResolvedAuthOwned::ApiKey(_) => {
+                format!("{}/v1/messages", self.base_url.trim_end_matches('/'))
+            }
+            ResolvedAuthOwned::Vertex {
+                project,
+                region,
+                model,
+                ..
+            } => format!(
+                "https://{region}-aiplatform.googleapis.com/v1/projects/{project}/locations/{region}/publishers/anthropic/models/{model}:streamRawPredict",
+            ),
+        };
 
         async move {
             let body = body_result
                 .map_err(|e| anyhow::anyhow!("anthropic chat body serialization failed: {e}"))?;
-            // Build auth-mode-specific request headers. Vertex shells
-            // out to gcloud for an ADC access token; failures here
-            // surface as the verbatim gcloud stderr so the user can act
-            // on them.
+            // Build auth-mode-specific request headers. Vertex without a
+            // pre-fetched token shells out to gcloud; failures surface as
+            // the verbatim gcloud stderr so the user can act on them.
             let mut builder = client.post(&url);
-            match &auth {
-                AuthMode::ApiKey { api_key } => {
+            match resolved_owned {
+                ResolvedAuthOwned::ApiKey(api_key) => {
                     builder = builder
                         .header("x-api-key", api_key.as_str())
                         .header("anthropic-version", ANTHROPIC_VERSION);
                 }
-                AuthMode::Vertex { .. } => {
-                    let token = tokio::task::spawn_blocking(fetch_vertex_access_token)
-                        .await
-                        .map_err(|e| anyhow::anyhow!("vertex token join failed: {e}"))?
-                        .map_err(|e| anyhow::anyhow!("vertex auth: {e}"))?;
+                ResolvedAuthOwned::Vertex {
+                    prefetched_token, ..
+                } => {
+                    let token = match prefetched_token {
+                        Some(t) => t,
+                        None => tokio::task::spawn_blocking(fetch_vertex_access_token)
+                            .await
+                            .map_err(|e| anyhow::anyhow!("vertex token join failed: {e}"))?
+                            .map_err(|e| anyhow::anyhow!("vertex auth: {e}"))?,
+                    };
                     builder = builder
                         .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
                         .header("anthropic-version", VERTEX_ANTHROPIC_VERSION);
@@ -222,6 +365,18 @@ impl Provider for AnthropicProvider {
             Ok(decode_anthropic_stream(resp.bytes_stream(), cfg))
         }
     }
+}
+
+/// Owned form of [`ResolvedAuth`] suitable for moving into an `async move`
+/// block. Strings are short-lived and dropped with the request future.
+enum ResolvedAuthOwned {
+    ApiKey(String),
+    Vertex {
+        project: String,
+        region: String,
+        prefetched_token: Option<String>,
+        model: String,
+    },
 }
 
 /// Decode the raw `bytes` stream into a `ChatChunk` stream by piping through

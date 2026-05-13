@@ -1596,8 +1596,24 @@ async fn handle_connection<P: Provider + 'static>(
                         let session = Arc::clone(&session);
                         let provider = Arc::clone(&provider);
                         let session_id_for_compact = Arc::clone(&session_id);
+                        // F-744: pull the per-call credential snapshot for
+                        // the manual compaction here, off-loop, so the
+                        // privileged summary call routes through the same
+                        // auth seam as a live turn. Keyless / unwired sessions
+                        // pass `ProviderAuth::None` and the provider's
+                        // constructor-time credential (if any) takes over.
+                        let compact_creds = credentials.clone();
                         tokio::spawn(async move {
                             let pinned = std::collections::HashSet::new();
+                            let auth = match compact_creds.as_ref() {
+                                Some(ctx) => match ctx.store.get(&ctx.provider_id).await {
+                                    Ok(Some(secret)) if ctx.provider_id != "ollama" => {
+                                        forge_providers::ProviderAuth::ApiKey(secret)
+                                    }
+                                    _ => forge_providers::ProviderAuth::None,
+                                },
+                                None => forge_providers::ProviderAuth::None,
+                            };
                             if let Err(e) = crate::compaction::compact(
                                 session,
                                 provider,
@@ -1606,6 +1622,7 @@ async fn handle_connection<P: Provider + 'static>(
                                 crate::compaction::DEFAULT_COMPACT_FRACTION,
                                 &pinned,
                                 forge_core::CompactTrigger::UserRequested,
+                                auth,
                             )
                             .await
                             {

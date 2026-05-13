@@ -9,6 +9,7 @@ use futures::stream::BoxStream;
 // `.lock()` in the same process. The `std::sync::Mutex` here used to require
 // `.lock().unwrap()` at every call site, turning one panic into N.
 use parking_lot::Mutex;
+use secrecy::SecretString;
 use serde::Deserialize;
 
 pub mod anthropic;
@@ -172,6 +173,69 @@ pub enum StreamErrorKind {
     Transport,
 }
 
+// ── Provider auth seam (F-744) ────────────────────────────────────────────────
+
+/// Per-request authentication value handed to [`Provider::chat_with_auth`].
+///
+/// F-744: the orchestrator pulls the active credential from the keyring at
+/// the start of every turn (see `forge_session::orchestrator::CredentialContext`)
+/// and threads it through this enum into the provider's outbound HTTP
+/// request, without storing the secret on the provider struct.
+///
+/// The variants describe *how* the credential is presented on the wire — not
+/// the storage mechanism. `ApiKey` covers both `Authorization: Bearer …`
+/// (OpenAI shape) and `x-api-key: …` (Anthropic shape); the provider impl
+/// decides which header to emit based on its own protocol. `Vertex` is
+/// distinct because the underlying token comes from gcloud ADC rather than
+/// the keyring, and the wire shape (`Authorization: Bearer <gcloud-token>`
+/// + an alternate `anthropic-version`) differs from the direct API.
+///
+/// `None` is the no-op variant: the provider falls back to whatever
+/// credential it was constructed with (if any), and keyless providers
+/// (Ollama) ignore the value entirely.
+///
+/// # Leak posture
+///
+/// - The inner secret is held in [`secrecy::SecretString`], whose `Debug`
+///   impl renders `"[REDACTED ...]"` and whose backing bytes are zeroized
+///   on drop.
+/// - `ProviderAuth` deliberately implements `Debug` (delegating to the
+///   variant tag + redacted secret) but **not** `Display` or `Serialize`.
+///   The plaintext bytes leave the enum only through a provider-private
+///   call site that builds an HTTP header value and drops it with the
+///   request future.
+#[derive(Clone)]
+pub enum ProviderAuth {
+    /// API key / bearer token. The provider chooses the wire header
+    /// (`Authorization: Bearer …` or `x-api-key: …`) based on its own
+    /// protocol.
+    ApiKey(SecretString),
+    /// Google Vertex AI access token obtained out-of-band (via
+    /// `gcloud auth application-default print-access-token`). Distinct
+    /// from `ApiKey` because the wire shape on Anthropic-on-Vertex
+    /// differs (different version pin, `Authorization: Bearer` header).
+    Vertex(SecretString),
+    /// No per-request credential supplied. Providers fall back to their
+    /// constructor-time credential (Anthropic / OpenAI today) or send
+    /// nothing (Ollama). `None` is also the variant tests use when
+    /// exercising the legacy `chat()` path through `chat_with_auth`.
+    None,
+}
+
+impl std::fmt::Debug for ProviderAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The wrapped `SecretString` already redacts on `Debug`; the
+        // variant tag is non-secret. We render the tag explicitly so the
+        // shape stays useful in trace output without ever surfacing the
+        // bytes.
+        match self {
+            ProviderAuth::ApiKey(_) => f.debug_tuple("ApiKey").field(&"[redacted]").finish(),
+            ProviderAuth::Vertex(_) => f.debug_tuple("Vertex").field(&"[redacted]").finish(),
+            ProviderAuth::None => f.write_str("None"),
+        }
+    }
+}
+
 // ── Provider trait ────────────────────────────────────────────────────────────
 
 /// Streaming chat provider.
@@ -199,6 +263,31 @@ pub trait Provider: Send + Sync {
         &self,
         req: ChatRequest,
     ) -> impl std::future::Future<Output = Result<BoxStream<'static, ChatChunk>>> + Send;
+
+    /// F-744: authenticated chat entry point.
+    ///
+    /// The orchestrator calls this with the credential pulled from the
+    /// keyring for the active provider on every turn. Implementations:
+    ///
+    /// - **Anthropic / OpenAI / CustomOpenAI**: use the supplied
+    ///   [`ProviderAuth::ApiKey`] (or `Vertex`) to build the outbound
+    ///   request's auth header, falling back to their constructor-time
+    ///   credential when the seam passes `ProviderAuth::None` (preserves
+    ///   the legacy `chat()` path for tests and callers that haven't
+    ///   wired the seam yet).
+    /// - **Ollama**: ignore the credential entirely — Ollama is keyless.
+    ///
+    /// The default impl simply discards the credential and delegates to
+    /// [`Provider::chat`]. New providers added to the workspace get the
+    /// keyless no-op for free; provider impls that want per-request auth
+    /// override this method.
+    fn chat_with_auth(
+        &self,
+        req: ChatRequest,
+        _auth: ProviderAuth,
+    ) -> impl std::future::Future<Output = Result<BoxStream<'static, ChatChunk>>> + Send {
+        self.chat(req)
+    }
 }
 
 // ── NDJSON deserialization ────────────────────────────────────────────────────
@@ -332,6 +421,19 @@ impl Provider for MockProvider {
                 futures::future::Either::Right(async move { result })
             }
         }
+    }
+
+    /// F-744: `MockProvider` ignores the seam credential — scripted
+    /// responses don't talk to a network. Tests that need to assert on
+    /// the value being threaded through the orchestrator should mount a
+    /// `wiremock` server against a real provider impl instead; the mock
+    /// path is for replay-only scenarios.
+    fn chat_with_auth(
+        &self,
+        req: ChatRequest,
+        _auth: ProviderAuth,
+    ) -> impl std::future::Future<Output = Result<BoxStream<'static, ChatChunk>>> + Send {
+        self.chat(req)
     }
 }
 

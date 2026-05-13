@@ -15,10 +15,11 @@
 
 use crate::http_util::{self, HttpClientConfig};
 use crate::sse::{self, SseError, SseEvent};
-use crate::{ChatChunk, ChatRequest, Provider};
+use crate::{ChatChunk, ChatRequest, Provider, ProviderAuth};
 use bytes::Bytes;
 use forge_core::Result;
 use futures::stream::{BoxStream, StreamExt};
+use secrecy::ExposeSecret;
 
 pub mod custom;
 pub mod translate;
@@ -36,6 +37,20 @@ pub struct OpenAiProvider {
     max_tokens: Option<u32>,
     stream_client: reqwest::Client,
     stream_cfg: sse::StreamConfig,
+}
+
+/// Hand-rolled `Debug` so the constructor-time API key never surfaces in
+/// trace / log output. Mirrors [`crate::anthropic::AnthropicProvider`] and
+/// [`crate::openai::custom::CustomOpenAiProvider`].
+impl std::fmt::Debug for OpenAiProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenAiProvider")
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            .field("max_tokens", &self.max_tokens)
+            .field("api_key", &"<redacted>")
+            .finish_non_exhaustive()
+    }
 }
 
 impl OpenAiProvider {
@@ -85,11 +100,34 @@ impl Provider for OpenAiProvider {
         &self,
         req: ChatRequest,
     ) -> impl std::future::Future<Output = Result<BoxStream<'static, ChatChunk>>> + Send {
+        // F-744: route the legacy `chat()` path through the auth seam.
+        // `ProviderAuth::None` falls back to the constructor-time
+        // credential, preserving pre-F-744 behaviour for callers that
+        // haven't wired the seam yet.
+        self.chat_with_auth(req, ProviderAuth::None)
+    }
+
+    #[tracing::instrument(
+        name = "provider.chat",
+        skip_all,
+        fields(provider = "openai", model = %self.model),
+    )]
+    fn chat_with_auth(
+        &self,
+        req: ChatRequest,
+        auth_in: ProviderAuth,
+    ) -> impl std::future::Future<Output = Result<BoxStream<'static, ChatChunk>>> + Send {
         let body_result = translate::serialize_request(&req, &self.model, self.max_tokens);
-        let auth = vec![(
-            reqwest::header::AUTHORIZATION,
-            format!("Bearer {}", self.api_key),
-        )];
+        // F-744: prefer the per-turn credential from the seam. Falls back
+        // to the constructor-time key on `ProviderAuth::None`. The
+        // OpenAI protocol uses the same `Authorization: Bearer …` shape
+        // regardless of source; `Vertex` is meaningless here and also
+        // falls back.
+        let bearer = match &auth_in {
+            ProviderAuth::ApiKey(s) => s.expose_secret().to_string(),
+            ProviderAuth::Vertex(_) | ProviderAuth::None => self.api_key.clone(),
+        };
+        let auth = vec![(reqwest::header::AUTHORIZATION, format!("Bearer {bearer}"))];
         chat_request(
             self.stream_client.clone(),
             self.base_url.clone(),

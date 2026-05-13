@@ -41,7 +41,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::http_util::{self, HttpClientConfig};
 use crate::sse;
-use crate::{ChatChunk, ChatRequest, Provider};
+use crate::{ChatChunk, ChatRequest, Provider, ProviderAuth};
 
 use super::{chat_request, translate};
 
@@ -243,7 +243,9 @@ impl CustomOpenAiProvider {
         )
     }
 
-    /// Build the auth-header list for one outbound chat request.
+    /// F-744: build the auth-header list for one outbound chat request,
+    /// preferring an `override_key` from the per-turn seam over the
+    /// constructor-time `api_key` when present.
     ///
     /// Both the `AuthShape::Header { name }` value and the
     /// `AuthShape::Bearer | Header → api_key` requirement are validated at
@@ -251,24 +253,24 @@ impl CustomOpenAiProvider {
     /// authenticated shapes (with a guaranteed-valid header name and key)
     /// or `None`. The `expect` is a structural assertion against the
     /// `new()` invariants — it cannot fire on a `Self` produced through
-    /// the public API.
-    fn auth_headers(&self) -> Vec<(reqwest::header::HeaderName, String)> {
-        match (&self.auth_shape, &self.api_key) {
+    /// the public API. `None` shape emits no headers regardless of
+    /// `override_key`.
+    fn auth_headers_with(
+        &self,
+        override_key: Option<&str>,
+    ) -> Vec<(reqwest::header::HeaderName, String)> {
+        let effective_key: Option<String> = override_key
+            .map(str::to_string)
+            .or_else(|| self.api_key.as_ref().map(|k| k.expose_secret().to_string()));
+        match (&self.auth_shape, effective_key) {
             (AuthShape::Bearer, Some(key)) => {
-                // `expose_secret()` returns a `&str` borrow into the
-                // `SecretString`; the only allocation that escapes the
-                // secret container is the header value below, which is
-                // consumed by the request future and dropped with it.
-                vec![(
-                    reqwest::header::AUTHORIZATION,
-                    format!("Bearer {}", key.expose_secret()),
-                )]
+                vec![(reqwest::header::AUTHORIZATION, format!("Bearer {key}"))]
             }
             (AuthShape::Header { name }, Some(key)) => {
                 let hname: reqwest::header::HeaderName = name
                     .parse()
                     .expect("auth.name validated at construction time");
-                vec![(hname, key.expose_secret().to_string())]
+                vec![(hname, key)]
             }
             _ => Vec::new(),
         }
@@ -333,8 +335,31 @@ impl Provider for CustomOpenAiProvider {
         &self,
         req: ChatRequest,
     ) -> impl std::future::Future<Output = Result<BoxStream<'static, ChatChunk>>> + Send {
+        // F-744: route the legacy `chat()` path through the auth seam.
+        self.chat_with_auth(req, ProviderAuth::None)
+    }
+
+    #[tracing::instrument(
+        name = "provider.chat",
+        skip_all,
+        fields(provider = %self.name(), model = %self.model),
+    )]
+    fn chat_with_auth(
+        &self,
+        req: ChatRequest,
+        auth_in: ProviderAuth,
+    ) -> impl std::future::Future<Output = Result<BoxStream<'static, ChatChunk>>> + Send {
         let body_result = translate::serialize_request(&req, &self.model, self.max_tokens);
-        let auth = self.auth_headers();
+        // F-744: prefer the per-turn credential from the seam over the
+        // constructor-time key. The wire shape (`Bearer` vs custom
+        // header) stays fixed — only the value rotates. `Vertex` is
+        // meaningless against an OpenAI-compatible endpoint and falls
+        // back to the constructor value.
+        let override_key: Option<String> = match &auth_in {
+            ProviderAuth::ApiKey(s) => Some(s.expose_secret().to_string()),
+            ProviderAuth::Vertex(_) | ProviderAuth::None => None,
+        };
+        let auth = self.auth_headers_with(override_key.as_deref());
         chat_request(
             self.stream_client.clone(),
             self.base_url.clone(),
@@ -546,7 +571,7 @@ mod tests {
             Some("sk-secret".into()),
         )
         .unwrap();
-        let h = p.auth_headers();
+        let h = p.auth_headers_with(None);
         assert_eq!(h.len(), 1);
         assert_eq!(h[0].0, reqwest::header::AUTHORIZATION);
         assert_eq!(h[0].1, "Bearer sk-secret");
@@ -565,7 +590,7 @@ mod tests {
             Some("sk-secret".into()),
         )
         .unwrap();
-        let h = p.auth_headers();
+        let h = p.auth_headers_with(None);
         assert_eq!(h.len(), 1);
         assert_eq!(h[0].0.as_str(), "x-api-key");
         assert_eq!(h[0].1, "sk-secret");
@@ -607,7 +632,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert!(p.auth_headers().is_empty());
+        assert!(p.auth_headers_with(None).is_empty());
     }
 
     #[test]
