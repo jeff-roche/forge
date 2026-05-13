@@ -225,20 +225,30 @@ pub fn pidfd_send_sigterm(pid: libc::pid_t) -> anyhow::Result<()> {
 /// SIGKILL to a wedged `forged` whose pid is read from the on-disk pid file.
 /// Pid identity / reuse is the caller's responsibility — the canonical safe
 /// entry point is `kill_session_from_pid_file` (which re-reads
-/// `/proc/<pid>/stat` to confirm start-time). This helper exists so the
-/// escalation path can hold its own pidfd across `SIGTERM → wait → SIGKILL`
-/// transitions without re-opening (and re-racing) the pidfd between
-/// signals.
+/// `/proc/<pid>/stat` to confirm start-time).
+///
+/// **Do NOT use this for multi-stage signal delivery (e.g. SIGTERM then
+/// SIGKILL).** It opens a fresh pidfd on every call, so a second call after
+/// a sleep can pin a *recycled* PID if the original daemon exited in the
+/// interim. The escalation path must instead hold ONE pidfd across all
+/// signals via [`pidfd_open`] + [`pidfd_send_signal`].
 #[cfg(target_os = "linux")]
 pub fn pidfd_send_signal_for_pid(pid: libc::pid_t, signal: libc::c_int) -> anyhow::Result<()> {
     let pidfd = pidfd_open(pid)?;
     pidfd_send_signal_via_fd(pid, &pidfd, signal)
 }
 
-/// Open a pidfd for `pid`. Caller owns the fd and must keep it alive to
-/// anchor the kernel identity guarantee for any subsequent operation.
+/// Open a pidfd for `pid` and return the owned wrapper. Caller must keep
+/// the returned [`OwnedPidFd`] alive across every subsequent operation
+/// that relies on the kernel-pinned process identity: any drop frees the
+/// kernel reference, after which a re-open could resolve to a recycled
+/// PID.
+///
+/// Exposed for the F-747 escalation path in `forge-shell`, which must
+/// open the pidfd once and reuse it across SIGTERM → SIGKILL deliveries
+/// to defeat PID reuse during the inter-signal wait window.
 #[cfg(target_os = "linux")]
-fn pidfd_open(pid: libc::pid_t) -> anyhow::Result<OwnedPidFd> {
+pub fn pidfd_open(pid: libc::pid_t) -> anyhow::Result<OwnedPidFd> {
     // SAFETY: `libc::syscall` is FFI; arguments are simple integers.
     // `pidfd_open(pid, 0)` returns a new fd on success and -1 on error
     // (errno set); the caller supplies `pid > 0` (enforced by our pid
@@ -253,6 +263,21 @@ fn pidfd_open(pid: libc::pid_t) -> anyhow::Result<OwnedPidFd> {
     }
     // SAFETY: `raw` is a valid fd we just opened; ownership transfers.
     Ok(unsafe { OwnedPidFd::from_raw(raw as libc::c_int) })
+}
+
+/// Deliver `signal` through an already-opened pidfd. The kernel resolves
+/// the fd to the process pinned at [`pidfd_open`] time, so signal delivery
+/// is race-free against PID reuse for the lifetime of the fd.
+///
+/// `pid` is taken only for error-message formatting; the fd is what
+/// selects the signal target.
+#[cfg(target_os = "linux")]
+pub fn pidfd_send_signal(
+    pid: libc::pid_t,
+    pidfd: &OwnedPidFd,
+    signal: libc::c_int,
+) -> anyhow::Result<()> {
+    pidfd_send_signal_via_fd(pid, pidfd, signal)
 }
 
 #[cfg(target_os = "linux")]
@@ -287,8 +312,13 @@ fn pidfd_send_signal_via_fd(
 
 /// Owned `pidfd` that closes on drop. Small local wrapper to keep the
 /// single-call-site simple without pulling in `OwnedFd` conversions.
+///
+/// Exposed (alongside [`pidfd_open`] and [`pidfd_send_signal`]) so the
+/// F-747 escalation path in `forge-shell` can hold one fd across the
+/// SIGTERM → SIGKILL transition, anchoring the kernel-pinned identity of
+/// the daemon process for the duration of the escalation.
 #[cfg(target_os = "linux")]
-struct OwnedPidFd {
+pub struct OwnedPidFd {
     fd: libc::c_int,
 }
 

@@ -123,7 +123,7 @@ async fn graceful_shutdown_via_orchestrator_exits_daemon_and_reaps_artifacts() {
         .expect("pid file present while forged is alive");
 
     let probe = PidFileLivenessProbe::new(Some(&pid_path), Some(&sock_path));
-    let signaler = PidFdSignaler::new(pid);
+    let signaler = PidFdSignaler::open(pid).expect("pidfd_open on live daemon");
 
     let outcome = orchestrate_session_close(
         &probe,
@@ -207,7 +207,7 @@ async fn second_close_after_daemon_already_gone_is_already_closed() {
     let pid =
         forge_shell::session_close_ipc::read_pid_from_file(&pid_path).expect("pid file present");
     let probe = PidFileLivenessProbe::new(Some(&pid_path), Some(&sock_path));
-    let signaler = PidFdSignaler::new(pid);
+    let signaler = PidFdSignaler::open(pid).expect("pidfd_open on live daemon");
 
     // First call: graceful shutdown.
     let first = orchestrate_session_close(
@@ -225,12 +225,22 @@ async fn second_close_after_daemon_already_gone_is_already_closed() {
 
     // Second call: pid file and socket are both gone. The probe reports
     // not-alive immediately and the orchestrator must short-circuit
-    // without signaling.
+    // without signaling. We can't construct a real `PidFdSignaler` here
+    // (pidfd_open would fail on the dead pid), so plug in a panicking
+    // stub: if the orchestrator wrongly tries to escalate, the test
+    // fails loudly rather than silently signaling an unrelated process.
+    struct PanicOnSignal;
+    impl forge_shell::session_close_ipc::Signaler for PanicOnSignal {
+        fn send_sigterm(&self) -> Result<(), String> {
+            panic!("AlreadyClosed fast path must bypass SIGTERM");
+        }
+        fn send_sigkill(&self) -> Result<(), String> {
+            panic!("AlreadyClosed fast path must bypass SIGKILL");
+        }
+    }
+
     let probe2 = PidFileLivenessProbe::new(Some(&pid_path), Some(&sock_path));
-    // Re-use a signaler with the stale pid — if the orchestrator wrongly
-    // escalates, it would try (and possibly succeed) to signal an
-    // unrelated process. The AlreadyClosed fast path prevents that.
-    let signaler2 = PidFdSignaler::new(pid);
+    let signaler2 = PanicOnSignal;
     let second = orchestrate_session_close(
         &probe2,
         &signaler2,

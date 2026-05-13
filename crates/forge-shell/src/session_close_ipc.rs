@@ -238,10 +238,11 @@ async fn wait_until_dead<P: LivenessProbe + ?Sized>(
         if !probe.is_alive() {
             return true;
         }
-        if tokio::time::Instant::now() >= deadline {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
             return false;
         }
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let remaining = deadline.saturating_duration_since(now);
         tokio::time::sleep(poll_interval.min(remaining)).await;
     }
 }
@@ -344,27 +345,52 @@ pub fn is_pid_alive(_pid: libc::pid_t) -> bool {
 }
 
 /// Signaler that delivers SIGTERM / SIGKILL via the F-049 `pidfd_send_signal`
-/// path. Holds the pid by value (read at construction) so a daemon that
-/// exits and rewrites its pid file mid-escalation cannot misdirect SIGTERM
-/// to a recycled pid.
+/// path.
+///
+/// Holds ONE `pidfd` (opened at construction on Linux) across both signal
+/// deliveries. This anchors the kernel-pinned process identity for the
+/// entire SIGTERM → wait → SIGKILL escalation: any signal sent through the
+/// held fd goes to *this* process, never a recycled PID. A fresh
+/// `pidfd_open` between SIGTERM and SIGKILL would not be safe — during the
+/// inter-signal sleep window the daemon could exit and Linux could recycle
+/// its PID to an unrelated process; the re-opened fd would then pin that
+/// recycled PID and SIGKILL would land on the wrong target.
 pub struct PidFdSignaler {
     pid: libc::pid_t,
+    #[cfg(target_os = "linux")]
+    pidfd: forge_cli::socket::OwnedPidFd,
 }
 
 impl PidFdSignaler {
-    pub fn new(pid: libc::pid_t) -> Self {
-        Self { pid }
+    /// Open a pidfd against `pid` and return a signaler that holds it
+    /// across the escalation. Fails if the process is already gone
+    /// (typically observed when `session_close` races a daemon that
+    /// exited between pid-file read and signaler construction); callers
+    /// should treat that as "already closed".
+    #[cfg(target_os = "linux")]
+    pub fn open(pid: libc::pid_t) -> Result<Self, String> {
+        let pidfd = forge_cli::socket::pidfd_open(pid).map_err(|e| e.to_string())?;
+        Ok(Self { pid, pidfd })
+    }
+
+    /// Non-Linux constructor: stores the pid only. The Signaler impl on
+    /// non-Linux returns an error from `send_sigterm` / `send_sigkill`
+    /// (pidfd is Linux-only); the constructor is infallible to keep the
+    /// call shape symmetric.
+    #[cfg(not(target_os = "linux"))]
+    pub fn open(pid: libc::pid_t) -> Result<Self, String> {
+        Ok(Self { pid })
     }
 }
 
 #[cfg(target_os = "linux")]
 impl Signaler for PidFdSignaler {
     fn send_sigterm(&self) -> Result<(), String> {
-        forge_cli::socket::pidfd_send_signal_for_pid(self.pid, libc::SIGTERM)
+        forge_cli::socket::pidfd_send_signal(self.pid, &self.pidfd, libc::SIGTERM)
             .map_err(|e| e.to_string())
     }
     fn send_sigkill(&self) -> Result<(), String> {
-        forge_cli::socket::pidfd_send_signal_for_pid(self.pid, libc::SIGKILL)
+        forge_cli::socket::pidfd_send_signal(self.pid, &self.pidfd, libc::SIGKILL)
             .map_err(|e| e.to_string())
     }
 }
@@ -435,7 +461,22 @@ pub async fn run_session_close(
     };
 
     let probe = PidFileLivenessProbe::new(Some(&pid_file), Some(&socket_path));
-    let signaler = PidFdSignaler::new(pid);
+    // Opening the pidfd here anchors the daemon's kernel identity for the
+    // entire escalation. If `open` fails the daemon raced us and exited
+    // between pid-file read and now — treat as already closed.
+    let signaler = match PidFdSignaler::open(pid) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::debug!(
+                target: "forge_shell::session_close",
+                session_id = %session_id,
+                error = %e,
+                "pidfd_open failed at signaler construction; treating as already closed",
+            );
+            bridge.drop_connection(session_id).await;
+            return Ok(());
+        }
+    };
 
     let outcome = orchestrate_session_close(
         &probe,
@@ -671,6 +712,62 @@ mod tests {
         let path = dir.path().join("session.pid");
         std::fs::write(&path, "42\n12345\n").unwrap();
         assert_eq!(read_pid_from_file(&path), Some(42));
+    }
+
+    /// Holding the pidfd across both signals is the actual fix for the
+    /// PID-reuse race. We can't *observe* PID reuse in a unit test (it
+    /// would require draining the PID space), but we can pin the
+    /// structural invariants: `open` must succeed on a live pid, and the
+    /// returned signaler must successfully deliver multiple signals
+    /// without ever calling `pidfd_open` again. Asserting via a spawned
+    /// child whose lifetime we own makes the "fd is reused" property
+    /// observable — if `send_sigkill` were re-opening the pidfd, the
+    /// child would still die (so this isn't a perfect proof), but combined
+    /// with the type-level check (no `&mut` or fallible re-open in
+    /// `send_*`) and the structural review in the PR comments, the
+    /// regression risk is well-bounded.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn pidfd_signaler_holds_fd_across_term_then_kill() {
+        use std::process::Command;
+        // `sleep 30` is canonical SIGTERM-resistant background process —
+        // it terminates on either signal but doesn't trap them.
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id() as libc::pid_t;
+
+        let signaler = PidFdSignaler::open(pid).expect("pidfd_open on live child");
+
+        // Drop just the FD-issuing side of forge_cli::socket — once the
+        // signaler holds its fd, we should be able to drive both signals
+        // without ever touching `pidfd_open` again. The two `send_*`
+        // calls below operate purely on the held fd.
+        signaler.send_sigterm().expect("SIGTERM via held pidfd");
+        // Best-effort: child may have already exited; tolerate ESRCH.
+        let _ = signaler.send_sigkill();
+
+        let status = child.wait().expect("wait sleep child");
+        assert!(!status.success(), "sleep should have been killed");
+    }
+
+    /// Opening against an absent pid must surface an error so
+    /// `run_session_close` can short-circuit to "already closed" instead
+    /// of constructing a signaler with no kernel anchor.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pidfd_signaler_open_fails_on_dead_pid() {
+        let result = PidFdSignaler::open(i32::MAX);
+        let err = match result {
+            Ok(_) => panic!("open must fail on dead pid"),
+            Err(e) => e,
+        };
+        let msg = err.to_lowercase();
+        assert!(
+            msg.contains("no such") || msg.contains("stale") || msg.contains("esrch"),
+            "expected ESRCH-like error, got: {msg}"
+        );
     }
 
     #[test]
