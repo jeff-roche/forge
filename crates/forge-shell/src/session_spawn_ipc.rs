@@ -163,7 +163,25 @@ pub fn provider_is_keyless(
 /// (F-744) is where the user would first see the missing credential —
 /// by which point a stranded daemon is already running.
 ///
-/// Returns:
+/// # Keyring key shape
+///
+/// `store.has(provider_id)` is called with the **full `provider_id`
+/// string verbatim** — including any `<vendor>:<name>` suffix for
+/// named built-in instances (`anthropic:work`, `openai:personal`) and
+/// `custom_openai:<name>` rows. Every [`Credentials`] implementor
+/// (memory, env-fallback, keyring) keys its entries on that same raw
+/// slug per the trait contract in
+/// [`forge_core::credentials`] (point 2 of the trait doc): the
+/// `provider_id` the caller hands in is the source of truth.
+///
+/// On the keyring backend the slug lands in the platform-specific
+/// "account" field; the service namespace (`"forge"` by default) is
+/// applied by [`forge_core::credentials::KeyringStore`] and is
+/// transparent to callers here. The F-587 audit pins this convention.
+///
+/// [`Credentials`]: forge_core::credentials::Credentials
+///
+/// # Returns
 ///
 /// - `Ok(())` when the provider is keyless (no credential is needed),
 ///   or when the store reports the credential is present.
@@ -695,5 +713,39 @@ mod tests {
         assert!(err.starts_with(SESSION_START_ERROR), "prefix: {err}");
         assert!(err.contains(CREDENTIALS_MISSING_REASON), "reason: {err}");
         assert!(err.ends_with("openai"), "provider id suffix: {err}");
+    }
+
+    /// Named-instance happy path: a built-in with a `<vendor>:<name>`
+    /// suffix (`anthropic:work`) and a keyring entry seeded under the
+    /// exact same key passes the credential check. Pins the contract
+    /// documented above `check_provider_credential`: the store is
+    /// consulted with the full `provider_id` verbatim, no
+    /// normalization or vendor-prefix stripping.
+    #[tokio::test]
+    async fn check_credential_accepts_named_builtin_with_keyring_entry() {
+        let mem = MemoryStore::new();
+        mem.set("anthropic:work", SecretString::from("sk-work-1"))
+            .await
+            .unwrap();
+        let store: Arc<dyn Credentials> = Arc::new(mem);
+        let settings = AppSettings::default();
+        check_provider_credential(&store, &settings, "anthropic:work")
+            .await
+            .expect("named-instance credential must pass");
+    }
+
+    /// A `custom_openai:<name>` row whose `auth.shape = "header"` (the
+    /// X-Api-Key / custom-header preset) is NOT keyless — only
+    /// `AuthShapeSettings::None` is. Guards against a future refactor
+    /// silently widening the keyless bucket.
+    #[test]
+    fn custom_openai_with_header_auth_is_not_keyless() {
+        let settings = settings_with_custom_openai(
+            "local",
+            AuthShapeSettings::Header {
+                name: "X-Api-Key".into(),
+            },
+        );
+        assert!(!provider_is_keyless(&settings, "custom_openai:local"));
     }
 }
