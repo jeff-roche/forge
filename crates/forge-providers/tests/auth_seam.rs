@@ -243,19 +243,17 @@ fn provider_auth_debug_redacts_sentinel() {
     );
 }
 
-#[test]
-fn provider_auth_display_redacts_sentinel() {
-    // `ProviderAuth` deliberately does NOT implement `Display`; the value
-    // must only leave the enum through `expose_secret()` at the network
-    // boundary. We assert that no implicit string conversion path leaks
-    // the bytes. (This is a compile-time guarantee: if a `Display` impl
-    // ever lands, the next assertion must be updated to assert redaction.)
-    let auth = auth_api_key(SENTINEL);
-    // Negative compile-time check via a function pointer would be ideal
-    // but is hard to express portably; the runtime path that exercises
-    // every reasonable formatter is `Debug`, asserted above.
-    let _ = auth;
-}
+// F-744: compile-time guarantee that `ProviderAuth` does NOT implement
+// `Display` or `serde::Serialize`. Either trait would expose a path to
+// stringify or serialize the secret bytes without going through
+// `expose_secret()` at the network boundary. Any future code that
+// accidentally derives or hand-rolls either impl will fail to build,
+// rather than silently leaking the credential through `format!("{}", auth)`
+// or `serde_json::to_string(&auth)`.
+static_assertions::assert_not_impl_any!(
+    forge_providers::ProviderAuth: std::fmt::Display,
+    serde::Serialize,
+);
 
 #[test]
 fn anthropic_provider_debug_does_not_contain_sentinel() {
@@ -477,3 +475,31 @@ const _: fn() = || {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<ProviderAuth>();
 };
+
+/// F-744 zeroization contract: the per-turn credential held inside
+/// `ProviderAuth::ApiKey` (and `Vertex`) is a `secrecy::SecretString`,
+/// which `Zeroize`s on drop. A plain `String` would leave the plaintext
+/// bytes on the heap after the request future is dropped — defeating the
+/// core security claim of F-744. This compile-time check pins the inner
+/// type so a refactor that swaps it back to a non-zeroizing container
+/// fails to build.
+#[test]
+fn provider_auth_api_key_inner_is_secret_string() {
+    // Pattern-bind the inner field and assert its type via let-binding —
+    // a `&String` would fail to coerce to `&SecretString`.
+    let auth = auth_api_key(SENTINEL);
+    match &auth {
+        ProviderAuth::ApiKey(s) => {
+            let _: &SecretString = s;
+        }
+        _ => panic!("expected ApiKey variant"),
+    }
+
+    let v = ProviderAuth::Vertex(SecretString::from("t".to_string()));
+    match &v {
+        ProviderAuth::Vertex(s) => {
+            let _: &SecretString = s;
+        }
+        _ => panic!("expected Vertex variant"),
+    }
+}

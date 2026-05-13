@@ -50,6 +50,11 @@ tracing = "0.1"
 # F-744: leak-audit test needs `chrono` for constructing `Event` variants
 # carrying `DateTime<Utc>` fields without depending on the orchestrator.
 chrono = "0.4"
+# F-744: compile-time negative trait assertions — pin the no-`Display` /
+# no-`Serialize` posture of `ProviderAuth` so a future refactor that
+# accidentally derives either trait fails to build rather than silently
+# leaks the credential through string conversion or JSON.
+static_assertions = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "time"] }
 futures = "0.3"
