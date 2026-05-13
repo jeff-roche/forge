@@ -272,6 +272,120 @@ pub async fn read_since(path: &Path, since: u64) -> Result<Vec<(u64, Event)>> {
     Ok(events)
 }
 
+/// Summary of a corruption-tolerant scan of `events.jsonl`.
+///
+/// F-748 review fix: used by `Session::resume` to recover from a daemon
+/// that crashed mid-write — the tail line may be truncated (no `\n`) or
+/// otherwise unparseable. The strict [`read_since`] errors out on the bad
+/// line; this scanner instead reports how far the file is well-formed so
+/// the caller can truncate the corrupt suffix and resume cleanly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecoveredTail {
+    /// Number of well-formed events parsed before the first parse error
+    /// (or EOF, when the file is fully clean). This is the seq of the
+    /// last good event under the positional 1-indexed convention
+    /// [`read_since`] uses (events count, header excluded).
+    pub last_good_seq: u64,
+    /// Byte offset of the end of the last well-formed line (immediately
+    /// after the line's terminating `\n`). When the file is fully clean,
+    /// equals the file's byte length. When the file is corrupt, equals
+    /// the byte length to truncate to so the next [`EventLog::open`]
+    /// reader sees a valid log with no garbage suffix.
+    pub safe_byte_len: u64,
+}
+
+/// Walks `events.jsonl` line-by-line, parsing each event after the schema
+/// header. Returns the last well-formed event's seq plus the byte offset
+/// at which truncation should occur to leave the file in a clean state.
+///
+/// Unlike [`read_since`], this function does NOT error on a malformed
+/// line; it stops at the first parse / framing failure and reports what
+/// was already accepted. The caller is expected to act on the report —
+/// typically by truncating the file via [`tokio::fs::File::set_len`].
+///
+/// `Err` is reserved for unrecoverable cases: I/O failure on read,
+/// missing / corrupt schema header, a line exceeding [`MAX_LINE_BYTES`]
+/// (CWE-770 — we won't buffer unbounded), or non-UTF-8 bytes in the
+/// header. A malformed event-body line is recoverable; everything above
+/// it on this list is not.
+pub async fn recover_tail(path: &Path) -> Result<RecoveredTail> {
+    let file = tokio::fs::File::open(path).await?;
+    let mut reader = BufReader::new(file);
+    let mut line_buf: Vec<u8> = Vec::new();
+
+    let mut consumed_bytes: u64 = 0;
+
+    // Header line — mandatory; a missing / mismatched header is not
+    // recoverable because the file is not an `events.jsonl` we wrote.
+    match read_bounded_line(&mut reader, &mut line_buf, MAX_LINE_BYTES).await? {
+        BoundedLine::Eof => {
+            return Err(ForgeError::Other(anyhow::anyhow!("event log is empty")));
+        }
+        BoundedLine::Exceeded => {
+            return Err(ForgeError::Other(anyhow::anyhow!(
+                "events.jsonl header line exceeds {MAX_LINE_BYTES} bytes"
+            )));
+        }
+        BoundedLine::Line => {
+            // Header is well-formed and terminated by '\n'.
+            consumed_bytes += line_buf.len() as u64 + 1;
+        }
+        BoundedLine::EofNoNewline => {
+            return Err(ForgeError::Other(anyhow::anyhow!(
+                "events.jsonl header is missing trailing newline"
+            )));
+        }
+    }
+    let header = std::str::from_utf8(&line_buf).map_err(|_| {
+        ForgeError::Other(anyhow::anyhow!("events.jsonl header is not valid UTF-8"))
+    })?;
+    if header != SCHEMA_HEADER {
+        return Err(ForgeError::Other(anyhow::anyhow!(
+            "schema header mismatch: expected {SCHEMA_HEADER:?}, got {header:?}"
+        )));
+    }
+
+    let mut last_good_seq: u64 = 0;
+    let mut safe_byte_len: u64 = consumed_bytes;
+    loop {
+        match read_bounded_line(&mut reader, &mut line_buf, MAX_LINE_BYTES).await? {
+            BoundedLine::Eof => break,
+            BoundedLine::Exceeded => {
+                // Adversarial / corrupt: a line over the cap is not a
+                // recoverable shape — the kernel never wrote a partial
+                // line bigger than `MAX_LINE_BYTES` from us. Stop at the
+                // last clean offset.
+                break;
+            }
+            BoundedLine::EofNoNewline => {
+                // Truncated final line — no trailing '\n'. The next
+                // emit would append after the missing newline and
+                // produce malformed JSONL forever. Stop here and
+                // signal truncation back to `safe_byte_len`.
+                break;
+            }
+            BoundedLine::Line => {
+                let line_len = line_buf.len() as u64 + 1; // include '\n'
+                let line_str = match std::str::from_utf8(&line_buf) {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                if serde_json::from_str::<Event>(line_str).is_err() {
+                    break;
+                }
+                last_good_seq += 1;
+                consumed_bytes += line_len;
+                safe_byte_len = consumed_bytes;
+            }
+        }
+    }
+
+    Ok(RecoveredTail {
+        last_good_seq,
+        safe_byte_len,
+    })
+}
+
 /// Returns the workspace root if `path` is nested under a `.forge` directory.
 /// Returns `None` (and silently skips gitignore creation) for paths outside `.forge/`.
 /// Production callers are expected to always nest EventLog files under `.forge/`.

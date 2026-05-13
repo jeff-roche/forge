@@ -59,6 +59,40 @@
   color: var(--color-text-secondary);
 }
 
+/* F-748 session-health pill — surfaces daemon-pipe state alongside the
+ * provider pill. The `error` variant takes the canonical danger accent
+ * so the chrome reads as a hard alarm rather than a routine notice; the
+ * `detecting` variant uses the warning accent and pulses gently to
+ * signal "we noticed silence, watching for confirmation". The crash-
+ * restart overlay carries the affordance; the pill is just the badge
+ * a casual glance sees before the overlay covers the pane. */
+.pane-header__status {
+  display: inline-flex;
+  align-items: center;
+  padding: var(--sp-1) var(--sp-2);
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-xxs);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border-radius: var(--r-sm);
+  border: 1px solid transparent;
+}
+.pane-header__status[data-status='error'] {
+  color: var(--color-accent-danger);
+  background: var(--color-error-bg);
+  border-color: var(--color-error-border);
+}
+.pane-header__status[data-status='detecting'] {
+  color: var(--color-warning);
+  background: var(--color-warning-bg);
+  border-color: var(--color-warning-border);
+  animation: pane-header-status-pulse 1.5s ease-in-out infinite;
+}
+@keyframes pane-header-status-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.55; }
+}
+
 .pane-header__close {
   background: transparent;
   border: 1px solid transparent;

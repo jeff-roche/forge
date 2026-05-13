@@ -97,7 +97,13 @@ async fn main() -> Result<()> {
     let log_bridge_rx = log_bridge::install();
 
     let log_path = event_log_path(&session_id, workspace.as_deref());
-    let session = Arc::new(Session::create(log_path).await?);
+    // F-748: a daemon spawned for an existing `session_id` (crash-restart
+    // re-spawn) must NOT truncate the durable event log. `Session::resume`
+    // preserves the file and seeds `seq` from the persisted event count
+    // when the log already exists; otherwise it falls through to a fresh
+    // `EventLog::create`. First-spawn callers go through the create branch
+    // unchanged.
+    let session = Arc::new(Session::resume(log_path).await?);
 
     if let Some(mut rx) = log_bridge_rx {
         let session_for_logs = Arc::clone(&session);

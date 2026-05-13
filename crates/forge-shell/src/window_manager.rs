@@ -246,6 +246,14 @@ pub fn run() -> Result<()> {
             // and intentionally not from the dashboard — that is the
             // window-close path's responsibility alone.
             crate::session_close_ipc::session_close,
+            // F-748: re-spawn a `forged` daemon for an existing session id
+            // after a crash. Drops the stale bridge connection, re-uses
+            // the persisted event log via `Session::resume`, and returns
+            // once the new UDS is bound. The session window's
+            // `<CrashRestartOverlay>` calls this on the user's "Restart
+            // session" click, then resumes the subscription with
+            // `Subscribe { since: last_seq }`.
+            crate::session_restart_ipc::session_restart,
             // F-734: catalog `+ Add MCP server` modal. Writes a single
             // entry into the workspace or user-scope `.mcp.json` document.
             crate::mcp_ipc::add_mcp_server,

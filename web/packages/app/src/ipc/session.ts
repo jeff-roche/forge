@@ -14,6 +14,20 @@ import type {
 } from '@forge/ipc';
 
 export const SESSION_EVENT = 'session:event';
+/**
+ * F-748: Tauri event name the bridge emits on its `EventSink::on_crash`
+ * notification path. Fired exactly once per crashed pump (the pump exits
+ * after emitting it), so the listener doesn't need debouncing.
+ */
+export const SESSION_CRASHED = 'session:crashed';
+
+/** F-748 payload shape mirroring `forge_shell::ipc::SessionCrashedPayload`. */
+export interface SessionCrashedPayload {
+  session_id: SessionId;
+  /** High-water mark of forwarded event seqs — pass back as `since` on
+   *  `sessionSubscribe` after restart to avoid duplicate replays. */
+  last_seq: number;
+}
 
 /** Mirror of `forge_ipc::HelloAck`. */
 export interface HelloAck {
@@ -129,6 +143,44 @@ export async function onSessionEvent(
 ): Promise<UnlistenFn> {
   return listen<SessionEventPayload>(SESSION_EVENT, (event) => {
     handler(event.payload);
+  });
+}
+
+/**
+ * F-748: subscribe to `session:crashed` Tauri events. The shell emits one
+ * per daemon UDS-read failure (EOF / ECONNRESET / framing error) for the
+ * matching `session-<id>` window. Callers wire this in `SessionWindow` to
+ * surface the crash-restart prompt overlay.
+ */
+export async function onSessionCrashed(
+  handler: (payload: SessionCrashedPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<SessionCrashedPayload>(SESSION_CRASHED, (event) => {
+    handler(event.payload);
+  });
+}
+
+/**
+ * F-748: ask the shell to re-spawn the `forged` daemon for `sessionId`
+ * after a crash. The shell drops any stale bridge connection, re-spawns
+ * `forged` with the SAME session id so the persisted event log under
+ * `<workspace>/.forge/sessions/<id>/events.jsonl` is resumed (NOT
+ * truncated), and resolves once the new UDS is bound. Callers must
+ * follow up with `sessionHello` + `sessionSubscribe({ since: last_seq })`
+ * to re-attach.
+ */
+export async function sessionRestart(
+  sessionId: SessionId,
+  workspaceRoot: string,
+  options: { agent?: string; provider?: string } = {},
+): Promise<void> {
+  await invoke('session_restart', {
+    input: {
+      session_id: sessionId,
+      workspace_root: workspaceRoot,
+      agent: options.agent,
+      provider: options.provider,
+    },
   });
 }
 

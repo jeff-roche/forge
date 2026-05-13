@@ -1,0 +1,90 @@
+/* F-748 crash-restart overlay — covers the ChatPane (not the whole window)
+ * so the transcript stays visible (and disabled) underneath. The scrim is
+ * built on `--color-overlay`, the card on `--color-surface-2` with the
+ * canonical `--shadow-modal`, and the headline takes the danger accent so
+ * the affordance reads as a hard interrupt rather than a routine notice. */
+
+.crash-restart-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-6);
+  background: var(--color-overlay);
+  /* Ride above ChatPane content (`composer`, `chat-pane__messages`, tool
+   * cards) without colliding with the F-447 expanded body tinting. */
+  z-index: 20;
+  /* Block pointer events from reaching the underlying ChatPane — the
+   * scrim doubles as a click-shield while the affordance is up. */
+  pointer-events: auto;
+  /* Smooth in so the appearance reads as a deliberate interrupt, not a
+   * glitch. Animation is intentionally short — the user is parked on
+   * this prompt; we don't want it to feel slow. */
+  animation: crash-restart-overlay-fade var(--ease);
+}
+
+@keyframes crash-restart-overlay-fade {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.crash-restart-overlay__card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  max-width: 420px;
+  padding: var(--sp-6);
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-error-border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-modal);
+}
+
+.crash-restart-overlay__headline {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--type-display-md);
+  letter-spacing: 0.02em;
+  color: var(--color-accent-danger);
+  text-transform: uppercase;
+}
+
+.crash-restart-overlay__body {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: var(--type-body-md);
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+}
+
+.crash-restart-overlay__error {
+  margin: 0;
+  padding: var(--sp-3) var(--sp-4);
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-sm);
+  color: var(--color-accent-danger);
+  background: var(--color-error-bg);
+  border: 1px solid var(--color-error-border);
+  border-radius: var(--r-sm);
+  /* Long error strings can overflow narrow panes; wrap them. */
+  word-break: break-word;
+}
+
+.crash-restart-overlay__actions {
+  display: flex;
+  gap: var(--sp-3);
+  align-items: center;
+  margin-top: var(--sp-2);
+}
+
+.crash-restart-overlay__progress {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-sm);
+  color: var(--color-text-secondary);
+}

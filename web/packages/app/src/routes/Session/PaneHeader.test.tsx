@@ -243,6 +243,61 @@ describe('PaneHeader trailing slot (F-394)', () => {
   });
 });
 
+// F-748: status pill surfaces the per-session-window health state alongside
+// the provider pill. `idle` and undefined render no pill; `detecting` and
+// `error` each render distinct chrome with stable test ids so SessionWindow
+// can drive the visual transition without coupling to CSS class names.
+describe('PaneHeader status pill (F-748)', () => {
+  it('renders no status pill by default (idle)', () => {
+    const { queryByTestId } = render(() => (
+      <PaneHeader subject="example" onClose={vi.fn()} />
+    ));
+    expect(queryByTestId('pane-header-status')).toBeNull();
+  });
+
+  it('omits the status pill when status="idle"', () => {
+    const { queryByTestId } = render(() => (
+      <PaneHeader subject="example" status="idle" onClose={vi.fn()} />
+    ));
+    expect(queryByTestId('pane-header-status')).toBeNull();
+  });
+
+  it('renders the error pill with data-status="error" and the canonical label', () => {
+    const { getByTestId } = render(() => (
+      <PaneHeader subject="example" status="error" onClose={vi.fn()} />
+    ));
+    const pill = getByTestId('pane-header-status');
+    expect(pill.dataset.status).toBe('error');
+    expect(pill.textContent?.toLowerCase()).toContain('crashed');
+    // aria-label is a sentence per the project's accessibility pattern;
+    // the visible text is a single lowercase tag.
+    expect(pill.getAttribute('aria-label')).toBe('session crashed');
+  });
+
+  it('renders the detecting pill with the pulsing-warning treatment', () => {
+    const { getByTestId } = render(() => (
+      <PaneHeader subject="example" status="detecting" onClose={vi.fn()} />
+    ));
+    const pill = getByTestId('pane-header-status');
+    expect(pill.dataset.status).toBe('detecting');
+    expect(pill.textContent?.toLowerCase()).toContain('unresponsive');
+  });
+
+  it('hides the status pill at icon-only compactness alongside other badges', () => {
+    const { queryByTestId } = render(() => (
+      <PaneHeader
+        subject="example"
+        status="error"
+        compactness="icon-only"
+        onClose={vi.fn()}
+      />
+    ));
+    // F-119: badges drop out of the tree (not just hidden via CSS) at
+    // icon-only so screen readers don't announce vestigial chrome.
+    expect(queryByTestId('pane-header-status')).toBeNull();
+  });
+});
+
 // F-394: EditorPane needs to thread the F-150 drag-to-dock pointerdown into
 // the header element. Accepting the handler on the primitive avoids wrapping
 // the header in an extra <div> at every consumer site.

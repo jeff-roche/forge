@@ -77,6 +77,12 @@ pub mod session_spawn_ipc;
 // graceful → SIGTERM → SIGKILL escalation without Tauri or a live daemon;
 // the `#[tauri::command]` wrapper is gated behind `webview`.
 pub mod session_close_ipc;
+// F-748: crash-restart prompt for a dead `forged` daemon. The pure
+// validator (`validate_session_restart_input`), error-prefix constant, and
+// `run_session_restart` body are always compiled so non-webview unit tests
+// can drive the rejection paths and the dependent webview wiring lives in
+// the `#[tauri::command]` wrapper behind the `webview` feature.
+pub mod session_restart_ipc;
 // F-593: `usage_summary` Tauri command, plus the cross-workspace toggle and
 // monthly-file walker that backs it. Gated behind `webview` because the
 // command itself depends on Tauri types; the helpers it ships are exercised
