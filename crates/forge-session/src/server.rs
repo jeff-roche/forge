@@ -1138,10 +1138,18 @@ pub async fn serve_with_session_swappable<P: Provider + 'static>(
     // the live session dir is left behind under `sessions/<id>/`.
     //
     // F-747: also race against an in-process `shutdown_notify` that any
-    // connection can `notify_waiters()` on receipt of `IpcMessage::Shutdown`
+    // connection can `notify_one()` on receipt of `IpcMessage::Shutdown`
     // (Tauri shell's `session_close` IPC, fired when the session window is
     // closed). The shutdown path runs the same `archive_or_purge` arm as
     // the signal handlers so socket + pid-file cleanup is unified.
+    //
+    // `notify_one` (not `notify_waiters`) is required: the outer `select!`
+    // creates a fresh `Notified` future each loop iteration and only polls
+    // it while waiting on `accept`. `notify_waiters` would only wake
+    // futures *currently polling*, so a Shutdown frame that arrives while
+    // `listener.accept()` is blocked but before the Notified future is
+    // re-polled is lost. `notify_one` stores a permit when no waiter is
+    // present, so the next `.notified()` returns immediately.
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
     let shutdown_notify = Arc::new(Notify::new());
@@ -1977,6 +1985,16 @@ async fn handle_connection<P: Provider + 'static>(
                         // `shutdown_notify.is_some()` check so a stray frame
                         // in tests that spawn the ephemeral binary doesn't
                         // mis-claim archival.
+                        //
+                        // The flag is optimistic: `archive_or_purge` runs
+                        // after this `SessionEnded` is broadcast (in the
+                        // outer accept loop, after `notify_one` wakes it).
+                        // A subsequent archive failure would not retract
+                        // `archived: true`; ordering is deliberate so the
+                        // shell can observe the canonical end marker before
+                        // the daemon exits. If archive errors ever need to
+                        // be surfaced to listeners, emit a follow-up event
+                        // rather than reworking the ordering here.
                         let archived = shutdown_notify.is_some();
                         if let Err(e) = session.emit(forge_core::Event::SessionEnded {
                             at: chrono::Utc::now(),
@@ -1991,7 +2009,15 @@ async fn handle_connection<P: Provider + 'static>(
                             );
                         }
                         if let Some(notify) = shutdown_notify.as_ref() {
-                            notify.notify_waiters();
+                            // `notify_one` (not `notify_waiters`): the outer
+                            // accept-loop's `Notified` future is only being
+                            // polled when the loop is sitting in `select!`.
+                            // If it's currently parked inside `accept`,
+                            // `notify_waiters` would fire with no waiter
+                            // and the wakeup would be lost. `notify_one`
+                            // stores a permit so the next `.notified()`
+                            // observes the wake.
+                            notify.notify_one();
                         } else {
                             tracing::debug!(
                                 target: "forge_session::server",
