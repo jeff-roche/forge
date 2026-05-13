@@ -266,6 +266,9 @@ async fn main() -> Result<()> {
 /// today; the cfg gates all three desktop OSes), fall back to the
 /// env-only store.
 fn build_credential_context(provider_id: &'static str) -> Option<CredentialContext> {
+    // `EnvFallbackStore::default()` reads `ANTHROPIC_API_KEY` for the
+    // `anthropic` provider and `OPENAI_API_KEY` for `openai` when the
+    // keyring has no entry — the canonical vendor env vars.
     let store: Arc<dyn Credentials> = {
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         {
