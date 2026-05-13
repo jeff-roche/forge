@@ -176,6 +176,21 @@ async fn session_restart_resumes_event_log_without_duplicates() {
     .expect("session_restart");
     assert_eq!(restart_out.session_id, session_id);
 
+    // F-748 review fix (Q5): the new daemon must be a DIFFERENT process
+    // than the killed one — proves we actually re-spawned rather than
+    // stitching the test back onto a stale handle. Read the post-restart
+    // pid file via the canonical parser so a future format change still
+    // exercises the assertion.
+    let post_restart_raw = std::fs::read_to_string(&pid_path)
+        .expect("post-restart pid file must exist after run_session_restart returns");
+    let (post_restart_pid, _start_time) =
+        forge_cli::socket::parse_pid_file_record(&post_restart_raw)
+            .expect("post-restart pid file must parse");
+    assert_ne!(
+        post_restart_pid as u32, killed_pid,
+        "session_restart must spawn a fresh process, not reuse the killed pid",
+    );
+
     // -- Phase 4: re-hello and re-subscribe with `since: last_seq`. The
     // daemon's history-replay path uses `read_since(log_path, since)` —
     // events with seq <= last_seq must NOT replay (no duplicates), and

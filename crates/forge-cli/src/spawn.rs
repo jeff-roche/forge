@@ -74,7 +74,18 @@ pub async fn spawn_forged_session_with_id(
     // would have removed both via the daemon's drop guards; a crashed /
     // SIGKILL'd daemon leaves them behind. Best-effort — missing files
     // are the normal case for first-spawn (existing_id == None).
+    //
+    // F-748 review fix: do NOT unlink the pid file while its recorded
+    // process is still live. The previous `pump_events` crash signal can
+    // race the kernel reaping the old daemon; if we unlink + spawn
+    // immediately, the new daemon's `OwnedPidFile::create` (O_EXCL) can
+    // collide with the old one or two daemons can briefly hold the same
+    // socket. Probe liveness; if the old pid is still alive, give it up
+    // to 2s to exit, then SIGKILL it. This is the same escalation pattern
+    // F-747's `session_close` runs — reusing the same `forge-cli::socket`
+    // primitives that crate already exports as pub helpers.
     if existing_id.is_some() {
+        reap_old_daemon_if_alive(&pid_file).await;
         let _ = tokio::fs::remove_file(&sock).await;
         let _ = tokio::fs::remove_file(&pid_file).await;
     }
@@ -158,4 +169,83 @@ async fn wait_for_socket(path: &Path) -> Result<()> {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     anyhow::bail!("timed out waiting for socket at {}", path.display())
+}
+
+/// F-748 review fix: if `pid_file` still names a live process, wait for it
+/// to exit before letting the caller unlink the pid+socket artifacts.
+///
+/// Sequence:
+/// 1. If the pid file is missing or unparseable → no-op (no live owner).
+/// 2. If `kill(pid, 0)` reports ESRCH → daemon already exited, no-op.
+/// 3. Otherwise poll every 100ms for up to 2s, waiting for the process
+///    to disappear.
+/// 4. If still alive after 2s, send SIGKILL through a pidfd (race-free
+///    against PID reuse) and wait briefly for reap.
+///
+/// Best-effort: this function never returns an error. A locked /proc, a
+/// permission-denied signal, or a transient FS hiccup all collapse to
+/// "proceed with the unlink + respawn" — the worst outcome is the new
+/// daemon's `OwnedPidFile::create(O_EXCL)` failing, which surfaces a
+/// clear error to the caller anyway.
+async fn reap_old_daemon_if_alive(pid_file: &Path) {
+    let Ok(raw) = tokio::fs::read_to_string(pid_file).await else {
+        return;
+    };
+    let Ok((pid, _start_time)) = socket::parse_pid_file_record(&raw) else {
+        return;
+    };
+
+    if !is_pid_alive(pid) {
+        return;
+    }
+
+    // Poll for natural exit. The bridge's crash signal often outruns the
+    // kernel reap; 2s is generous on Linux where reap is microseconds
+    // once the parent reads `waitpid`. Detached daemons reparent to
+    // PID 1, which reaps promptly.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
+        if !is_pid_alive(pid) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Still alive — escalate to SIGKILL via pidfd so we cannot signal a
+    // recycled PID. Errors here are tolerated: the worst case is the
+    // upcoming O_EXCL pid-file create failing, which the caller surfaces.
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(()) = socket::pidfd_send_signal_for_pid(pid, libc::SIGKILL) {
+            // Brief wait for reap so the new daemon doesn't immediately
+            // collide on the pid file. We intentionally don't loop
+            // forever here — at this point we've SIGKILL'd; the kernel
+            // will reap.
+            for _ in 0..20 {
+                if !is_pid_alive(pid) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    }
+}
+
+/// Probe whether `pid` names a live process via `kill(pid, 0)`. Returns
+/// `false` on ESRCH (process is gone), `true` for every other outcome
+/// (live + signalable OR permission-denied — both treated as live for
+/// the purpose of the reap wait, since an EPERM means *something* still
+/// owns that pid). Identical policy to forge-shell's
+/// `session_close_ipc::is_pid_alive` — factored to socket-level helpers
+/// in forge-cli's own `socket` module would create a cycle; an inline
+/// `kill(pid, 0)` is the smallest possible reuse footprint.
+fn is_pid_alive(pid: libc::pid_t) -> bool {
+    // SAFETY: `libc::kill` is FFI; arguments are simple integers; signal
+    // 0 means "no signal, just probe".
+    let rc = unsafe { libc::kill(pid, 0) };
+    if rc == 0 {
+        return true;
+    }
+    let err = std::io::Error::last_os_error();
+    !matches!(err.raw_os_error(), Some(libc::ESRCH))
 }
