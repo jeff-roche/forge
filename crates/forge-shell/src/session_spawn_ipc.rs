@@ -41,6 +41,17 @@ pub const SESSION_START_ERROR: &str = "session_start: ";
 // convention so dashboard log filters and end-user messages stay consistent.
 pub const LIST_SESSIONS_ERROR: &str = "list_sessions: ";
 
+// F-746: reason suffix appended after `SESSION_START_ERROR` when the
+// pre-spawn credential check rejects. The dashboard's new-session dialog
+// substring-matches on this constant to render an actionable
+// "Configure provider" CTA pointing at `/providers#<id>`. Both the
+// missing-entry case (`store.has` returned `Ok(false)`) and the backend-
+// error case (`store.has` returned `Err`) collapse onto this single
+// reason — the user-visible recovery is identical (open the provider
+// settings; a locked keyring will surface a more specific message
+// there).
+pub const CREDENTIALS_MISSING_REASON: &str = "credentials_missing for provider ";
+
 /// F-727: wire-state value the picker treats as "attachable". The
 /// `dashboard_sessions` module emits `"stopped"` for active sessions whose
 /// UDS ping fails — those are the sessions the operator can re-attach by
@@ -105,6 +116,107 @@ pub fn provider_is_known(settings: &forge_core::settings::AppSettings, id: &str)
     crate::providers_ipc::is_known_provider_id(settings, id)
 }
 
+/// F-746: pure keyless classifier.
+///
+/// Returns `true` when `provider_id` requires no credential at the
+/// network boundary:
+///
+/// - The legacy bare slug `"ollama"` — kept for back-compat with callers
+///   that still pass the Phase-1 id before it was migrated to a
+///   `custom_openai:ollama` entry.
+/// - Any `custom_openai:<name>` whose section in
+///   `settings.providers.custom_openai[name].auth` is
+///   [`forge_core::settings::AuthShapeSettings::None`]. This is the
+///   production shape for the Ollama / local-vLLM / private-network
+///   gateway presets per F-730.
+///
+/// Built-in providers (`anthropic`, `openai`, named instances) are NOT
+/// keyless. Anthropic's Vertex sub-mode pulls a Google access token via
+/// `gcloud` rather than a keyring entry; F-746 deliberately keeps
+/// Vertex out of the keyless bucket because the absence of a usable
+/// token still wants surfacing — that's a follow-up enhancement, not
+/// this task.
+pub fn provider_is_keyless(
+    settings: &forge_core::settings::AppSettings,
+    provider_id: &str,
+) -> bool {
+    use forge_core::settings::AuthShapeSettings;
+
+    if provider_id == "ollama" {
+        return true;
+    }
+    if let Some(name) = provider_id.strip_prefix(crate::providers_ipc::CUSTOM_OPENAI_PREFIX) {
+        if let Some(entry) = settings.providers.custom_openai.get(name) {
+            return matches!(entry.auth, AuthShapeSettings::None);
+        }
+    }
+    false
+}
+
+/// F-746: pre-spawn credential check.
+///
+/// Called from `session_start` immediately after the unknown-provider
+/// gate and immediately before `spawn_forged_session`. The goal is to
+/// fail the new-session flow with an actionable error BEFORE any
+/// `forged` daemon is spawned or `/tmp/forge-*` socket is allocated;
+/// without this gate the first-turn `pull_active_credential` call
+/// (F-744) is where the user would first see the missing credential —
+/// by which point a stranded daemon is already running.
+///
+/// # Keyring key shape
+///
+/// `store.has(provider_id)` is called with the **full `provider_id`
+/// string verbatim** — including any `<vendor>:<name>` suffix for
+/// named built-in instances (`anthropic:work`, `openai:personal`) and
+/// `custom_openai:<name>` rows. Every [`Credentials`] implementor
+/// (memory, env-fallback, keyring) keys its entries on that same raw
+/// slug per the trait contract in
+/// [`forge_core::credentials`] (point 2 of the trait doc): the
+/// `provider_id` the caller hands in is the source of truth.
+///
+/// On the keyring backend the slug lands in the platform-specific
+/// "account" field; the service namespace (`"forge"` by default) is
+/// applied by [`forge_core::credentials::KeyringStore`] and is
+/// transparent to callers here. The F-587 audit pins this convention.
+///
+/// [`Credentials`]: forge_core::credentials::Credentials
+///
+/// # Returns
+///
+/// - `Ok(())` when the provider is keyless (no credential is needed),
+///   or when the store reports the credential is present.
+/// - `Err(SESSION_START_ERROR + CREDENTIALS_MISSING_REASON + <id>)`
+///   when the store reports no entry OR when the store errors (keyring
+///   locked, Secret Service daemon down, etc.). Both shapes collapse
+///   to the same reason so the dashboard surfaces one CTA either way;
+///   the user-visible recovery (open `/providers#<id>`) is identical.
+pub async fn check_provider_credential(
+    store: &std::sync::Arc<dyn forge_core::credentials::Credentials>,
+    settings: &forge_core::settings::AppSettings,
+    provider_id: &str,
+) -> Result<(), String> {
+    if provider_is_keyless(settings, provider_id) {
+        return Ok(());
+    }
+    match store.has(provider_id).await {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(format!(
+            "{SESSION_START_ERROR}{CREDENTIALS_MISSING_REASON}{provider_id}"
+        )),
+        Err(e) => {
+            tracing::warn!(
+                target: "forge_shell::session_start::credentials",
+                provider_id = %provider_id,
+                error = %e,
+                "credential presence probe failed",
+            );
+            Err(format!(
+                "{SESSION_START_ERROR}{CREDENTIALS_MISSING_REASON}{provider_id}"
+            ))
+        }
+    }
+}
+
 /// Pure agent check: `name` must match one of the loaded agent ids from
 /// the workspace + user-home roster. Exposed for unit tests.
 pub fn agent_is_known(
@@ -123,6 +235,7 @@ pub async fn session_start<R: Runtime>(
     input: SessionStartInput,
     webview: Webview<R>,
     state: State<'_, BridgeState>,
+    credentials: State<'_, crate::credentials_ipc::CredentialsState>,
 ) -> Result<SessionStartOutput, String> {
     crate::ipc::require_window_label(&webview, "dashboard", "session_start")?;
     validate_session_start_input(&input)?;
@@ -166,6 +279,17 @@ pub async fn session_start<R: Runtime>(
                 "{SESSION_START_ERROR}unknown provider: {provider_id}"
             ));
         }
+
+        // F-746: pre-spawn credential validation. Keyless providers
+        // (`ollama`, `custom_openai:<name>` with `auth.shape = "none"`)
+        // skip this check entirely; every other provider must have a
+        // reachable credential in the store, or `session_start` fails
+        // BEFORE `spawn_forged_session` allocates a daemon + UDS. A
+        // missing entry and a backend error both collapse to the same
+        // `credentials_missing` reason so the dashboard renders one
+        // actionable CTA either way.
+        let store = credentials.store();
+        check_provider_credential(&store, &settings, provider_id).await?;
     }
 
     let user_home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
@@ -236,7 +360,12 @@ pub async fn list_sessions<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use forge_core::settings::AppSettings;
+    use forge_core::credentials::{Credentials, MemoryStore};
+    use forge_core::settings::{
+        AppSettings, AuthShapeSettings, CustomOpenAiEntry, ProvidersSettings,
+    };
+    use secrecy::SecretString;
+    use std::sync::Arc;
 
     fn input(
         workspace_root: &str,
@@ -423,5 +552,200 @@ mod tests {
     #[test]
     fn attachable_wire_state_is_stopped() {
         assert_eq!(ATTACHABLE_WIRE_STATE, "stopped");
+    }
+
+    // -----------------------------------------------------------------
+    // F-746: pre-spawn credential validation
+    // -----------------------------------------------------------------
+
+    /// Backend wired to fail every `get` / `has` call — exercises the
+    /// keyring-locked / Secret-Service-unreachable error path. Holds no
+    /// secrets and is not constructible from outside the test module.
+    struct FailingStore;
+
+    #[async_trait::async_trait]
+    impl Credentials for FailingStore {
+        async fn get(
+            &self,
+            _provider_id: &str,
+        ) -> Result<Option<SecretString>, forge_core::ForgeError> {
+            Err(anyhow::anyhow!("keyring backend unavailable").into())
+        }
+        async fn set(
+            &self,
+            _provider_id: &str,
+            _value: SecretString,
+        ) -> Result<(), forge_core::ForgeError> {
+            Err(anyhow::anyhow!("read-only test stub").into())
+        }
+        async fn remove(&self, _provider_id: &str) -> Result<(), forge_core::ForgeError> {
+            Err(anyhow::anyhow!("read-only test stub").into())
+        }
+        async fn has(&self, _provider_id: &str) -> Result<bool, forge_core::ForgeError> {
+            Err(anyhow::anyhow!("keyring backend unavailable").into())
+        }
+    }
+
+    fn settings_with_custom_openai(name: &str, auth: AuthShapeSettings) -> AppSettings {
+        let mut providers = ProvidersSettings::default();
+        providers.custom_openai.insert(
+            name.to_string(),
+            CustomOpenAiEntry {
+                base_url: "http://127.0.0.1:11434".into(),
+                model: "qwen2.5".into(),
+                model_list: vec![],
+                auth,
+                api_key: None,
+            },
+        );
+        AppSettings {
+            providers,
+            ..AppSettings::default()
+        }
+    }
+
+    /// Pin the F-746 error suffix so the dashboard's CTA mapper has a
+    /// stable substring to key on.
+    #[test]
+    fn credentials_missing_error_suffix_is_stable() {
+        assert_eq!(
+            CREDENTIALS_MISSING_REASON,
+            "credentials_missing for provider "
+        );
+    }
+
+    /// Built-in providers (anthropic, openai) are NOT keyless — both
+    /// require an API key in the credential store.
+    #[test]
+    fn builtins_are_not_keyless() {
+        let settings = AppSettings::default();
+        assert!(!provider_is_keyless(&settings, "anthropic"));
+        assert!(!provider_is_keyless(&settings, "openai"));
+    }
+
+    /// The legacy bare `ollama` id is keyless — covers callers that still
+    /// pass the historical Phase-1 slug before it was migrated to
+    /// `custom_openai:ollama`.
+    #[test]
+    fn legacy_ollama_id_is_keyless() {
+        let settings = AppSettings::default();
+        assert!(provider_is_keyless(&settings, "ollama"));
+    }
+
+    /// A `custom_openai:<name>` entry whose section declares
+    /// `auth = { shape = "none" }` is keyless. This is the production shape
+    /// for Ollama via the custom_openai preset (F-743).
+    #[test]
+    fn custom_openai_with_auth_none_is_keyless() {
+        let settings = settings_with_custom_openai("ollama", AuthShapeSettings::None);
+        assert!(provider_is_keyless(&settings, "custom_openai:ollama"));
+    }
+
+    /// A `custom_openai:<name>` with the default bearer auth shape is NOT
+    /// keyless — its credential must be present in the store.
+    #[test]
+    fn custom_openai_with_bearer_is_not_keyless() {
+        let settings = settings_with_custom_openai("together", AuthShapeSettings::Bearer);
+        assert!(!provider_is_keyless(&settings, "custom_openai:together"));
+    }
+
+    /// Keyless check: an unconfigured `custom_openai:<name>` (no section
+    /// in settings) is NOT keyless. The unknown-provider gate upstream
+    /// rejects this case first; the credential check stays conservative.
+    #[test]
+    fn custom_openai_without_section_is_not_keyless() {
+        let settings = AppSettings::default();
+        assert!(!provider_is_keyless(&settings, "custom_openai:ghost"));
+    }
+
+    /// Keyless skip: when the provider is keyless, the check returns
+    /// `Ok(())` without consulting the store. We use `FailingStore` to
+    /// prove no `get` / `has` call is made.
+    #[tokio::test]
+    async fn check_credential_skips_keyless_provider() {
+        let store: Arc<dyn Credentials> = Arc::new(FailingStore);
+        let settings = settings_with_custom_openai("ollama", AuthShapeSettings::None);
+        check_provider_credential(&store, &settings, "custom_openai:ollama")
+            .await
+            .expect("keyless skip must not touch the store");
+    }
+
+    /// Happy path: keyed provider with a stored credential passes the
+    /// check.
+    #[tokio::test]
+    async fn check_credential_accepts_present_credential() {
+        let mem = MemoryStore::new();
+        mem.set("anthropic", SecretString::from("sk-test-1"))
+            .await
+            .unwrap();
+        let store: Arc<dyn Credentials> = Arc::new(mem);
+        let settings = AppSettings::default();
+        check_provider_credential(&store, &settings, "anthropic")
+            .await
+            .expect("present credential must pass");
+    }
+
+    /// Missing-entry rejection: the store reports `Ok(false)`. Error
+    /// carries the canonical prefix + reason + provider id.
+    #[tokio::test]
+    async fn check_credential_rejects_missing_entry() {
+        let store: Arc<dyn Credentials> = Arc::new(MemoryStore::new());
+        let settings = AppSettings::default();
+        let err = check_provider_credential(&store, &settings, "anthropic")
+            .await
+            .expect_err("absent credential must reject");
+        assert!(err.starts_with(SESSION_START_ERROR), "prefix: {err}");
+        assert!(err.contains(CREDENTIALS_MISSING_REASON), "reason: {err}");
+        assert!(err.ends_with("anthropic"), "provider id suffix: {err}");
+    }
+
+    /// Keyring-locked rejection: the store errors on `has`. The check
+    /// collapses both shapes (missing entry, backend error) onto the
+    /// same `credentials_missing` umbrella so the dashboard renders one
+    /// CTA either way.
+    #[tokio::test]
+    async fn check_credential_rejects_backend_error() {
+        let store: Arc<dyn Credentials> = Arc::new(FailingStore);
+        let settings = AppSettings::default();
+        let err = check_provider_credential(&store, &settings, "openai")
+            .await
+            .expect_err("keyring backend error must reject");
+        assert!(err.starts_with(SESSION_START_ERROR), "prefix: {err}");
+        assert!(err.contains(CREDENTIALS_MISSING_REASON), "reason: {err}");
+        assert!(err.ends_with("openai"), "provider id suffix: {err}");
+    }
+
+    /// Named-instance happy path: a built-in with a `<vendor>:<name>`
+    /// suffix (`anthropic:work`) and a keyring entry seeded under the
+    /// exact same key passes the credential check. Pins the contract
+    /// documented above `check_provider_credential`: the store is
+    /// consulted with the full `provider_id` verbatim, no
+    /// normalization or vendor-prefix stripping.
+    #[tokio::test]
+    async fn check_credential_accepts_named_builtin_with_keyring_entry() {
+        let mem = MemoryStore::new();
+        mem.set("anthropic:work", SecretString::from("sk-work-1"))
+            .await
+            .unwrap();
+        let store: Arc<dyn Credentials> = Arc::new(mem);
+        let settings = AppSettings::default();
+        check_provider_credential(&store, &settings, "anthropic:work")
+            .await
+            .expect("named-instance credential must pass");
+    }
+
+    /// A `custom_openai:<name>` row whose `auth.shape = "header"` (the
+    /// X-Api-Key / custom-header preset) is NOT keyless — only
+    /// `AuthShapeSettings::None` is. Guards against a future refactor
+    /// silently widening the keyless bucket.
+    #[test]
+    fn custom_openai_with_header_auth_is_not_keyless() {
+        let settings = settings_with_custom_openai(
+            "local",
+            AuthShapeSettings::Header {
+                name: "X-Api-Key".into(),
+            },
+        );
+        assert!(!provider_is_keyless(&settings, "custom_openai:local"));
     }
 }
