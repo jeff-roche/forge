@@ -65,6 +65,15 @@ pub struct SessionRestartOutput {
 
 /// Pure validation of `SessionRestartInput`. Exposed so tests can exercise
 /// the rejection paths without standing up a Tauri runtime.
+///
+/// F-748 review fix: size-cap every untyped string the same way
+/// `validate_session_start_input` does so a compromised webview can't drive
+/// arbitrary-sized payloads across the IPC boundary. `workspace_root` reuses
+/// the canonical `MAX_WORKSPACE_ROOT_BYTES` (4 KiB PATH_MAX envelope);
+/// `agent` / `provider` cap at `MAX_SESSION_START_ID_BYTES` — the same 256-
+/// byte slug cap `session_start` applies. Errors flow through `require_size`
+/// so the wire-format `"payload too large"` marker is identical to every
+/// other oversized-input rejection (F-674).
 pub fn validate_session_restart_input(input: &SessionRestartInput) -> Result<(), String> {
     if input.session_id.is_empty() {
         return Err(format!("{SESSION_RESTART_ERROR}session_id is empty"));
@@ -74,6 +83,28 @@ pub fn validate_session_restart_input(input: &SessionRestartInput) -> Result<(),
     }
     if input.workspace_root.is_empty() {
         return Err(format!("{SESSION_RESTART_ERROR}workspace_root is empty"));
+    }
+    crate::ipc::require_size(
+        "workspace_root",
+        &input.workspace_root,
+        crate::ipc::MAX_WORKSPACE_ROOT_BYTES,
+    )
+    .map_err(|e| format!("{SESSION_RESTART_ERROR}{e}"))?;
+    if let Some(agent) = input.agent.as_deref() {
+        crate::ipc::require_size(
+            "agent",
+            agent,
+            crate::session_spawn_ipc::MAX_SESSION_START_ID_BYTES,
+        )
+        .map_err(|e| format!("{SESSION_RESTART_ERROR}{e}"))?;
+    }
+    if let Some(provider) = input.provider.as_deref() {
+        crate::ipc::require_size(
+            "provider",
+            provider,
+            crate::session_spawn_ipc::MAX_SESSION_START_ID_BYTES,
+        )
+        .map_err(|e| format!("{SESSION_RESTART_ERROR}{e}"))?;
     }
     Ok(())
 }
@@ -147,6 +178,20 @@ mod tests {
         }
     }
 
+    fn input_full(
+        session_id: &str,
+        workspace: &str,
+        agent: Option<&str>,
+        provider: Option<&str>,
+    ) -> SessionRestartInput {
+        SessionRestartInput {
+            session_id: session_id.to_string(),
+            workspace_root: workspace.to_string(),
+            agent: agent.map(str::to_string),
+            provider: provider.map(str::to_string),
+        }
+    }
+
     #[test]
     fn error_prefix_is_command_named() {
         assert_eq!(SESSION_RESTART_ERROR, "session_restart: ");
@@ -179,5 +224,63 @@ mod tests {
     fn validate_accepts_canonical_pair() {
         validate_session_restart_input(&input("deadbeefcafebabe", "/tmp/ws"))
             .expect("canonical input passes");
+    }
+
+    /// F-748 review fix: a webview cannot drive an unbounded workspace_root
+    /// across the IPC boundary. The cap matches `session_start`'s
+    /// `MAX_WORKSPACE_ROOT_BYTES` so the two restart-vs-start pathways
+    /// reject identically.
+    #[test]
+    fn validate_rejects_oversize_workspace_root() {
+        let huge = "x".repeat(crate::ipc::MAX_WORKSPACE_ROOT_BYTES + 1);
+        let err = validate_session_restart_input(&input("deadbeefcafebabe", &huge)).unwrap_err();
+        assert!(err.starts_with(SESSION_RESTART_ERROR));
+        assert!(err.contains("workspace_root"));
+        assert!(err.contains("payload too large"));
+    }
+
+    /// F-748 review fix: agent slug cap matches `session_start`'s.
+    #[test]
+    fn validate_rejects_oversize_agent() {
+        let huge = "a".repeat(crate::session_spawn_ipc::MAX_SESSION_START_ID_BYTES + 1);
+        let err = validate_session_restart_input(&input_full(
+            "deadbeefcafebabe",
+            "/tmp/ws",
+            Some(&huge),
+            None,
+        ))
+        .unwrap_err();
+        assert!(err.starts_with(SESSION_RESTART_ERROR));
+        assert!(err.contains("agent"));
+        assert!(err.contains("payload too large"));
+    }
+
+    /// F-748 review fix: provider slug cap matches `session_start`'s.
+    #[test]
+    fn validate_rejects_oversize_provider() {
+        let huge = "p".repeat(crate::session_spawn_ipc::MAX_SESSION_START_ID_BYTES + 1);
+        let err = validate_session_restart_input(&input_full(
+            "deadbeefcafebabe",
+            "/tmp/ws",
+            None,
+            Some(&huge),
+        ))
+        .unwrap_err();
+        assert!(err.starts_with(SESSION_RESTART_ERROR));
+        assert!(err.contains("provider"));
+        assert!(err.contains("payload too large"));
+    }
+
+    /// Boundary check: a value exactly at the cap passes.
+    #[test]
+    fn validate_accepts_agent_at_cap() {
+        let at_cap = "a".repeat(crate::session_spawn_ipc::MAX_SESSION_START_ID_BYTES);
+        validate_session_restart_input(&input_full(
+            "deadbeefcafebabe",
+            "/tmp/ws",
+            Some(&at_cap),
+            None,
+        ))
+        .expect("agent at cap must pass");
     }
 }
