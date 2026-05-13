@@ -41,9 +41,43 @@ pub async fn spawn_forged_session(
     agent: Option<&str>,
     provider: Option<&str>,
 ) -> Result<SpawnedSession> {
-    let session_id = forge_core::SessionId::new();
-    let sock = socket::socket_path(&session_id.to_string())?;
-    let pid_file = socket::pid_path(&session_id.to_string())?;
+    spawn_forged_session_with_id(workspace, agent, provider, None).await
+}
+
+/// F-748: spawn a `forged` daemon for a caller-supplied session id, or
+/// allocate a fresh one when `existing_id` is `None`. Used by the
+/// `session_restart` IPC to re-spawn a daemon for the SAME session id
+/// after a crash so the existing event log on disk is reused via
+/// `forge_session::session::Session::resume` (the daemon's main loop
+/// picks the resume branch when the log file already exists).
+///
+/// Stale pid / socket artifacts under the resolved paths (the prior
+/// daemon's leftovers) are best-effort unlinked before the spawn so the
+/// new daemon's `OwnedPidFile::create` (O_EXCL) does not collide with a
+/// pid file whose owner is already dead. The session window's `session_close`
+/// path normally cleans these up, but a SIGKILL'd daemon never ran its
+/// archive arm — F-748's restart is the secondary cleanup point.
+pub async fn spawn_forged_session_with_id(
+    workspace: &Path,
+    agent: Option<&str>,
+    provider: Option<&str>,
+    existing_id: Option<&str>,
+) -> Result<SpawnedSession> {
+    let session_id = match existing_id {
+        Some(id) => id.to_string(),
+        None => forge_core::SessionId::new().to_string(),
+    };
+    let sock = socket::socket_path(&session_id)?;
+    let pid_file = socket::pid_path(&session_id)?;
+
+    // F-748: clear stale artifacts when reusing an id. A graceful shutdown
+    // would have removed both via the daemon's drop guards; a crashed /
+    // SIGKILL'd daemon leaves them behind. Best-effort — missing files
+    // are the normal case for first-spawn (existing_id == None).
+    if existing_id.is_some() {
+        let _ = tokio::fs::remove_file(&sock).await;
+        let _ = tokio::fs::remove_file(&pid_file).await;
+    }
 
     if let Some(parent) = sock.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -51,7 +85,7 @@ pub async fn spawn_forged_session(
 
     let forged = find_forged_binary()?;
     let mut cmd = std::process::Command::new(&forged);
-    cmd.env("FORGE_SESSION_ID", session_id.to_string())
+    cmd.env("FORGE_SESSION_ID", &session_id)
         .env("FORGE_SOCKET_PATH", sock.to_str().unwrap_or(""))
         .env("FORGE_WORKSPACE", workspace.to_str().unwrap_or(""))
         .env("FORGE_PID_FILE", pid_file.to_str().unwrap_or(""));
@@ -75,19 +109,39 @@ pub async fn spawn_forged_session(
     wait_for_socket(&sock).await?;
 
     Ok(SpawnedSession {
-        session_id: session_id.to_string(),
+        session_id,
         socket_path: sock,
     })
 }
 
 /// Locate the `forged` binary alongside the calling executable, falling
 /// back to `PATH`. Identical policy to the CLI's pre-extraction helper.
+///
+/// Honours the `FORGE_FORGED_BIN` env var as a test-only override (when
+/// `current_exe` is a test harness binary in `target/debug/deps/`, the
+/// sibling lookup misses; integration tests set this var to the absolute
+/// path of the `forged` binary they pre-built).
 fn find_forged_binary() -> Result<PathBuf> {
+    if let Ok(p) = std::env::var("FORGE_FORGED_BIN") {
+        if !p.is_empty() {
+            return Ok(PathBuf::from(p));
+        }
+    }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let candidate = dir.join("forged");
             if candidate.exists() {
                 return Ok(candidate);
+            }
+            // F-748: tests live in `target/<profile>/deps/<test>-<hash>`
+            // while `forged` sits at `target/<profile>/forged`. Try one
+            // level up so the integration test harness can find it
+            // without setting `FORGE_FORGED_BIN`.
+            if let Some(parent) = dir.parent() {
+                let up = parent.join("forged");
+                if up.exists() {
+                    return Ok(up);
+                }
             }
         }
     }

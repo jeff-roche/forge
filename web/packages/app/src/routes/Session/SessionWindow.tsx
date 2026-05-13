@@ -13,8 +13,10 @@ import type { LayoutTree, ProviderId, SessionId } from '@forge/ipc';
 import {
   getPersistentApprovals,
   getSettings,
+  onSessionCrashed,
   onSessionEvent,
   sessionHello,
+  sessionRestart,
   sessionSubscribe,
   sessionSwitchProvider,
 } from '../../ipc/session';
@@ -40,8 +42,12 @@ import {
 } from './costLabel';
 import { seedPersistentApprovals } from '../../stores/approvals';
 import { seedSettings } from '../../stores/settings';
-import { PaneHeader } from './PaneHeader';
+import { PaneHeader, type PaneHeaderStatus } from './PaneHeader';
 import { ChatPane } from './ChatPane';
+import {
+  CrashRestartOverlay,
+  type CrashOverlayState,
+} from './CrashRestartOverlay';
 import { EditorPane } from '../../panes/EditorPane';
 import { TerminalPane } from '../../panes/TerminalPane';
 import { usePaneWidth } from '../../layout/usePaneWidth';
@@ -89,7 +95,39 @@ export const SessionWindow: Component = () => {
   // Tauri event. Detached on cleanup so a remounted route never
   // double-subscribes.
   let unlistenProviderChanged: UnlistenFn | null = null;
+  // F-748: per-mount unlisten for the bridge's `session:crashed`
+  // notification.
+  let unlistenSessionCrashed: UnlistenFn | null = null;
   let mounted = true;
+
+  // F-748: crash-restart state machine.
+  // - `crashState === null` is the steady-state (no overlay, idle pill).
+  // - `prompting` → user has not chosen yet; overlay shows Restart/Close.
+  // - `restarting` → `session_restart` IPC in flight.
+  // - `restart_failed` → IPC rejected; overlay shows Retry/Close.
+  // The "restored" branch is `crashState === null` again after a
+  // successful restart + re-hello + re-subscribe.
+  const [crashState, setCrashState] = createSignal<CrashOverlayState | null>(
+    null,
+  );
+  // High-water mark of forwarded event seqs. Captured from the
+  // `session:crashed` payload and re-supplied as `since` on the
+  // post-restart `sessionSubscribe` so history replay starts after the
+  // last frame the webview already rendered.
+  const [lastSeq, setLastSeq] = createSignal<number>(0);
+  const [restartError, setRestartError] = createSignal<string | null>(null);
+
+  /**
+   * F-748: per-pane health surface — `error` while the overlay is up,
+   * `idle` once we've restored. The detecting state is reserved for a
+   * future heartbeat / inactivity probe (the issue describes it as the
+   * pre-crash silence window, but the bridge today only signals at the
+   * confirmed-crash boundary, so we go straight to `error`).
+   */
+  const headerStatus = (): PaneHeaderStatus => {
+    const cs = crashState();
+    return cs === null ? 'idle' : 'error';
+  };
 
   // F-126: layout store is lazily instantiated once the session's workspace
   // root is known (HelloAck). The FilesSidebar's onOpen handler and the
@@ -182,6 +220,11 @@ export const SessionWindow: Component = () => {
           lastSeq: payload.seq,
           lastEvent: payload.event,
         });
+        // F-748: keep the local resume anchor in sync with what we've
+        // rendered. If the daemon crashes next, this is the `since` we
+        // hand back on re-subscribe so history replay produces no
+        // duplicates.
+        setLastSeq(payload.seq);
         // Route typed events to the messages store for ChatPane rendering.
         // `payload.event` is the Rust-serialized `forge_core::Event` shape
         // (`{"type":"user_message",...}`); fromRustEvent adapts it to the
@@ -195,6 +238,23 @@ export const SessionWindow: Component = () => {
         // log shape change can't ripple into the header.
         routeTelemetryEvent(payload.session_id, payload.event);
       });
+
+      // F-748: subscribe to the bridge's crash signal. One emission per
+      // dead daemon (the pump exits after firing it), so no debouncing.
+      try {
+        unlistenSessionCrashed = await onSessionCrashed((payload) => {
+          if (payload.session_id !== id) return;
+          setLastSeq(payload.last_seq);
+          setRestartError(null);
+          setCrashState('prompting');
+        });
+        if (!mounted && unlistenSessionCrashed) {
+          unlistenSessionCrashed();
+          unlistenSessionCrashed = null;
+        }
+      } catch (err) {
+        console.error('session:crashed listen failed', err);
+      }
       if (mounted) {
         unlisten = listener;
       } else {
@@ -214,6 +274,10 @@ export const SessionWindow: Component = () => {
       unlistenProviderChanged();
       unlistenProviderChanged = null;
     }
+    if (unlistenSessionCrashed) {
+      unlistenSessionCrashed();
+      unlistenSessionCrashed = null;
+    }
     // Flush any pending layout-store write before we drop the reference so
     // a rapid "open file then navigate away" doesn't lose the active_file
     // update. `flush()` is a no-op when no debounce is pending.
@@ -229,6 +293,43 @@ export const SessionWindow: Component = () => {
       void getCurrentWindow().close();
     } catch (err) {
       console.error('window close failed', err);
+    }
+  };
+
+  // F-748: drive the crash-restart IPC. Captures the workspace root from
+  // the cached store (populated by the original HelloAck) and re-attaches
+  // via `sessionHello` + `sessionSubscribe({ since: lastSeq })` once the
+  // new daemon's UDS is up. Failure flips the overlay to `restart_failed`
+  // with the error string so the user can retry or close.
+  const handleRestart = async (): Promise<void> => {
+    const id = sessionId();
+    const workspace = activeWorkspaceRoot();
+    if (!workspace) {
+      setRestartError(
+        'session_restart: no cached workspace root — close and re-open the session',
+      );
+      setCrashState('restart_failed');
+      return;
+    }
+    setCrashState('restarting');
+    setRestartError(null);
+    try {
+      await sessionRestart(id, workspace);
+      // The new daemon is up; re-perform the handshake against the
+      // canonical socket path. `sessionHello` is keyed on the same
+      // session id so the shell's bridge registry (already drained by
+      // `session_restart`'s `drop_connection`) re-installs cleanly.
+      await sessionHello(id);
+      // Resume from where we left off. `sessionSubscribe`'s `since`
+      // anchor is what the no-duplicate-events invariant rides on.
+      await sessionSubscribe(id, lastSeq());
+      if (!mounted) return;
+      setCrashState(null);
+    } catch (err) {
+      if (!mounted) return;
+      const message = err instanceof Error ? err.message : String(err);
+      setRestartError(message);
+      setCrashState('restart_failed');
     }
   };
 
@@ -339,6 +440,11 @@ export const SessionWindow: Component = () => {
         workspaceRoot={activeWorkspaceRoot()}
         onCloseLeaf={() => onCloseLeaf(leaf.id)}
         onPointerDownHeader={dockApi.startDrag(leaf.id)}
+        headerStatus={headerStatus()}
+        crashState={crashState()}
+        restartError={restartError()}
+        onRestart={() => void handleRestart()}
+        onCloseSession={handleCloseWindow}
       />
     );
   };
@@ -374,6 +480,16 @@ interface LeafHostProps {
   workspaceRoot: string | null;
   onCloseLeaf: () => void;
   onPointerDownHeader: (e: PointerEvent) => void;
+  /** F-748: derived session-health status surfaced on the header. */
+  headerStatus: PaneHeaderStatus;
+  /** F-748: current crash-restart overlay state. `null` = no overlay. */
+  crashState: CrashOverlayState | null;
+  /** F-748: failure message displayed in the `restart_failed` state. */
+  restartError: string | null;
+  /** F-748: restart click + retry click both fire this. */
+  onRestart: () => void;
+  /** F-748: close-session click in the overlay. */
+  onCloseSession: () => void;
 }
 const LeafHost: Component<LeafHostProps> = (props) => {
   const [leafEl, setLeafEl] = createSignal<HTMLElement | null>(null);
@@ -428,13 +544,24 @@ const LeafHost: Component<LeafHostProps> = (props) => {
               closeLabel={closeLabel()}
               closeAriaLabel={closeAriaLabel()}
               onClose={props.onCloseLeaf}
+              status={props.headerStatus}
             />
           </Show>
         </div>
       </Show>
       <div class="session-window__pane-body">
         <Show when={props.leaf.pane_type === 'chat'}>
-          <ChatPane />
+          <div class="session-window__chat-host">
+            <ChatPane />
+            <Show when={props.crashState !== null}>
+              <CrashRestartOverlay
+                state={props.crashState as CrashOverlayState}
+                onRestart={props.onRestart}
+                onClose={props.onCloseSession}
+                errorMessage={props.restartError ?? undefined}
+              />
+            </Show>
+          </div>
         </Show>
         <Show when={props.leaf.pane_type === 'editor' && props.activeFile !== null}>
           <EditorPane

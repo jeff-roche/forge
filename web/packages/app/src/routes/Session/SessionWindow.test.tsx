@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, waitFor } from '@solidjs/testing-library';
+import { cleanup, fireEvent, render, waitFor } from '@solidjs/testing-library';
 
 const { invokeMock, listenMock, unlistenMock, closeMock } = vi.hoisted(() => ({
   invokeMock: vi.fn(),
@@ -177,12 +177,13 @@ describe('SessionWindow', () => {
   it('detaches the session:event listener on unmount', async () => {
     const { unmount } = renderAt('/session/abc123');
     // F-716: with the StatusBar lifted to AppShell, SessionWindow attaches
-    // two listeners: its own session:event adapter and the F-640
-    // provider:changed forwarder. Wait for both before asserting unlisten
-    // counts so a race on whichever resolves last doesn't under-count.
-    await waitFor(() => expect(listenMock).toHaveBeenCalledTimes(2));
+    // its own session:event adapter and the F-640 provider:changed
+    // forwarder. F-748 adds a third for `session:crashed`. Wait for all
+    // three before asserting unlisten counts so a race on whichever
+    // resolves last doesn't under-count.
+    await waitFor(() => expect(listenMock).toHaveBeenCalledTimes(3));
     unmount();
-    await waitFor(() => expect(unlistenMock).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(unlistenMock).toHaveBeenCalledTimes(3));
   });
 
   // F-640: dashboard `provider:changed` events must be forwarded to the
@@ -791,5 +792,239 @@ describe('SessionWindow', () => {
       Element.prototype.getBoundingClientRect = originalRect;
       document.elementFromPoint = originalEfp;
     }
+  });
+});
+
+// F-748: crash-restart prompt integration. Validates the five states from
+// the DoD end-to-end: detecting (header pill flips to error), prompting
+// (overlay up with Restart/Close), restarting (spinner replaces buttons),
+// restored (overlay tears down after success), restart-failed (overlay
+// shows the error + retry/close). All states are driven through the
+// `session:crashed` Tauri event + the `session_restart` IPC, mocked here.
+describe('SessionWindow crash-restart prompt (F-748)', () => {
+  beforeEach(() => {
+    invokeMock.mockReset();
+    listenMock.mockReset();
+    unlistenMock.mockReset();
+    closeMock.mockReset();
+    resetSessionEventStore();
+    resetMessagesStore();
+    resetSessionTelemetryStore();
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'session_hello') return helloAck;
+      if (cmd === 'read_layouts') return defaultLayouts();
+      if (cmd === 'write_layouts') return undefined;
+      if (cmd === 'tree') {
+        return {
+          name: 'ws',
+          path: '/ws',
+          kind: 'Dir',
+          children: [],
+        };
+      }
+      return undefined;
+    });
+    setInvokeForTesting(invokeMock as never);
+    listenMock.mockResolvedValue(unlistenMock);
+  });
+  afterEach(() => {
+    setInvokeForTesting(null);
+    __setInjectedLayoutStoreForTesting(null);
+    cleanup();
+  });
+
+  /**
+   * Capture the `session:crashed` Tauri handler that SessionWindow
+   * registers on mount so individual tests can synthesise EOF without
+   * spinning up a real bridge.
+   */
+  function listenWithCrashHandler() {
+    let crashHandler:
+      | ((event: { payload: { session_id: string; last_seq: number } }) => void)
+      | null = null;
+    listenMock.mockImplementation((channel: string, handler: never) => {
+      if (channel === 'session:crashed') {
+        crashHandler = handler as never;
+      }
+      return Promise.resolve(unlistenMock);
+    });
+    return () => crashHandler;
+  }
+
+  it('prompting: a `session:crashed` event flips the header pill to "error" and surfaces the overlay', async () => {
+    const getCrashHandler = listenWithCrashHandler();
+    const { findByTestId, queryByTestId } = renderAt('/session/abc123');
+    await findByTestId('pane-header-subject');
+    await waitFor(() => expect(getCrashHandler()).not.toBeNull());
+
+    // Steady state: no overlay, no error pill.
+    expect(queryByTestId('crash-restart-overlay')).toBeNull();
+    expect(queryByTestId('pane-header-status')).toBeNull();
+
+    // Synthesise a crash signal with a non-zero resume anchor.
+    getCrashHandler()!({
+      payload: { session_id: 'abc123', last_seq: 42 },
+    });
+
+    // Header pill flips to "error" (the DoD's "detecting/error" state).
+    const pill = await findByTestId('pane-header-status');
+    expect(pill.dataset.status).toBe('error');
+
+    // The overlay's prompting variant is up.
+    const overlay = await findByTestId('crash-restart-overlay');
+    expect(overlay.dataset.state).toBe('prompting');
+    await findByTestId('crash-restart-overlay-restart');
+    await findByTestId('crash-restart-overlay-close');
+  });
+
+  it('restored: a successful session_restart tears down the overlay and clears the header pill', async () => {
+    const getCrashHandler = listenWithCrashHandler();
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'session_hello') return helloAck;
+      if (cmd === 'read_layouts') return defaultLayouts();
+      if (cmd === 'write_layouts') return undefined;
+      if (cmd === 'session_restart') return undefined;
+      if (cmd === 'session_subscribe') return undefined;
+      if (cmd === 'tree') {
+        return { name: 'ws', path: '/ws', kind: 'Dir', children: [] };
+      }
+      return undefined;
+    });
+
+    const { findByTestId, queryByTestId } = renderAt('/session/abc123');
+    await findByTestId('pane-header-subject');
+    await waitFor(() => expect(getCrashHandler()).not.toBeNull());
+
+    getCrashHandler()!({
+      payload: { session_id: 'abc123', last_seq: 17 },
+    });
+    const overlay = await findByTestId('crash-restart-overlay');
+    expect(overlay.dataset.state).toBe('prompting');
+
+    // Click Restart — synthesise the user's affordance.
+    fireEvent.click(await findByTestId('crash-restart-overlay-restart'));
+
+    // The overlay tears down once `session_restart` + re-hello +
+    // re-subscribe all resolve. The post-restart subscribe must ride on
+    // the captured anchor (17) so the daemon's history replay produces
+    // no duplicates — that's the DoD invariant.
+    await waitFor(() => expect(queryByTestId('crash-restart-overlay')).toBeNull());
+    expect(queryByTestId('pane-header-status')).toBeNull();
+    expect(invokeMock).toHaveBeenCalledWith('session_restart', {
+      input: {
+        session_id: 'abc123',
+        workspace_root: '/ws',
+        agent: undefined,
+        provider: undefined,
+      },
+    });
+    expect(invokeMock).toHaveBeenCalledWith('session_subscribe', {
+      sessionId: 'abc123',
+      since: 17,
+    });
+  });
+
+  it('restarting → restored: overlay shows the spinner while session_restart is in flight, then tears down on success', async () => {
+    const getCrashHandler = listenWithCrashHandler();
+    let resolveRestart: (() => void) | null = null;
+    const restartPending = new Promise<void>((resolve) => {
+      resolveRestart = resolve;
+    });
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'session_hello') return helloAck;
+      if (cmd === 'read_layouts') return defaultLayouts();
+      if (cmd === 'write_layouts') return undefined;
+      if (cmd === 'session_restart') {
+        await restartPending;
+        return undefined;
+      }
+      if (cmd === 'session_subscribe') return undefined;
+      if (cmd === 'tree') {
+        return { name: 'ws', path: '/ws', kind: 'Dir', children: [] };
+      }
+      return undefined;
+    });
+
+    const { findByTestId, queryByTestId } = renderAt('/session/abc123');
+    await findByTestId('pane-header-subject');
+    await waitFor(() => expect(getCrashHandler()).not.toBeNull());
+
+    getCrashHandler()!({
+      payload: { session_id: 'abc123', last_seq: 5 },
+    });
+    fireEvent.click(await findByTestId('crash-restart-overlay-restart'));
+
+    // While `session_restart` is pending the overlay flips to
+    // `restarting` and the affordance buttons are replaced.
+    await waitFor(async () => {
+      const overlay = await findByTestId('crash-restart-overlay');
+      expect(overlay.dataset.state).toBe('restarting');
+    });
+    expect(queryByTestId('crash-restart-overlay-restart')).toBeNull();
+    expect(queryByTestId('crash-restart-overlay-progress')).not.toBeNull();
+
+    // Resolve the IPC — the overlay tears down on the next tick.
+    resolveRestart!();
+    await waitFor(() => expect(queryByTestId('crash-restart-overlay')).toBeNull());
+  });
+
+  it('restart-failed: a rejected session_restart surfaces the error and the retry+close affordances', async () => {
+    const getCrashHandler = listenWithCrashHandler();
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'session_hello') return helloAck;
+      if (cmd === 'read_layouts') return defaultLayouts();
+      if (cmd === 'write_layouts') return undefined;
+      if (cmd === 'session_restart') {
+        throw new Error('session_restart: spawn forged: ENOENT');
+      }
+      if (cmd === 'tree') {
+        return { name: 'ws', path: '/ws', kind: 'Dir', children: [] };
+      }
+      return undefined;
+    });
+
+    const { findByTestId } = renderAt('/session/abc123');
+    await findByTestId('pane-header-subject');
+    await waitFor(() => expect(getCrashHandler()).not.toBeNull());
+
+    getCrashHandler()!({
+      payload: { session_id: 'abc123', last_seq: 9 },
+    });
+    fireEvent.click(await findByTestId('crash-restart-overlay-restart'));
+
+    const overlay = await findByTestId('crash-restart-overlay');
+    await waitFor(() => expect(overlay.dataset.state).toBe('restart_failed'));
+    const errorEl = await findByTestId('crash-restart-overlay-error');
+    expect(errorEl.textContent).toContain('ENOENT');
+    await findByTestId('crash-restart-overlay-retry');
+    await findByTestId('crash-restart-overlay-close');
+  });
+
+  it('composer draft preservation: ChatPane stays mounted under the overlay so the local composer text survives a crash', async () => {
+    const getCrashHandler = listenWithCrashHandler();
+    const { findByTestId } = renderAt('/session/abc123');
+    await findByTestId('pane-header-subject');
+    await waitFor(() => expect(getCrashHandler()).not.toBeNull());
+
+    // Pre-crash: user types into the composer.
+    const composer = (await findByTestId(
+      'composer-textarea',
+    )) as HTMLTextAreaElement;
+    fireEvent.input(composer, { target: { value: 'half-written prompt' } });
+    expect(composer.value).toBe('half-written prompt');
+
+    // Crash signal arrives — overlay appears on top, but ChatPane (and
+    // the composer) stays mounted underneath.
+    getCrashHandler()!({
+      payload: { session_id: 'abc123', last_seq: 1 },
+    });
+    await findByTestId('crash-restart-overlay');
+
+    // The composer's value is still the user's draft — preserved across
+    // the crash because the component never unmounted.
+    const stillThere = (await findByTestId(
+      'composer-textarea',
+    )) as HTMLTextAreaElement;
+    expect(stillThere.value).toBe('half-written prompt');
   });
 });

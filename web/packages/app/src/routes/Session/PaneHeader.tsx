@@ -31,6 +31,19 @@ const TYPE_ICON: Record<PaneHeaderType, string> = {
   EDITOR: '\u270E\uFE0F',
 };
 
+/**
+ * F-748: per-pane health signal surfaced as a status pill in the header.
+ *
+ * - `idle` (default) — no pill; the session is operating normally.
+ * - `detecting` — the bridge has noticed silence on the UDS read pipe but
+ *   has not yet confirmed daemon death. Rendered with a subtle pulse so
+ *   the operator notices something is off before the overlay arrives.
+ * - `error` — daemon-death has been confirmed; the crash-restart overlay
+ *   is up. The pill anchors the visual state for screen readers / casual
+ *   glances; the overlay carries the affordance.
+ */
+export type PaneHeaderStatus = 'idle' | 'detecting' | 'error';
+
 export interface PaneHeaderProps {
   subject: string;
   /**
@@ -88,6 +101,13 @@ export interface PaneHeaderProps {
    * Per `docs/ui-specs/layout-panes.md §3.7` and `pane-header.md §2.3`.
    */
   compactness?: Compactness;
+  /**
+   * F-748: optional session-health pill — drives the small chip rendered
+   * between the subject and the provider pill. Omitted callers see no
+   * pill (idle); SessionWindow flips this to `detecting` / `error` to
+   * mirror the crash-restart overlay state.
+   */
+  status?: PaneHeaderStatus;
   onClose: () => void;
 }
 
@@ -152,6 +172,27 @@ export const PaneHeader: Component<PaneHeaderProps> = (props) => {
       <span class="pane-header__subject" data-testid="pane-header-subject">
         {props.subject}
       </span>
+      <Show
+        when={
+          showBadges() &&
+          props.status !== undefined &&
+          props.status !== 'idle'
+        }
+      >
+        <span
+          class="pane-header__status"
+          data-testid="pane-header-status"
+          data-status={props.status}
+          role="status"
+          aria-label={
+            props.status === 'error'
+              ? 'session crashed'
+              : 'session unresponsive'
+          }
+        >
+          {props.status === 'error' ? 'crashed' : 'unresponsive'}
+        </span>
+      </Show>
       <Show when={showBadges() && props.trailing !== undefined}>
         <span class="pane-header__trailing" data-testid="pane-header-trailing">
           {props.trailing}

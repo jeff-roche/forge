@@ -73,8 +73,18 @@ pub struct SessionEventPayload {
 /// Sink for forwarded session events. In production the Tauri command layer
 /// implements this by calling `AppHandle::emit("session:event", payload)`;
 /// tests use an in-memory channel to assert end-to-end delivery.
+///
+/// **F-748:** the pump invokes [`Self::on_crash`] when its underlying UDS
+/// read returns a non-timeout error (EOF, ECONNRESET, malformed framing,
+/// daemon SIGKILL). The default body is a no-op so existing test sinks do
+/// not need to opt in; the production sink emits a separate
+/// `session:crashed` Tauri event so the webview can surface the
+/// restart-prompt overlay. A clean EOF is functionally indistinguishable
+/// from a daemon crash on this seam — both leave the session window
+/// unable to send / receive, so the same affordance applies.
 pub trait EventSink: Send + Sync + 'static {
     fn emit(&self, payload: SessionEventPayload);
+    fn on_crash(&self, _session_id: &str, _last_seq: u64) {}
 }
 
 /// A single open session connection: a writer half used for send/approve/reject
@@ -753,11 +763,17 @@ async fn pump_events(
     // call. 4 KiB matches the typical realistic delta envelope; larger
     // frames grow the buffer in place once and the capacity is retained.
     let mut frame_buf: Vec<u8> = Vec::with_capacity(4096);
+    // F-748: track the high-water mark of seqs we've forwarded so the
+    // crash signal can carry it. The webview re-subscribes on restart
+    // with `since: last_seq` and the daemon replays from there — that's
+    // the no-duplicate-events guarantee.
+    let mut last_seq: u64 = 0;
     loop {
         match read_frame_into_with_deadline(&mut reader, &mut frame_buf, DEFAULT_PUMP_DEADLINE)
             .await
         {
             Ok(IpcMessage::Event(event)) => {
+                last_seq = event.seq;
                 sink.emit(SessionEventPayload {
                     session_id: session_id.clone(),
                     seq: event.seq,
@@ -806,6 +822,22 @@ async fn pump_events(
                 if e.downcast_ref::<IpcReadTimeout>().is_some() {
                     continue;
                 }
+                // F-748: any non-timeout error here means the UDS read
+                // pipe is unrecoverable — EOF after a daemon crash, a
+                // framing error from a half-closed write, ECONNRESET from
+                // a SIGKILL'd peer. The session window has no way to
+                // recover without a daemon restart, so signal the sink
+                // so the webview can surface the crash-restart prompt.
+                // `last_seq` is the resume anchor; the webview hands it
+                // back as `Subscribe { since }` after `session_restart`.
+                tracing::warn!(
+                    target: "forge_shell::bridge",
+                    session_id = %session_id,
+                    last_seq,
+                    error = %e,
+                    "session UDS pump terminated unexpectedly — signalling crash",
+                );
+                sink.on_crash(&session_id, last_seq);
                 break;
             }
         }

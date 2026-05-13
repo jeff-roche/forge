@@ -31,6 +31,23 @@ impl EventSink for ChannelSink {
     }
 }
 
+/// F-748 test sink: records the `on_crash` callback so the bridge's
+/// crash-detection seam (non-timeout read error → sink notification) can
+/// be asserted without standing up a real Tauri runtime.
+struct CrashRecordingSink {
+    crash_tx: mpsc::UnboundedSender<(String, u64)>,
+    event_tx: mpsc::UnboundedSender<SessionEventPayload>,
+}
+
+impl EventSink for CrashRecordingSink {
+    fn emit(&self, payload: SessionEventPayload) {
+        let _ = self.event_tx.send(payload);
+    }
+    fn on_crash(&self, session_id: &str, last_seq: u64) {
+        let _ = self.crash_tx.send((session_id.to_string(), last_seq));
+    }
+}
+
 async fn spawn_daemon(path: &Path, session_id: &str) -> TempDir {
     let dir = TempDir::new().unwrap();
     let log_path = dir.path().join("events.jsonl");
@@ -241,6 +258,107 @@ async fn subscribe_does_not_block_concurrent_send_on_other_session() {
          subscribe() (F-109 regression)",
     );
     send_result.expect("send_message(B) frame write");
+}
+
+/// F-748: when the underlying UDS read returns a non-timeout error (the
+/// daemon crashed, was SIGKILL'd, or otherwise tore down its socket), the
+/// pump must notify the sink via `on_crash` with the highest seq it had
+/// already forwarded. The webview uses that anchor as `Subscribe { since
+/// }` on restart so history replay produces no duplicates.
+#[tokio::test]
+async fn pump_signals_crash_when_daemon_socket_dies() {
+    use std::time::Duration;
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::UnixListener;
+
+    // Stand up a minimal one-shot daemon stub: accept one connection,
+    // perform the Hello/HelloAck dance, accept the Subscribe frame, emit
+    // a single Event with seq=7, then close the socket — simulating a
+    // crash mid-stream. The bridge's pump should observe EOF and fire
+    // `on_crash("session-x", 7)`.
+    let sock_dir = TempDir::new().unwrap();
+    let sock = sock_dir.path().join("crash.sock");
+    let listener = UnixListener::bind(&sock).unwrap();
+
+    let sock_path = sock.clone();
+    let server = tokio::spawn(async move {
+        use forge_core::Event as DaemonEvent;
+        use forge_ipc::{
+            read_frame_with_deadline, write_frame, HelloAck, IpcEvent, IpcMessage, SCHEMA_VERSION,
+        };
+        let (stream, _) = listener.accept().await.unwrap();
+        let (mut reader, mut writer) = stream.into_split();
+        // Drain the Hello frame.
+        let _: IpcMessage = read_frame_with_deadline(&mut reader, Duration::from_secs(2))
+            .await
+            .unwrap();
+        // Send HelloAck.
+        write_frame(
+            &mut writer,
+            &IpcMessage::HelloAck(HelloAck {
+                session_id: "crash-session".into(),
+                workspace: String::new(),
+                started_at: "2026-05-12T00:00:00Z".into(),
+                event_seq: 0,
+                schema_version: SCHEMA_VERSION,
+            }),
+        )
+        .await
+        .unwrap();
+        // Drain the Subscribe frame.
+        let _: IpcMessage = read_frame_with_deadline(&mut reader, Duration::from_secs(2))
+            .await
+            .unwrap();
+        // Emit one event @ seq=7 with a benign payload.
+        let event = DaemonEvent::SessionEnded {
+            at: chrono::Utc::now(),
+            reason: forge_core::EndReason::Closed,
+            archived: false,
+        };
+        write_frame(&mut writer, &IpcMessage::Event(IpcEvent { seq: 7, event }))
+            .await
+            .unwrap();
+        // Shut the write half immediately — the pump sees EOF on the next
+        // read, which is the crash-shaped error path the sink handles.
+        writer.shutdown().await.unwrap();
+        drop(sock_path);
+    });
+
+    let bridge = SessionBridge::new(SessionConnections::new());
+    bridge
+        .hello("crash-session", Some(&sock))
+        .await
+        .expect("hello");
+
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let (crash_tx, mut crash_rx) = mpsc::unbounded_channel();
+    bridge
+        .subscribe(
+            "crash-session",
+            0,
+            Arc::new(CrashRecordingSink { crash_tx, event_tx }),
+        )
+        .await
+        .expect("subscribe");
+
+    // Drain the one event so we know the pump observed seq=7.
+    let payload = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+        .await
+        .expect("event arrived")
+        .expect("channel open");
+    assert_eq!(payload.seq, 7);
+
+    // The next read after the daemon shuts down is a non-timeout error;
+    // the pump must call `on_crash` exactly once with `last_seq = 7`.
+    let crash = tokio::time::timeout(Duration::from_secs(5), crash_rx.recv())
+        .await
+        .expect("on_crash fired within deadline")
+        .expect("crash channel open");
+    assert_eq!(crash.0, "crash-session");
+    assert_eq!(crash.1, 7);
+
+    // Daemon stub has already completed by now.
+    let _ = server.await;
 }
 
 #[tokio::test]

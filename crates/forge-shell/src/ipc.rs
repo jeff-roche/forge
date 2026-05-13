@@ -421,6 +421,36 @@ impl<R: Runtime> EventSink for AppHandleSink<R> {
             tracing::warn!(error = %e, "session:event emit failed");
         }
     }
+
+    fn on_crash(&self, session_id: &str, last_seq: u64) {
+        // F-748: surface daemon-pipe death to the owning session window so
+        // the user gets the restart-prompt overlay. Target is the same
+        // window label `emit` uses (`session-<id>`) — never the dashboard,
+        // because a crashed session is a per-window concern. `last_seq`
+        // is the resume anchor: the webview hands it back through
+        // `session_restart` → `sessionHello + sessionSubscribe { since }`
+        // so the daemon's history replay starts after the last frame the
+        // webview already rendered, with no duplicate events.
+        let target = EventTarget::webview_window(format!("session-{}", self.session_id));
+        let payload = SessionCrashedPayload {
+            session_id: session_id.to_string(),
+            last_seq,
+        };
+        if let Err(e) = self.app.emit_to(target, "session:crashed", payload) {
+            tracing::warn!(error = %e, "session:crashed emit failed");
+        }
+    }
+}
+
+/// F-748 wire payload for the `session:crashed` Tauri event. Pinned here so
+/// the webview's listener has a stable shape to deserialize against. The
+/// `last_seq` field is the high-water mark of session-event seqs the
+/// webview has observed — re-supplied as `Subscribe { since }` on restart
+/// so the daemon's history replay starts after the last rendered frame.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SessionCrashedPayload {
+    pub session_id: String,
+    pub last_seq: u64,
 }
 
 /// Test-only constructor for the per-session app-handle event sink. Gated

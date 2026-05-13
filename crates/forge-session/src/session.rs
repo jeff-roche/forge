@@ -126,12 +126,40 @@ impl Session {
         let log = EventLog::create(&log_path)
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
+        Ok(Self::with_log_at_seq(log_path, log, 0))
+    }
+
+    /// F-748: re-open an existing event log instead of truncating it. Used
+    /// when a daemon is re-spawned for an existing `session_id` (crash-
+    /// restart prompt). Seeds the seq counter from the count of persisted
+    /// events so subsequent `emit` calls continue the monotonic sequence,
+    /// and `current_seq()` returns the resume anchor for the bridge to
+    /// pass as `Subscribe { since }`.
+    ///
+    /// On a missing log file this falls through to [`Self::create`] — the
+    /// caller is expected to gate on file existence when it matters
+    /// (`forge-session::main`).
+    pub async fn resume(log_path: PathBuf) -> anyhow::Result<Self> {
+        if !log_path.exists() {
+            return Self::create(log_path).await;
+        }
+        let existing = forge_core::read_since(&log_path, 0)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        let resumed_seq = existing.len() as u64;
+        let log = EventLog::open(&log_path)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        Ok(Self::with_log_at_seq(log_path, log, resumed_seq))
+    }
+
+    fn with_log_at_seq(log_path: PathBuf, log: EventLog, seq: u64) -> Self {
         let (tx, _) = broadcast::channel(1024);
-        Ok(Self {
+        Self {
             log_path,
             event_tx: tx,
             log: Arc::new(Mutex::new(log)),
-            seq: Arc::new(Mutex::new(0)),
+            seq: Arc::new(Mutex::new(seq)),
             compacting: Arc::new(AtomicBool::new(false)),
             parallel_group_seq: Arc::new(AtomicU32::new(1)),
             paused: Arc::new(AtomicBool::new(false)),
@@ -141,7 +169,7 @@ impl Session {
             interrupt_requested: Arc::new(AtomicBool::new(false)),
             interrupt_capture: Arc::new(Mutex::new(None)),
             interrupt_done: Arc::new(Notify::new()),
-        })
+        }
     }
 
     /// F-603: flip the pause flag. Returns `true` if this call performed
@@ -879,5 +907,75 @@ mod tests {
         assert!(!session.is_interrupt_requested());
         // No capture was published, so take returns None.
         assert!(session.take_interrupt_capture().await.is_none());
+    }
+
+    // F-748: a daemon that re-spawns for the same session id must NOT
+    // truncate the event log — that would lose the user's transcript
+    // across a crash-restart. `Session::resume` preserves the existing
+    // log and seeds `seq` from the count of persisted events so the
+    // subsequent `emit` continues monotonically.
+    #[tokio::test]
+    async fn resume_preserves_log_and_seeds_seq() {
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("events.jsonl");
+
+        let first = Arc::new(Session::create(log_path.clone()).await.unwrap());
+        first
+            .emit(Event::UserMessage {
+                id: "m1".to_string().into(),
+                at: Utc::now(),
+                text: Arc::from("hello"),
+                context: Vec::new(),
+                branch_parent: None,
+            })
+            .await
+            .unwrap();
+        first
+            .emit(Event::UserMessage {
+                id: "m2".to_string().into(),
+                at: Utc::now(),
+                text: Arc::from("world"),
+                context: Vec::new(),
+                branch_parent: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(first.current_seq().await, 2);
+        // Drop the first session so its background flush + file handle
+        // release; resume opens the same path.
+        drop(first);
+
+        let resumed = Session::resume(log_path.clone()).await.unwrap();
+        assert_eq!(
+            resumed.current_seq().await,
+            2,
+            "resume must seed seq from the persisted event count"
+        );
+        // Subsequent emit lands at seq=3, not seq=1 — proves the log
+        // header was preserved (open path) and the counter continued.
+        resumed
+            .emit(Event::UserMessage {
+                id: "m3".to_string().into(),
+                at: Utc::now(),
+                text: Arc::from("after-restart"),
+                context: Vec::new(),
+                branch_parent: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(resumed.current_seq().await, 3);
+
+        let all = forge_core::read_since(&log_path, 0).await.unwrap();
+        assert_eq!(all.len(), 3, "resume must NOT truncate the existing log");
+    }
+
+    #[tokio::test]
+    async fn resume_on_missing_log_creates_fresh() {
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("events.jsonl");
+        let session = Session::resume(log_path.clone()).await.unwrap();
+        assert_eq!(session.current_seq().await, 0);
+        // The log file exists with the schema header but no events.
+        assert!(log_path.exists(), "resume must create the log when absent");
     }
 }

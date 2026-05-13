@@ -296,7 +296,7 @@ pub(crate) const INVALID_SESSION_ID_ERROR: &str = "invalid session id";
 /// warning without hiding real unused-code regressions under
 /// `--features webview`.
 #[cfg_attr(not(feature = "webview"), allow(dead_code))]
-pub(crate) fn is_valid_session_id(id: &str) -> bool {
+pub fn is_valid_session_id(id: &str) -> bool {
     id.len() == 16 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 

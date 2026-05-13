@@ -34,6 +34,20 @@
   min-height: 0;
 }
 
+/* F-748: positioning context for the crash-restart overlay. The overlay
+ * is `position: absolute` and rides on this wrapper's bounding box so it
+ * scopes to the ChatPane (not the whole session window). The wrapper is
+ * a flex column so ChatPane keeps its existing intrinsic layout — the
+ * overlay only paints on top, never displaces children. */
+.session-window__chat-host {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  position: relative;
+}
+
 .session-window__pane-empty {
   display: flex;
   flex: 1 1 auto;
