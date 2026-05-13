@@ -46,6 +46,8 @@ export type { ScopedRosterEntry } from './generated/ScopedRosterEntry';
 export type { SessionId } from './generated/SessionId';
 export type { SessionMode } from './generated/SessionMode';
 export type { SessionPersistence } from './generated/SessionPersistence';
+export type { SessionRestartInput } from './generated/SessionRestartInput';
+export type { SessionRestartOutput } from './generated/SessionRestartOutput';
 export type { SessionStartInput } from './generated/SessionStartInput';
 export type { SessionStartOutput } from './generated/SessionStartOutput';
 export type { SessionState } from './generated/SessionState';
