@@ -30,7 +30,13 @@ pub const DEFAULT_BASE_URL: &str = "https://api.openai.com";
 
 pub struct OpenAiProvider {
     base_url: String,
-    api_key: String,
+    /// F-753: hold the constructor-time API key in a `SecretString` so the
+    /// plaintext bytes are zeroized on drop, bounding the lifetime of the
+    /// key in memory to the provider itself. Mirrors
+    /// [`crate::anthropic::AnthropicProvider`]'s zeroization posture; the
+    /// F-744 per-turn seam already supplies its credential as a
+    /// `SecretString`, so this closes the asymmetry on the fallback path.
+    api_key: SecretString,
     model: String,
     /// Optional `max_tokens` cap — OpenAI omits the field when `None`,
     /// letting the server default apply.
@@ -61,7 +67,7 @@ impl OpenAiProvider {
     ) -> Self {
         Self {
             base_url: base_url.into(),
-            api_key: api_key.into(),
+            api_key: SecretString::from(api_key.into()),
             model: model.into(),
             max_tokens: None,
             stream_client: http_util::build_stream_client(
@@ -120,17 +126,17 @@ impl Provider for OpenAiProvider {
         let body_result = translate::serialize_request(&req, &self.model, self.max_tokens);
         // F-744 zeroization contract: hold the per-turn bearer in a
         // `SecretString` (zeroizes on drop) for the lifetime of the
-        // request future, NOT a plain `String`. The seam-supplied
-        // `SecretString` is cloned only when fallback to the
-        // constructor-time plaintext `api_key` is required.
+        // request future, NOT a plain `String`. F-753 promotes the
+        // constructor-time `api_key` to `SecretString` as well, so the
+        // fallback path is a `SecretString::clone` rather than a plaintext
+        // `String::clone` — no intermediate plain-`String` allocation on
+        // either path. Mirrors the Anthropic provider's `chat_with_auth`.
         //
         // `Vertex` is meaningless against an OpenAI Chat Completions
         // endpoint and falls back to the constructor value.
         let bearer: SecretString = match &auth_in {
             ProviderAuth::ApiKey(s) => s.clone(),
-            ProviderAuth::Vertex(_) | ProviderAuth::None => {
-                SecretString::from(self.api_key.clone())
-            }
+            ProviderAuth::Vertex(_) | ProviderAuth::None => self.api_key.clone(),
         };
         let auth = vec![(
             reqwest::header::AUTHORIZATION,
@@ -298,7 +304,7 @@ mod tests {
     fn new_stores_config() {
         let p = OpenAiProvider::new("https://example.com", "sk-test", "gpt-4o");
         assert_eq!(p.base_url, "https://example.com");
-        assert_eq!(p.api_key, "sk-test");
+        assert_eq!(p.api_key.expose_secret(), "sk-test");
         assert_eq!(p.model, "gpt-4o");
         assert_eq!(p.max_tokens, None);
     }
@@ -307,5 +313,18 @@ mod tests {
     fn with_max_tokens_sets_value() {
         let p = OpenAiProvider::new("https://x", "sk", "gpt-4o").with_max_tokens(2048);
         assert_eq!(p.max_tokens, Some(2048));
+    }
+
+    /// F-753 zeroization-window parity with `AnthropicProvider`. The
+    /// constructor-time API key MUST live in a `SecretString` (zeroizes on
+    /// drop) so the plaintext bytes do not survive for the full provider
+    /// lifetime. This pins the storage type at compile time: any future
+    /// refactor that swaps `SecretString` back for `String` will fail to
+    /// type-check here. Mirrors
+    /// `crate::anthropic::tests::resolved_auth_owned_uses_secret_string_for_api_key`.
+    #[test]
+    fn api_key_field_is_secret_string() {
+        let p = OpenAiProvider::new("https://x", "sk-test", "gpt-4o");
+        let _: &SecretString = &p.api_key;
     }
 }
