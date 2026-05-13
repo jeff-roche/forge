@@ -386,10 +386,45 @@ describe('NewSessionDialog spawn-failed state', () => {
     expect(cta).toBeInTheDocument();
     expect(cta.getAttribute('href')).toBe('/providers#anthropic');
 
+    // F-754: focus migrates to the CTA after the alert region has rendered.
+    // The move is scheduled through a microtask boundary so the `role="alert"`
+    // announcement fires before focus shifts. Waiting on the focus assertion
+    // gives the scheduled task a chance to run.
+    await waitFor(() => expect(document.activeElement).toBe(cta));
+
     // Clicking the CTA closes the dialog so navigation can replace the
     // dashboard route without the modal lingering on top of it.
     fireEvent.click(cta);
     expect(onClose).toHaveBeenCalled();
+  });
+
+  // F-754: non-credential errors must NOT pull focus off the submit button —
+  // retry stays one keypress away.
+  it('keeps focus on submit for non-credential errors', async () => {
+    installInvokeStub({
+      sessionStart: async () => {
+        throw new Error(
+          'session_start: workspace not accessible: No such file or directory (os error 2)',
+        );
+      },
+    });
+    setActiveWorkspaceRoot('/work/repo');
+    const { getByTestId } = renderDialog();
+    await waitFor(() => expect(getByTestId('provider-select')).toBeInTheDocument());
+
+    const submit = getByTestId('new-session-submit') as HTMLButtonElement;
+    submit.focus();
+    expect(document.activeElement).toBe(submit);
+
+    fireEvent.click(submit);
+    await waitFor(() => expect(getByTestId('new-session-error')).toBeInTheDocument());
+
+    // Yield a full task so every queued microtask drains; focus must remain
+    // on the submit button because there is no CTA to migrate to. A
+    // `setTimeout(0)` is more resilient than chained `Promise.resolve()` —
+    // any future async hop in the impl would still be flushed here.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(document.activeElement).toBe(submit);
   });
 
   // Non-credential errors must NOT render the CTA — only the verbatim

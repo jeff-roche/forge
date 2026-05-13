@@ -254,11 +254,30 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
 
   // Focus-trap. Spec §Trigger calls for the workspace field to receive
   // focus on open — the field is the first interactive element either way.
+  // Declared above the F-754 focus-migration effect so the effect closes
+  // over an in-scope binding rather than relying on initializer order.
   let dialogRef: HTMLDivElement | undefined;
   useFocusTrap(() => dialogRef, {
     initialFocus: () =>
       dialogRef?.querySelector<HTMLElement>('[data-testid="workspace-input"]') ??
       undefined,
+  });
+
+  // F-754: when the error path renders an actionable CTA, migrate focus
+  // off the (now-disabled) submit button onto the CTA so screen-reader
+  // users don't have to tab to it. Defer through `queueMicrotask` so the
+  // `role="alert"` announcement fires first — moving focus synchronously
+  // in the same tick would pre-empt assistive tech reading the alert.
+  // Non-credential errors leave focus alone so retry stays one keypress
+  // away on the submit button.
+  createEffect(() => {
+    if (missingCredentialProvider() === null) return;
+    queueMicrotask(() => {
+      const cta = dialogRef?.querySelector<HTMLElement>(
+        '[data-testid="new-session-error-cta"]',
+      );
+      cta?.focus();
+    });
   });
 
   const onSubmit = async (e: Event): Promise<void> => {

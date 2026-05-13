@@ -2,6 +2,7 @@ import { type Component, createResource, createSignal, For, onMount, Show } from
 import { useSearchParams } from '@solidjs/router';
 import { Button, IconButton, Skeleton, StatusPill } from '@forge/design';
 import {
+  type CredentialState,
   getActiveProvider,
   listProviders,
   setActiveProvider,
@@ -180,12 +181,35 @@ function providerBrand(id: string): ProviderBrand {
 
 type PillVariant = 'ready' | 'auth';
 
+/**
+ * F-755: resolve the credential probe state for a row, defaulting
+ * pre-F-755 payloads (where `credential_state` is absent) to the
+ * historical `has_credential` bit. Both the pill variant and the
+ * tooltip branch off this single value so the two never drift —
+ * see the divergence the reviewer caught for the rationale.
+ */
+function resolveCredentialState(entry: ProviderEntry): CredentialState {
+  return entry.credential_state ?? (entry.has_credential ? 'present' : 'missing');
+}
+
+/**
+ * F-755: a row is "not ready" whenever the credential probe didn't
+ * return `'present'`. Both `'missing'` (no entry stored) and
+ * `'backend_error'` (keyring locked, Secret Service unreachable) flip
+ * the pill to `auth`; the distinction surfaces only in the tooltip /
+ * remediation copy below.
+ */
+function credentialNotReady(entry: ProviderEntry): boolean {
+  if (!entry.credential_required) return false;
+  return resolveCredentialState(entry) !== 'present';
+}
+
 function pillVariant(entry: ProviderEntry): PillVariant {
   // Phase B: Vertex-backed rows resolve auth via gcloud ADC at request
   // time and supply the model per request, so the credential /
   // model-availability heuristics do not apply.
   if (entry.auth_kind === 'vertex') return 'ready';
-  if (entry.credential_required && !entry.has_credential) return 'auth';
+  if (credentialNotReady(entry)) return 'auth';
   if (!entry.model_available) return 'auth';
   return 'ready';
 }
@@ -207,7 +231,22 @@ function rowTooltip(entry: ProviderEntry, variant: PillVariant): string {
     return 'Authenticates via gcloud Application Default Credentials. No API key needed — run `gcloud auth application-default login` if requests start failing.';
   }
   if (variant === 'auth') {
-    if (entry.credential_required && !entry.has_credential) {
+    // Resolve the probe state once and branch off it so the tooltip
+    // never drifts from `credentialNotReady` / `pillVariant`. Reading
+    // raw fields here previously let pre-F-755 payloads
+    // (`credential_state` undefined, `has_credential` true) fall
+    // through to the generic "is unconfigured." copy even though the
+    // pill upstream had already classified the row as ready.
+    const state = entry.credential_required ? resolveCredentialState(entry) : 'present';
+    if (state === 'backend_error') {
+      // F-755: the credential probe errored — typically a locked keyring
+      // or a Secret Service backend that isn't running. Pointing the
+      // user at the Add-provider modal here is actively wrong (a key
+      // may already exist), so the tooltip names the failure and lists
+      // OS-specific remediation pointers instead.
+      return `${entry.display_name} credential store is unreachable — unlock your OS keyring (Linux: start \`gnome-keyring-daemon\` or check Secret Service; macOS: unlock the login keychain; Windows: sign in to Credential Manager).`;
+    }
+    if (state === 'missing') {
       return `${entry.display_name} needs an API key — add one via the Add provider modal.`;
     }
     return `${entry.display_name} is unconfigured.`;
