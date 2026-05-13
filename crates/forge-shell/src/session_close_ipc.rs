@@ -612,15 +612,71 @@ mod tests {
         );
     }
 
+    /// Probe whose aliveness is gated on a shared "SIGTERM has been fired"
+    /// flag instead of on poll count or wall-clock elapsed time. Reports
+    /// alive until the flag flips, then dead. Pairing this with a
+    /// [`RecordingSignaler`] that sets the flag inside `send_sigterm`
+    /// makes the phase-1 → phase-2 transition fully deterministic:
+    /// phase-1 always times out (probe never sees dead before SIGTERM
+    /// fires), and phase-2 always succeeds on its first poll (probe sees
+    /// dead immediately after SIGTERM is recorded). No dependence on
+    /// `tokio::time::sleep` precision — fixes a macOS-only flake where
+    /// the 5 ms poll cadence rounded up enough to let phase-2 also time
+    /// out and escalate to SIGKILL.
+    struct SigtermGatedProbe {
+        term_fired: Arc<AtomicBool>,
+    }
+    impl LivenessProbe for SigtermGatedProbe {
+        fn is_alive(&self) -> bool {
+            !self.term_fired.load(Ordering::SeqCst)
+        }
+    }
+
+    /// Signaler variant that shares its `term_fired` flag with a
+    /// [`SigtermGatedProbe`], so the probe observes SIGTERM delivery
+    /// synchronously and the test's escalation transitions become
+    /// wall-clock-independent.
+    struct SigtermGatedSignaler {
+        term_fired: Arc<AtomicBool>,
+        kill_fired: AtomicBool,
+    }
+    impl SigtermGatedSignaler {
+        fn new(term_fired: Arc<AtomicBool>) -> Self {
+            Self {
+                term_fired,
+                kill_fired: AtomicBool::new(false),
+            }
+        }
+    }
+    impl Signaler for SigtermGatedSignaler {
+        fn send_sigterm(&self) -> Result<(), String> {
+            self.term_fired.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+        fn send_sigkill(&self) -> Result<(), String> {
+            self.kill_fired.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
     #[tokio::test]
     async fn sigterm_when_daemon_outlasts_graceful_timeout() {
-        // Initial liveness gate (1 poll) + phase-1 polls fully elapse
-        // (~6 polls at 5 ms over 30 ms) before the daemon dies. We size
-        // alive_polls slightly larger so the phase-1 wait times out.
-        let probe = CountdownProbe::new(10);
-        let sig = Arc::new(RecordingSignaler::default());
+        // Deterministic shape: the probe is alive until SIGTERM is
+        // recorded on the shared signaler, then dead on the very next
+        // poll. Phase 1 therefore always times out (graceful budget
+        // elapses with the probe still reporting alive), SIGTERM fires,
+        // and phase 2's first poll observes the probe as dead. No
+        // dependence on `tokio::time::sleep` precision — earlier the
+        // probe used a poll-count countdown that drifted on macOS (5 ms
+        // sleeps round up enough that phase 2 also timed out and the
+        // orchestrator escalated to SIGKILL).
+        let term_fired = Arc::new(AtomicBool::new(false));
+        let probe = SigtermGatedProbe {
+            term_fired: term_fired.clone(),
+        };
+        let sig = SigtermGatedSignaler::new(term_fired);
         let outcome =
-            orchestrate_session_close(&probe, &*sig, async { Ok(()) }, None, None, fast_timings())
+            orchestrate_session_close(&probe, &sig, async { Ok(()) }, None, None, fast_timings())
                 .await;
         assert_eq!(outcome, SessionCloseOutcome::SigTerm);
         assert!(sig.term_fired.load(Ordering::SeqCst), "SIGTERM must fire");
