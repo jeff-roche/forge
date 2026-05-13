@@ -97,6 +97,12 @@ async fn full_turn_with_tool_call_emits_correct_event_sequence() {
     let dir = TempDir::new().unwrap();
     let log_path = dir.path().join("events.jsonl");
     let sock_path = dir.path().join("test.sock");
+    // Isolate the daemon's user-scope `~/.mcp.json` loader from the
+    // developer's real home so a populated host `~/.mcp.json` does not
+    // prepend an `Event::McpState` to the captured event tape and break
+    // the sequence assertion below.
+    let user_home = dir.path().join("user_home");
+    std::fs::create_dir_all(&user_home).unwrap();
 
     let session = Arc::new(Session::create(log_path).await.unwrap());
     let provider = Arc::new(
@@ -110,6 +116,7 @@ async fn full_turn_with_tool_call_emits_correct_event_sequence() {
     let server_session = Arc::clone(&session);
     let server_provider = Arc::clone(&provider);
     let server_sock = sock_path.clone();
+    let server_user_home = user_home.clone();
     tokio::spawn(async move {
         serve_with_session(
             &server_sock,
@@ -121,6 +128,7 @@ async fn full_turn_with_tool_call_emits_correct_event_sequence() {
             None,
             None, // F-587: keyless test wiring
             None, // F-601: no active agent — memory off in this test
+            Some(server_user_home),
         )
         .await
         .unwrap();
@@ -298,6 +306,7 @@ async fn approval_gate_fires_and_blocks_until_client_approves() {
             None,
             None, // F-587: keyless test wiring
             None, // F-601: no active agent — memory off in this test
+            None,
         )
         .await
         .unwrap();
@@ -394,6 +403,7 @@ async fn auto_approve_skips_approval_gate_and_emits_auto_approved() {
             None,
             None, // F-587: keyless test wiring
             None, // F-601: no active agent — memory off in this test
+            None,
         )
         .await
         .unwrap();
@@ -525,6 +535,7 @@ async fn tool_result_fed_back_to_provider_in_continuation() {
             None,
             None, // F-587: keyless test wiring
             None, // F-601: no active agent — memory off in this test
+            None,
         )
         .await
         .unwrap();
@@ -647,6 +658,7 @@ async fn approval_with_this_tool_scope_is_recorded_faithfully() {
             None,
             None, // F-587: keyless test wiring
             None, // F-601: no active agent — memory off in this test
+            None,
         )
         .await
         .unwrap();
@@ -734,6 +746,7 @@ async fn malformed_approval_scope_rejects_instead_of_silently_downgrading_to_onc
             None,
             None, // F-587: keyless test wiring
             None, // F-601: no active agent — memory off in this test
+            None,
         )
         .await
         .unwrap();
@@ -839,6 +852,7 @@ async fn unexpected_post_handshake_frame_is_logged_not_silently_dropped() {
             None,
             None, // F-587: keyless test wiring
             None, // F-601: no active agent — memory off in this test
+            None,
         )
         .await
         .unwrap();

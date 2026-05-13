@@ -112,6 +112,7 @@ async fn spawn_daemon(dir: &TempDir, scripts: Vec<String>) -> (std::path::PathBu
             None,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
