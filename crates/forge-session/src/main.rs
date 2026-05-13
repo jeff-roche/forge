@@ -7,7 +7,7 @@ use forge_providers::anthropic::{AnthropicProvider, DEFAULT_MAX_TOKENS};
 use forge_providers::ollama::OllamaProvider;
 use forge_providers::openai::OpenAiProvider;
 use forge_providers::MockProvider;
-use forge_session::orchestrator::CredentialContext;
+use forge_session::orchestrator::{CredentialContext, ProviderTag};
 use forge_session::{
     log_bridge,
     pid_file::OwnedPidFile,
@@ -192,10 +192,18 @@ async fn main() -> Result<()> {
                 // `debug_assertions = true`; `None` otherwise, in which case
                 // `load_mcp_manager` falls back to `dirs::home_dir()`.
                 user_home_override,
+                // F-752: MockProvider keeps the legacy `"mock"` tag — the
+                // synthetic provider has no real model identifier and the
+                // existing test fixtures pin against this value.
+                Some(ProviderTag::new("mock", "mock")),
             )
             .await
         }
         ProviderKind::Ollama { base_url, model } => {
+            // F-752: capture the resolved model string before the provider
+            // constructor consumes it so the tag carries the same value the
+            // provider was built with.
+            let provider_tag = Some(ProviderTag::new("ollama", model.clone()));
             let provider = Arc::new(OllamaProvider::new(base_url, model));
             serve_with_session(
                 &socket_path,
@@ -209,6 +217,7 @@ async fn main() -> Result<()> {
                 None,
                 active_agent,
                 user_home_override,
+                provider_tag,
             )
             .await
         }
@@ -220,6 +229,7 @@ async fn main() -> Result<()> {
         // validation; until then a missing key surfaces as an upstream 401
         // mapped to `ChatChunk::Error` by the provider.
         ProviderKind::Anthropic { base_url, model } => {
+            let provider_tag = Some(ProviderTag::new("anthropic", model.clone()));
             let provider = Arc::new(AnthropicProvider::new(
                 base_url,
                 String::new(),
@@ -238,6 +248,7 @@ async fn main() -> Result<()> {
                 credentials,
                 active_agent,
                 user_home_override,
+                provider_tag,
             )
             .await
         }
@@ -245,6 +256,7 @@ async fn main() -> Result<()> {
         // Anthropic; provider id is `"openai"`, env fallback is
         // `OPENAI_API_KEY`.
         ProviderKind::OpenAi { base_url, model } => {
+            let provider_tag = Some(ProviderTag::new("openai", model.clone()));
             let provider = Arc::new(OpenAiProvider::new(base_url, String::new(), model));
             let credentials = build_credential_context("openai");
             serve_with_session(
@@ -258,6 +270,7 @@ async fn main() -> Result<()> {
                 credentials,
                 active_agent,
                 user_home_override,
+                provider_tag,
             )
             .await
         }

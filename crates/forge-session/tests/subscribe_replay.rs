@@ -80,6 +80,7 @@ async fn subscribe_mid_stream_receives_historical_then_live_events() {
             None, // F-587: keyless test wiring
             None, // F-601: no active agent — memory off in this test
             Some(server_user_home),
+            None, // F-752
         )
         .await
         .unwrap();

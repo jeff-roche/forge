@@ -260,6 +260,59 @@ use crate::tools::{
 };
 use forge_mcp::McpManager;
 
+/// F-752: provider identity stamped onto every `AssistantMessage` event
+/// (and the synthetic summary message emitted by compaction) for a turn.
+///
+/// Before F-752 the orchestrator hardcoded `ProviderId::new()` and the
+/// literal `"mock"` on every emission, so downstream telemetry,
+/// per-provider cost rollups, and the dashboard's session timeline
+/// attributed every assistant turn to a synthetic mock provider
+/// regardless of which real backend actually served the response. The
+/// tag is now threaded from session construction (`serve_with_session` /
+/// `main.rs`) into the per-turn entry points so live turns carry the
+/// active provider's slug and model.
+///
+/// The shape mirrors the `provider` / `model` fields on
+/// [`forge_core::Event::AssistantMessage`]:
+/// * `provider_id` — the same stable slug returned by
+///   [`forge_providers::RuntimeProvider::id`] (`"anthropic"`, `"openai"`,
+///   `"custom_openai"`, `"ollama"`, `"mock"`).
+/// * `model` — the model identifier the provider was constructed with
+///   (`"claude-3-5-sonnet-latest"`, `"gpt-4o"`, …). Free-form because
+///   different providers name their models differently; the orchestrator
+///   only forwards the value.
+#[derive(Debug, Clone)]
+pub struct ProviderTag {
+    pub provider_id: ProviderId,
+    pub model: String,
+}
+
+impl ProviderTag {
+    /// Construct a tag from raw provider slug + model strings.
+    pub fn new(provider_id: impl Into<String>, model: impl Into<String>) -> Self {
+        Self {
+            provider_id: ProviderId::from_string(provider_id.into()),
+            model: model.into(),
+        }
+    }
+
+    /// The legacy `"mock" / ProviderId::new()` pair the orchestrator used
+    /// before F-752 threaded real values through. Used as the default in
+    /// tests and embedders that don't wire a tag through.
+    pub fn mock() -> Self {
+        Self {
+            provider_id: ProviderId::new(),
+            model: "mock".to_string(),
+        }
+    }
+}
+
+impl Default for ProviderTag {
+    fn default() -> Self {
+        Self::mock()
+    }
+}
+
 /// Client decision for a pending tool call approval. Carries the
 /// client-supplied `ApprovalScope` on approval so the event log records
 /// the scope faithfully (F-053); `Rejected` collapses scope since there's
@@ -370,6 +423,13 @@ pub async fn run_turn<P: Provider>(
     // backend errors fail the turn rather than silently downgrading to
     // keyless. See [`CredentialContext`] for the seam contract.
     credentials: Option<CredentialContext>,
+    // F-752: provider identity stamped onto every `AssistantMessage` event
+    // this turn emits. `None` falls back to [`ProviderTag::mock`] — the
+    // legacy synthetic pair used pre-F-752, retained so existing tests and
+    // embedders that don't thread the tag keep compiling. Production
+    // callers (`serve_with_session` → daemon) wire `Some` with the active
+    // provider's slug + model.
+    provider_tag: Option<ProviderTag>,
 ) -> Result<()> {
     // F-587 / F-744: pull the credential for the active provider before any
     // model-side work begins. Shared with the rerun paths via
@@ -403,9 +463,10 @@ pub async fn run_turn<P: Provider>(
     // manual trigger).
     //
     // The provider id and model stamped on the synthetic summary message
-    // match the values `run_request_loop` uses for live turns below
-    // (currently the synthetic "mock" pair — when real providers thread
-    // their own ids, both sites move together).
+    // match the values `run_request_loop` uses for live turns below — both
+    // sites read from `tag` so a live turn and the auto-compact summary
+    // attribute to the same provider/model in replay and telemetry.
+    let tag = provider_tag.unwrap_or_default();
     if let Some(budget) = byte_budget.as_ref() {
         let limit = budget.limit();
         let consumed = budget.consumed();
@@ -422,8 +483,8 @@ pub async fn run_turn<P: Provider>(
             if let Err(e) = compact(
                 Arc::clone(&session),
                 Arc::clone(&provider),
-                ProviderId::new(),
-                "mock".to_string(),
+                tag.provider_id.clone(),
+                tag.model.clone(),
                 DEFAULT_COMPACT_FRACTION,
                 &pinned,
                 forge_core::CompactTrigger::AutoAt98Pct,
@@ -544,6 +605,7 @@ pub async fn run_turn<P: Provider>(
         auto_approve,
         instance_id,
         provider_auth,
+        tag,
     )
     .await
 }
@@ -635,10 +697,14 @@ pub(crate) async fn run_request_loop<P: Provider>(
     // is the keyless contract for Ollama and the no-credential fallback for
     // tests that exercise the legacy `chat()` path.
     auth: ProviderAuth,
+    // F-752: provider identity for the active turn. Stamped onto every
+    // `AssistantMessage` event this loop emits so downstream telemetry and
+    // the dashboard's session timeline can attribute turns to the actual
+    // provider+model rather than a synthetic placeholder. Threaded from
+    // `run_turn` / each `rerun_*` delegate.
+    provider_tag: ProviderTag,
 ) -> Result<()> {
-    // Fixed provider/model identifiers for the mock provider.
-    let provider_id = ProviderId::new();
-    let model = "mock".to_string();
+    let ProviderTag { provider_id, model } = provider_tag;
 
     // F-606: 1-based step counter for this turn. Incremented before every
     // `StepStarted` emission (Model + Tool) so the AgentMonitor §9.2 chip
@@ -1693,6 +1759,9 @@ impl Orchestrator {
         // each delegate so a missing or erroring keyring fails the rerun
         // before it reaches the provider, identical to a fresh turn.
         credentials: Option<CredentialContext>,
+        // F-752: see `run_turn` — rerun emits the same `AssistantMessage`
+        // shape, so the tag follows the same wiring contract.
+        provider_tag: Option<ProviderTag>,
     ) -> Result<MessageId> {
         match variant {
             RerunVariant::Replace => {
@@ -1708,6 +1777,7 @@ impl Orchestrator {
                     byte_budget,
                     agent_runtime,
                     credentials,
+                    provider_tag,
                 )
                 .await
             }
@@ -1724,6 +1794,7 @@ impl Orchestrator {
                     byte_budget,
                     agent_runtime,
                     credentials,
+                    provider_tag,
                 )
                 .await
             }
@@ -1740,6 +1811,7 @@ impl Orchestrator {
                     byte_budget,
                     agent_runtime,
                     credentials,
+                    provider_tag,
                 )
                 .await
             }
@@ -1761,6 +1833,8 @@ impl Orchestrator {
         agent_runtime: Option<AgentRuntime>,
         // F-587: see `rerun_message`.
         credentials: Option<CredentialContext>,
+        // F-752: see `rerun_message`.
+        provider_tag: Option<ProviderTag>,
     ) -> Result<MessageId> {
         // F-587 / F-744: pull the active provider's credential before
         // regeneration begins, identical to `run_turn`. Backend errors
@@ -1773,6 +1847,7 @@ impl Orchestrator {
                 .unwrap_or(""),
             pulled_secret,
         );
+        let tag = provider_tag.unwrap_or_default();
 
         // Read the log up to the current tip; filter prior supersede markers
         // so a second rerun doesn't rebuild context from already-hidden
@@ -1860,6 +1935,7 @@ impl Orchestrator {
             auto_approve,
             instance_id,
             provider_auth,
+            tag,
         )
         .await?;
 
@@ -1912,6 +1988,8 @@ impl Orchestrator {
         agent_runtime: Option<AgentRuntime>,
         // F-587: see `rerun_message`.
         credentials: Option<CredentialContext>,
+        // F-752: see `rerun_message`.
+        provider_tag: Option<ProviderTag>,
     ) -> Result<MessageId> {
         // F-587 / F-744: same pull-once contract as `run_turn` / `rerun_replace`.
         let pulled_secret = pull_active_credential(&credentials).await?;
@@ -1922,6 +2000,7 @@ impl Orchestrator {
                 .unwrap_or(""),
             pulled_secret,
         );
+        let tag = provider_tag.unwrap_or_default();
 
         let history = read_since(&session.log_path, 0)
             .await
@@ -2001,6 +2080,7 @@ impl Orchestrator {
             auto_approve,
             instance_id,
             provider_auth,
+            tag,
         )
         .await?;
 
@@ -2046,6 +2126,8 @@ impl Orchestrator {
         agent_runtime: Option<AgentRuntime>,
         // F-587: see `rerun_message`.
         credentials: Option<CredentialContext>,
+        // F-752: see `rerun_message`.
+        provider_tag: Option<ProviderTag>,
     ) -> Result<MessageId> {
         // F-587 / F-744: same pull-once contract as `run_turn` / `rerun_replace`.
         let pulled_secret = pull_active_credential(&credentials).await?;
@@ -2056,6 +2138,7 @@ impl Orchestrator {
                 .unwrap_or(""),
             pulled_secret,
         );
+        let tag = provider_tag.unwrap_or_default();
 
         let history = read_since(&session.log_path, 0)
             .await
@@ -2127,6 +2210,7 @@ impl Orchestrator {
             auto_approve,
             instance_id,
             provider_auth,
+            tag,
         )
         .await?;
 
@@ -2525,6 +2609,7 @@ mod tests {
             None,
             None,
             None, // F-587: no credentials wired in this AGENTS.md test.
+            None, // F-752: tag falls back to ProviderTag::mock().
         )
         .await
         .unwrap();
@@ -2551,6 +2636,7 @@ mod tests {
             None,
             None,
             None, // F-587
+            None, // F-752
         )
         .await
         .unwrap();
@@ -2615,6 +2701,7 @@ mod tests {
             None,
             None,
             None, // F-587
+            None, // F-752
         )
         .await
         .unwrap();
@@ -2815,6 +2902,7 @@ mod tests {
             None,
             None,
             None, // F-587: no credentials wired in this auto-trigger test.
+            None, // F-752
         )
         .await
         .unwrap();
@@ -2880,6 +2968,7 @@ mod tests {
             None,
             None,
             None, // F-587: no credentials wired in this negative-gate test.
+            None, // F-752
         )
         .await
         .unwrap();
@@ -3091,6 +3180,7 @@ mod tests {
                 true,
                 None,
                 forge_providers::ProviderAuth::None,
+                ProviderTag::mock(),
             )
             .await
             .expect("turn completes");
@@ -3187,6 +3277,7 @@ mod tests {
             true,
             None,
             forge_providers::ProviderAuth::None,
+            ProviderTag::mock(),
         )
         .await
         .expect("turn completes");
@@ -3304,6 +3395,7 @@ mod tests {
             true,
             None,
             forge_providers::ProviderAuth::None,
+            ProviderTag::mock(),
         )
         .await
         .expect("turn completes");
@@ -3387,6 +3479,7 @@ mod tests {
             true, // auto-approve so write.x doesn't block on a prompt
             None,
             forge_providers::ProviderAuth::None,
+            ProviderTag::mock(),
         )
         .await
         .expect("turn completes");
@@ -3488,6 +3581,7 @@ mod tests {
             true,
             None,
             forge_providers::ProviderAuth::None,
+            ProviderTag::mock(),
         )
         .await
         .expect("turn completes");
@@ -3608,6 +3702,7 @@ mod tests {
             true,
             None,
             forge_providers::ProviderAuth::None,
+            ProviderTag::mock(),
         )
         .await
         .expect("first turn completes");
@@ -3646,6 +3741,7 @@ mod tests {
             true,
             None,
             forge_providers::ProviderAuth::None,
+            ProviderTag::mock(),
         )
         .await
         .expect("follow-up turn completes");
@@ -3761,6 +3857,7 @@ mod tests {
             true,
             None,
             forge_providers::ProviderAuth::None,
+            ProviderTag::mock(),
         )
         .await
         .expect("turn completes despite tool panic");

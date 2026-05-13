@@ -98,6 +98,7 @@ async fn fs_read_tool_returns_content_bytes_sha256() {
             None, // F-587: keyless test wiring
             None, // F-601: no active agent — memory off in this test
             None,
+            None, // F-752
         )
         .await
         .unwrap();

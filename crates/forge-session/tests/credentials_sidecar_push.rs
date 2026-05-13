@@ -97,6 +97,7 @@ async fn run_turn_pushes_credentials_frame_when_sidecar_hook_set() {
                 command_tx: tx,
             }),
         }),
+        None, // F-752
     )
     .await
     .expect("turn should complete");
@@ -163,6 +164,7 @@ async fn run_turn_does_not_push_when_credential_miss() {
                 command_tx: tx,
             }),
         }),
+        None, // F-752
     )
     .await
     .expect("missing credential must remain a clean miss");
@@ -209,6 +211,7 @@ async fn run_turn_does_not_push_without_sidecar_hook() {
             provider_id: "anthropic".to_string(),
             sidecar_push: None,
         }),
+        None, // F-752
     )
     .await
     .expect("turn should complete");
@@ -276,6 +279,7 @@ async fn secret_value_never_appears_in_logs() {
                 command_tx: tx,
             }),
         }),
+        None, // F-752
     )
     .await
     .expect("turn should complete");
@@ -380,6 +384,7 @@ async fn rerun_replace_pushes_credentials_frame() {
                     command_tx: tx,
                 }),
             }),
+            None, // F-752
         )
         .await
         .expect("rerun should complete");

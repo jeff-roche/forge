@@ -115,6 +115,7 @@ async fn next_turn_uses_new_provider_after_swap() {
             None, // F-587 keyless
             None, // F-601 active_agent: memory off
             None,
+            None, // F-752
         )
         .await
         .ok();
@@ -253,6 +254,7 @@ async fn switch_provider_frame_triggers_daemon_swap_path() {
             None,
             None,
             None,
+            None, // F-752
         )
         .await
         .ok();

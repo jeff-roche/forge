@@ -121,6 +121,7 @@ async fn run_turn_pulls_credential_when_context_supplied() {
             provider_id: "anthropic".to_string(),
             sidecar_push: None,
         }),
+        None, // F-752
     )
     .await
     .expect("turn should complete");
@@ -173,6 +174,7 @@ async fn run_turn_proceeds_when_credential_is_missing() {
             provider_id: "anthropic".to_string(),
             sidecar_push: None,
         }),
+        None, // F-752
     )
     .await
     .expect("missing credential is a clean miss, not an error");
@@ -213,6 +215,7 @@ async fn run_turn_fails_when_credential_backend_errors() {
             provider_id: "anthropic".to_string(),
             sidecar_push: None,
         }),
+        None, // F-752
     )
     .await
     .expect_err("backend failure must fail the turn, not silently downgrade");
@@ -257,6 +260,7 @@ async fn run_turn_skips_pull_when_no_context_supplied() {
         None,
         None,
         None, // no credential context — skip the pull.
+        None, // F-752
     )
     .await
     .expect("keyless path completes");
@@ -343,6 +347,7 @@ async fn rerun_replace_pulls_credential_when_context_supplied() {
                 provider_id: "anthropic".to_string(),
                 sidecar_push: None,
             }),
+            None, // F-752
         )
         .await
         .expect("rerun should complete");
@@ -390,6 +395,7 @@ async fn rerun_replace_fails_when_credential_backend_errors() {
                 provider_id: "anthropic".to_string(),
                 sidecar_push: None,
             }),
+            None, // F-752
         )
         .await
         .expect_err("backend failure must fail the rerun");
@@ -434,6 +440,7 @@ async fn rerun_branch_pulls_credential_when_context_supplied() {
                 provider_id: "anthropic".to_string(),
                 sidecar_push: None,
             }),
+            None, // F-752
         )
         .await
         .expect("rerun branch should complete");
@@ -479,6 +486,7 @@ async fn rerun_fresh_pulls_credential_when_context_supplied() {
                 provider_id: "anthropic".to_string(),
                 sidecar_push: None,
             }),
+            None, // F-752
         )
         .await
         .expect("rerun fresh should complete");
@@ -520,6 +528,7 @@ async fn rerun_skips_pull_when_no_context_supplied() {
             None,
             None,
             None, // no credential context — skip the pull.
+            None, // F-752
         )
         .await
         .expect("keyless rerun completes");

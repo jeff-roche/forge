@@ -135,6 +135,7 @@ async fn agent_def_allowed_paths_narrows_session_scope() {
         None,
         None,
         None,
+        None, // F-752
     )
     .await
     .expect("run_turn should complete");
@@ -227,6 +228,7 @@ async fn agent_def_with_empty_allowed_paths_falls_back_to_session_scope() {
         None,
         None,
         None,
+        None, // F-752
     )
     .await
     .expect("run_turn should complete");

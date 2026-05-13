@@ -20,7 +20,7 @@ use tokio::sync::{broadcast, Mutex, Notify};
 
 use crate::archive::archive_or_purge;
 use crate::orchestrator::{
-    run_turn, ApprovalDecision, CredentialContext, Orchestrator, PendingApprovals,
+    run_turn, ApprovalDecision, CredentialContext, Orchestrator, PendingApprovals, ProviderTag,
 };
 use crate::sandbox::ChildRegistry;
 use crate::session::Session;
@@ -682,6 +682,7 @@ pub async fn serve(path: &Path, auto_approve: bool, ephemeral: bool) -> Result<(
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -808,6 +809,13 @@ pub async fn serve_with_session<P: Provider + 'static>(
     // isolate from the developer's real `~/.mcp.json`. Production callers
     // pass `None` and the platform resolver is used unchanged.
     user_home_override: Option<PathBuf>,
+    // F-752: provider identity stamped onto every `AssistantMessage` event
+    // for turns this session emits. `None` falls back to the legacy mock
+    // pair so tests and embedders that don't wire the tag keep their
+    // existing shape; production callers (`forge-session::main`) build a
+    // tag per provider kind so dashboards / telemetry attribute turns to
+    // the real provider+model.
+    provider_tag: Option<ProviderTag>,
 ) -> Result<()> {
     serve_with_session_swappable(
         path,
@@ -821,6 +829,7 @@ pub async fn serve_with_session<P: Provider + 'static>(
         credentials,
         active_agent,
         user_home_override,
+        provider_tag,
     )
     .await
 }
@@ -851,6 +860,8 @@ pub async fn serve_with_session_swappable<P: Provider + 'static>(
     // `None`; integration tests pass a tempdir path to isolate the
     // user-scope `.mcp.json` loader from the developer's real home.
     user_home_override: Option<PathBuf>,
+    // F-752: see [`serve_with_session`].
+    provider_tag: Option<ProviderTag>,
 ) -> Result<()> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -1098,6 +1109,7 @@ pub async fn serve_with_session_swappable<P: Provider + 'static>(
             // F-747: ephemeral mode exits on stream EOF; no graceful-shutdown
             // path is needed because `forge run agent` controls the lifecycle.
             None,
+            provider_tag.clone(),
         )
         .await;
     }
@@ -1173,6 +1185,7 @@ pub async fn serve_with_session_swappable<P: Provider + 'static>(
                 let agent_runtime = Arc::clone(&agent_runtime);
                 let dispatcher_cache = Arc::clone(&dispatcher_cache);
                 let credentials_for_conn = credentials.clone();
+                let provider_tag_for_conn = provider_tag.clone();
                 let swap_for_conn = swap.clone();
                 let shutdown_for_conn = Arc::clone(&shutdown_notify);
                 tokio::spawn(async move {
@@ -1199,6 +1212,7 @@ pub async fn serve_with_session_swappable<P: Provider + 'static>(
                         dispatcher_cache,
                         credentials_for_conn,
                         Some(shutdown_for_conn),
+                        provider_tag_for_conn,
                     )
                     .await
                     {
@@ -1295,6 +1309,11 @@ async fn handle_connection<P: Provider + 'static>(
     // `archive_or_purge` + socket / pid-file cleanup) and exit. `None` in
     // ephemeral mode where there is no outer loop to signal.
     shutdown_notify: Option<Arc<Notify>>,
+    // F-752: provider identity stamped onto every `AssistantMessage` event
+    // for turns this connection drives. Cloned into each spawned turn /
+    // rerun / compact task so the same tag is applied across all paths
+    // that emit AssistantMessage.
+    provider_tag: Option<ProviderTag>,
 ) -> Result<()> {
     // ── Handshake ──────────────────────────────────────────────────────────────
     // F-354: both handshake reads are subject to a bounded deadline so a
@@ -1428,6 +1447,12 @@ async fn handle_connection<P: Provider + 'static>(
                         // `String` is a refcount bump; the actual store is
                         // shared across every turn in the session.
                         let credential_ctx_for_turn = credentials.clone();
+                        // F-752: clone the per-session provider tag into the
+                        // turn task. Each `AssistantMessage` emission inside
+                        // `run_turn` reads from this so live turns attribute
+                        // to the active provider+model rather than the legacy
+                        // `"mock"` placeholder.
+                        let provider_tag_for_turn = provider_tag.clone();
                         // F-593: capture the session log path + workspace path
                         // *before* the move so the post-`SessionEnded` flush
                         // can read its own log without re-borrowing `session`.
@@ -1462,6 +1487,9 @@ async fn handle_connection<P: Provider + 'static>(
                                 // flow in through `credential_ctx_for_turn`
                                 // below, captured at session start.
                                 credential_ctx_for_turn.clone(),
+                                // F-752: active provider+model tag — see the
+                                // `provider_tag_for_turn` binding above.
+                                provider_tag_for_turn.clone(),
                             ).await;
                             if let Err(e) = &result {
                                 tracing::warn!(
@@ -1569,6 +1597,10 @@ async fn handle_connection<P: Provider + 'static>(
                         // credential binding into the rerun task, identical
                         // to the `SendUserMessage` branch above.
                         let credential_ctx_for_rerun = credentials.clone();
+                        // F-752: same threading rationale as the credential
+                        // binding — rerun emits the same `AssistantMessage`
+                        // shape as a fresh turn and must carry the same tag.
+                        let provider_tag_for_rerun = provider_tag.clone();
                         // MessageId wraps an `Arc<str>` so any string is
                         // structurally a valid id (the log lookup later
                         // surfaces "not found" if the client fabricated
@@ -1592,6 +1624,7 @@ async fn handle_connection<P: Provider + 'static>(
                                     Some(byte_budget),
                                     agent_runtime,
                                     credential_ctx_for_rerun,
+                                    provider_tag_for_rerun,
                                 )
                                 .await
                             {
@@ -1677,6 +1710,11 @@ async fn handle_connection<P: Provider + 'static>(
                         // pass `ProviderAuth::None` and the provider's
                         // constructor-time credential (if any) takes over.
                         let compact_creds = credentials.clone();
+                        // F-752: tag the summary `AssistantMessage` with the
+                        // active provider+model — see the run_turn binding
+                        // above. Falls back to the legacy mock pair when the
+                        // session was constructed without a tag (tests).
+                        let compact_tag = provider_tag.clone().unwrap_or_default();
                         tokio::spawn(async move {
                             let pinned = std::collections::HashSet::new();
                             let auth = match compact_creds.as_ref() {
@@ -1691,8 +1729,8 @@ async fn handle_connection<P: Provider + 'static>(
                             if let Err(e) = crate::compaction::compact(
                                 session,
                                 provider,
-                                forge_core::ids::ProviderId::new(),
-                                "mock".to_string(),
+                                compact_tag.provider_id,
+                                compact_tag.model,
                                 crate::compaction::DEFAULT_COMPACT_FRACTION,
                                 &pinned,
                                 forge_core::CompactTrigger::UserRequested,
