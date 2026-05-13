@@ -768,12 +768,23 @@ async fn pump_events(
     // with `since: last_seq` and the daemon replays from there — that's
     // the no-duplicate-events guarantee.
     let mut last_seq: u64 = 0;
+    // F-748 review fix: a `SessionEnded` event followed by EOF is the
+    // graceful-close path (F-747's daemon shutdown emits `SessionEnded`,
+    // closes its write half, and exits 0). Without this flag the
+    // subsequent EOF trips the on_crash overlay even though the user
+    // deliberately closed the session. Observing `SessionEnded` here is
+    // deterministic regardless of WHO initiated the close (user close
+    // button, CLI `session_kill`, OS signal that the daemon catches).
+    let mut session_ended_observed = false;
     loop {
         match read_frame_into_with_deadline(&mut reader, &mut frame_buf, DEFAULT_PUMP_DEADLINE)
             .await
         {
             Ok(IpcMessage::Event(event)) => {
                 last_seq = event.seq;
+                if matches!(event.event, forge_core::Event::SessionEnded { .. }) {
+                    session_ended_observed = true;
+                }
                 sink.emit(SessionEventPayload {
                     session_id: session_id.clone(),
                     seq: event.seq,
@@ -830,6 +841,23 @@ async fn pump_events(
                 // so the webview can surface the crash-restart prompt.
                 // `last_seq` is the resume anchor; the webview hands it
                 // back as `Subscribe { since }` after `session_restart`.
+                //
+                // F-748 review fix: when the pump already observed a
+                // `SessionEnded` event before the EOF, this is the
+                // graceful-close path (F-747's daemon emits SessionEnded,
+                // closes its write half, exits 0). Skip the crash signal
+                // — the close was deliberate, the webview must not show
+                // a misleading "Session crashed" overlay.
+                if session_ended_observed {
+                    tracing::debug!(
+                        target: "forge_shell::bridge",
+                        session_id = %session_id,
+                        last_seq,
+                        error = %e,
+                        "session UDS pump exited after SessionEnded — graceful close, suppressing crash signal",
+                    );
+                    break;
+                }
                 tracing::warn!(
                     target: "forge_shell::bridge",
                     session_id = %session_id,

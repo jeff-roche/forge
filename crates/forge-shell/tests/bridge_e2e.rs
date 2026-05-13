@@ -309,11 +309,21 @@ async fn pump_signals_crash_when_daemon_socket_dies() {
         let _: IpcMessage = read_frame_with_deadline(&mut reader, Duration::from_secs(2))
             .await
             .unwrap();
-        // Emit one event @ seq=7 with a benign payload.
-        let event = DaemonEvent::SessionEnded {
-            at: chrono::Utc::now(),
-            reason: forge_core::EndReason::Closed,
-            archived: false,
+        // Emit one event @ seq=7 with a benign payload. Use UsageTick (not
+        // SessionEnded) — the latter is the graceful-close signal the pump
+        // treats as "expected EOF" per the F-748 review fix, which would
+        // suppress the on_crash we're trying to exercise here. UsageTick
+        // is a routine in-stream event that does not change the pump's
+        // crash-classification state.
+        let event = DaemonEvent::UsageTick {
+            at: None,
+            session_id: None,
+            provider: forge_core::ProviderId::from_string("mock".to_string()),
+            model: "mock".into(),
+            tokens_in: 0,
+            tokens_out: 0,
+            cost_usd: 0.0,
+            scope: forge_core::RosterScope::SessionWide,
         };
         write_frame(&mut writer, &IpcMessage::Event(IpcEvent { seq: 7, event }))
             .await
@@ -358,6 +368,113 @@ async fn pump_signals_crash_when_daemon_socket_dies() {
     assert_eq!(crash.1, 7);
 
     // Daemon stub has already completed by now.
+    let _ = server.await;
+}
+
+/// F-748 review fix: when the daemon emits `Event::SessionEnded` and then
+/// closes its write half (the F-747 graceful-close path: SessionEnded →
+/// archive arm → drop UDS → exit 0), the pump's subsequent EOF must NOT
+/// fire `on_crash`. The session ended deliberately; the crash-restart
+/// overlay would be a misleading false positive.
+#[tokio::test]
+async fn pump_suppresses_crash_after_session_ended() {
+    use std::time::Duration;
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::UnixListener;
+
+    let sock_dir = TempDir::new().unwrap();
+    let sock = sock_dir.path().join("graceful.sock");
+    let listener = UnixListener::bind(&sock).unwrap();
+
+    let sock_path = sock.clone();
+    let server = tokio::spawn(async move {
+        use forge_core::Event as DaemonEvent;
+        use forge_ipc::{
+            read_frame_with_deadline, write_frame, HelloAck, IpcEvent, IpcMessage, SCHEMA_VERSION,
+        };
+        let (stream, _) = listener.accept().await.unwrap();
+        let (mut reader, mut writer) = stream.into_split();
+        let _: IpcMessage = read_frame_with_deadline(&mut reader, Duration::from_secs(2))
+            .await
+            .unwrap();
+        write_frame(
+            &mut writer,
+            &IpcMessage::HelloAck(HelloAck {
+                session_id: "graceful-session".into(),
+                workspace: String::new(),
+                started_at: "2026-05-12T00:00:00Z".into(),
+                event_seq: 0,
+                schema_version: SCHEMA_VERSION,
+            }),
+        )
+        .await
+        .unwrap();
+        let _: IpcMessage = read_frame_with_deadline(&mut reader, Duration::from_secs(2))
+            .await
+            .unwrap();
+        // Graceful close shape: emit SessionEnded, then shut the write
+        // half. The pump's next read returns EOF; the suppression flag
+        // must short-circuit the on_crash call.
+        let event = DaemonEvent::SessionEnded {
+            at: chrono::Utc::now(),
+            reason: forge_core::EndReason::Closed,
+            archived: false,
+        };
+        write_frame(&mut writer, &IpcMessage::Event(IpcEvent { seq: 3, event }))
+            .await
+            .unwrap();
+        writer.shutdown().await.unwrap();
+        drop(sock_path);
+    });
+
+    let bridge = SessionBridge::new(SessionConnections::new());
+    bridge
+        .hello("graceful-session", Some(&sock))
+        .await
+        .expect("hello");
+
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let (crash_tx, mut crash_rx) = mpsc::unbounded_channel();
+    bridge
+        .subscribe(
+            "graceful-session",
+            0,
+            Arc::new(CrashRecordingSink { crash_tx, event_tx }),
+        )
+        .await
+        .expect("subscribe");
+
+    // Drain the SessionEnded event so we know the pump observed it.
+    let payload = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+        .await
+        .expect("SessionEnded arrived")
+        .expect("channel open");
+    assert_eq!(payload.seq, 3);
+    assert!(
+        matches!(payload.event, forge_core::Event::SessionEnded { .. }),
+        "expected SessionEnded as the seq=3 payload, got {:?}",
+        payload.event,
+    );
+
+    // The pump should now hit EOF and exit silently. Give it a generous
+    // window. Two acceptable shapes:
+    //   - timeout elapses (no signal at all)
+    //   - channel closes with None (the pump task's Arc<dyn EventSink>
+    //     dropped after the loop exited, dropping the inner mpsc Sender)
+    // The bug we're catching is the third shape — actually receiving a
+    // crash tuple. Anything else proves on_crash was NOT called.
+    let crash_result = tokio::time::timeout(Duration::from_millis(500), crash_rx.recv()).await;
+    match crash_result {
+        Err(_elapsed) => { /* no signal within the budget — pass */ }
+        Ok(None) => { /* channel closed without a signal — pass */ }
+        Ok(Some(signal)) => {
+            panic!(
+                "on_crash must NOT fire after SessionEnded (graceful close), got {:?}",
+                signal
+            );
+        }
+    }
+
     let _ = server.await;
 }
 
