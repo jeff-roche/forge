@@ -47,7 +47,23 @@ uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
 
 [dev-dependencies]
+# F-744: leak-audit test needs `chrono` for constructing `Event` variants
+# carrying `DateTime<Utc>` fields without depending on the orchestrator.
+chrono = "0.4"
+# F-744: compile-time negative trait assertions — pin the no-`Display` /
+# no-`Serialize` posture of `ProviderAuth` so a future refactor that
+# accidentally derives either trait fails to build rather than silently
+# leaks the credential through string conversion or JSON.
+static_assertions = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "time"] }
 futures = "0.3"
+# F-744: leak-audit test asserts `forge_core::Event` serialisation never
+# embeds a credential — constructed directly in the test to avoid pulling
+# the orchestrator's transitive deps into the provider test target.
+tracing = "0.1"
+# F-744: capture every `tracing` event emitted on the chat path so the
+# leak-audit test (`tests/auth_seam.rs`) can grep the buffer for the
+# sentinel credential.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
 wiremock = "0.6"

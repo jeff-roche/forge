@@ -12,7 +12,9 @@ use forge_core::{
     StepOutcome,
 };
 use forge_ipc::sidecar::{SecretBytes, SidecarCredentials, SidecarMessage};
-use forge_providers::{ChatBlock, ChatChunk, ChatMessage, ChatRequest, ChatRole, Provider};
+use forge_providers::{
+    ChatBlock, ChatChunk, ChatMessage, ChatRequest, ChatRole, Provider, ProviderAuth,
+};
 use futures::StreamExt;
 use secrecy::ExposeSecret;
 use tokio::sync::{mpsc, oneshot, Mutex};
@@ -93,78 +95,102 @@ impl std::fmt::Debug for CredentialContext {
     }
 }
 
-/// F-587: pull the active provider's credential, exactly once, before a
-/// turn or rerun's request loop opens.
+/// F-587 / F-744: pull the active provider's credential, exactly once,
+/// before a turn or rerun's request loop opens.
 ///
 /// Shared between `run_turn`, `Orchestrator::rerun_replace`,
 /// `Orchestrator::rerun_branch`, and `Orchestrator::rerun_fresh` so the
-/// pull contract is identical on every turn-shaped path. The pulled value
-/// is dropped immediately on this Phase-1 keyless build; when Phase-3
-/// providers consume `CredentialContext`, the value is handed into
-/// per-request auth shape via `secrecy::ExposeSecret::expose_secret` at
-/// the network boundary, never logged or stringified.
+/// pull contract is identical on every turn-shaped path. F-744 wires the
+/// pulled value through into the provider's [`Provider::chat_with_auth`]
+/// at the network boundary — the secret never leaves this module except
+/// as a [`SecretString`] handed straight to the provider seam, which is
+/// responsible for `ExposeSecret`-ing it onto the outgoing request.
 ///
 /// Backend errors propagate. A misconfigured Secret Service daemon or a
 /// locked Keychain is more useful as a turn-level failure than a silent
 /// fall-through to "no auth" that the provider would later 401 on.
-async fn pull_active_credential(ctx: &Option<CredentialContext>) -> Result<()> {
-    if let Some(ctx) = ctx.as_ref() {
-        let pulled = ctx.store.get(&ctx.provider_id).await?;
-        tracing::trace!(
-            target: "forge_session::orchestrator::credentials",
-            provider_id = %ctx.provider_id,
-            hit = pulled.is_some(),
-            "credential pull",
-        );
+async fn pull_active_credential(
+    ctx: &Option<CredentialContext>,
+) -> Result<Option<secrecy::SecretString>> {
+    let Some(ctx) = ctx.as_ref() else {
+        return Ok(None);
+    };
+    let pulled = ctx.store.get(&ctx.provider_id).await?;
+    tracing::trace!(
+        target: "forge_session::orchestrator::credentials",
+        provider_id = %ctx.provider_id,
+        hit = pulled.is_some(),
+        "credential pull",
+    );
 
-        // F-608 step 6: when a sidecar push hook is wired AND the
-        // credential pull hit, frame the value as a `Credentials` IPC
-        // message and forward it to the per-instance sidecar before the
-        // orchestrator's caller emits `RunTurn`. The provider's
-        // per-request auth shape on the sidecar side then has the value
-        // staged. We deliberately do NOT push on the miss path —
-        // staging an empty credential would teach the sidecar a bogus
-        // "I have a key" signal for a provider that's actually keyless.
-        //
-        // Security: `expose_secret()` is the only call site that
-        // touches the cleartext bytes; the result is moved straight
-        // into `SecretBytes` (whose `Debug`/`Display` redact) and never
-        // bound to a `&str` we could accidentally log. The trace
-        // emission below carries `provider_id` + `instance_id` only —
-        // never the byte count, never the value.
-        if let (Some(secret), Some(push)) = (pulled.as_ref(), ctx.sidecar_push.as_ref()) {
-            let frame = SidecarMessage::Credentials(SidecarCredentials {
-                provider_id: ProviderId::from_string(ctx.provider_id.clone()),
-                secret: SecretBytes::new(secret.expose_secret().as_bytes().to_vec()),
-            });
-            match push.command_tx.send(frame).await {
-                Ok(()) => {
-                    tracing::trace!(
-                        target: "forge_session::orchestrator::credentials",
-                        provider_id = %ctx.provider_id,
-                        instance_id = %push.instance_id,
-                        "pushed credential",
-                    );
-                }
-                Err(_) => {
-                    // Closed channel = supervisor has wound the sidecar
-                    // down. The pending `RunTurn` will land on the same
-                    // closed channel; surface here as a warn rather than
-                    // failing the turn pre-emptively so the caller's own
-                    // error path (if any) drives the lifecycle.
-                    tracing::warn!(
-                        target: "forge_session::orchestrator::credentials",
-                        provider_id = %ctx.provider_id,
-                        instance_id = %push.instance_id,
-                        "sidecar credential push: channel closed",
-                    );
-                }
+    // F-608 step 6: when a sidecar push hook is wired AND the
+    // credential pull hit, frame the value as a `Credentials` IPC
+    // message and forward it to the per-instance sidecar before the
+    // orchestrator's caller emits `RunTurn`. The provider's
+    // per-request auth shape on the sidecar side then has the value
+    // staged. We deliberately do NOT push on the miss path —
+    // staging an empty credential would teach the sidecar a bogus
+    // "I have a key" signal for a provider that's actually keyless.
+    //
+    // Security: `expose_secret()` is the only call site that
+    // touches the cleartext bytes; the result is moved straight
+    // into `SecretBytes` (whose `Debug`/`Display` redact) and never
+    // bound to a `&str` we could accidentally log. The trace
+    // emission below carries `provider_id` + `instance_id` only —
+    // never the byte count, never the value.
+    if let (Some(secret), Some(push)) = (pulled.as_ref(), ctx.sidecar_push.as_ref()) {
+        let frame = SidecarMessage::Credentials(SidecarCredentials {
+            provider_id: ProviderId::from_string(ctx.provider_id.clone()),
+            secret: SecretBytes::new(secret.expose_secret().as_bytes().to_vec()),
+        });
+        match push.command_tx.send(frame).await {
+            Ok(()) => {
+                tracing::trace!(
+                    target: "forge_session::orchestrator::credentials",
+                    provider_id = %ctx.provider_id,
+                    instance_id = %push.instance_id,
+                    "pushed credential",
+                );
+            }
+            Err(_) => {
+                // Closed channel = supervisor has wound the sidecar
+                // down. The pending `RunTurn` will land on the same
+                // closed channel; surface here as a warn rather than
+                // failing the turn pre-emptively so the caller's own
+                // error path (if any) drives the lifecycle.
+                tracing::warn!(
+                    target: "forge_session::orchestrator::credentials",
+                    provider_id = %ctx.provider_id,
+                    instance_id = %push.instance_id,
+                    "sidecar credential push: channel closed",
+                );
             }
         }
-
-        drop(pulled);
     }
-    Ok(())
+
+    Ok(pulled)
+}
+
+/// F-744: build a [`ProviderAuth`] for the active provider from the
+/// per-turn pulled credential. Keyless providers (Ollama) map to
+/// `ProviderAuth::None` regardless of whether a credential was pulled —
+/// the seam at the provider end will drop the value either way, but
+/// emitting `None` makes the keyless contract explicit at the call site.
+fn build_provider_auth(provider_id: &str, pulled: Option<secrecy::SecretString>) -> ProviderAuth {
+    // Ollama is keyless. Any other provider id that lands here (anthropic,
+    // openai, custom_openai, anthropic-vertex) uses the `ApiKey` shape;
+    // Anthropic's Vertex sub-mode is currently driven entirely through
+    // the constructor-time `AuthMode` (gcloud token fetched at request
+    // time) and does not flow through the keyring, so the seam variant
+    // here stays `ApiKey` for now and the provider falls back to
+    // `AuthMode::Vertex` when the seam is `None`.
+    if provider_id == "ollama" {
+        return ProviderAuth::None;
+    }
+    match pulled {
+        Some(s) => ProviderAuth::ApiKey(s),
+        None => ProviderAuth::None,
+    }
 }
 
 use crate::byte_budget::ByteBudget;
@@ -289,13 +315,25 @@ pub async fn run_turn<P: Provider>(
     // keyless. See [`CredentialContext`] for the seam contract.
     credentials: Option<CredentialContext>,
 ) -> Result<()> {
-    // F-587: pull the credential for the active provider before any
+    // F-587 / F-744: pull the credential for the active provider before any
     // model-side work begins. Shared with the rerun paths via
     // `pull_active_credential` so every turn-shaped entry point honors the
     // same pull-once contract. A credential-pull failure fails the turn
     // before compaction runs — that's the right ordering: we won't burn a
     // privileged summary call on a turn that was going to fail anyway.
-    pull_active_credential(&credentials).await?;
+    //
+    // F-744: the pulled `SecretString` is mapped into a `ProviderAuth`
+    // tagged with the active provider's id and threaded into
+    // `run_request_loop` (and into `compact()` below) so the provider's
+    // `chat_with_auth` seam can build the auth header per request.
+    let pulled_secret = pull_active_credential(&credentials).await?;
+    let provider_auth = build_provider_auth(
+        credentials
+            .as_ref()
+            .map(|c| c.provider_id.as_str())
+            .unwrap_or(""),
+        pulled_secret,
+    );
 
     // F-598: auto-trigger context compaction at byte-budget >= 98%. Runs
     // BEFORE the new turn's UserMessage is logged so the summary marker
@@ -320,6 +358,11 @@ pub async fn run_turn<P: Provider>(
             && !session.is_compacting()
         {
             let pinned = std::collections::HashSet::new();
+            // F-744: auto-compaction uses the same per-turn credential — it
+            // runs *before* the actual chat request below, so the seam
+            // value is identical for both calls. Clone is a refcount bump
+            // on the inner `SecretString` (zeroized on drop with the
+            // request future).
             if let Err(e) = compact(
                 Arc::clone(&session),
                 Arc::clone(&provider),
@@ -328,6 +371,7 @@ pub async fn run_turn<P: Provider>(
                 DEFAULT_COMPACT_FRACTION,
                 &pinned,
                 forge_core::CompactTrigger::AutoAt98Pct,
+                provider_auth.clone(),
             )
             .await
             {
@@ -443,6 +487,7 @@ pub async fn run_turn<P: Provider>(
         &ctx,
         auto_approve,
         instance_id,
+        provider_auth,
     )
     .await
 }
@@ -527,6 +572,13 @@ pub(crate) async fn run_request_loop<P: Provider>(
     // parent id. `None` preserves the pre-F-140 behaviour for embedders
     // that don't have an agent runtime wired up.
     instance_id: Option<forge_core::ids::AgentInstanceId>,
+    // F-744: per-turn credential bound at the orchestrator entry point and
+    // handed to `Provider::chat_with_auth` on each model step within the
+    // loop. Cloned per iteration so the original outlives the inner box;
+    // every clone (and the original) zeroizes on drop. `ProviderAuth::None`
+    // is the keyless contract for Ollama and the no-credential fallback for
+    // tests that exercise the legacy `chat()` path.
+    auth: ProviderAuth,
 ) -> Result<()> {
     // Fixed provider/model identifiers for the mock provider.
     let provider_id = ProviderId::new();
@@ -605,7 +657,14 @@ pub(crate) async fn run_request_loop<P: Provider>(
             })
             .await?;
 
-        let mut stream = provider.chat(req.clone()).await?;
+        // F-744: route through the auth seam so the per-turn credential
+        // (resolved at `run_turn` / `rerun_*` entry, propagated here as
+        // `auth`) is injected into the outbound request's auth header on
+        // every model step. `auth.clone()` is a deep clone of the inner
+        // `SecretString` — required because the loop can re-enter with a
+        // tool-result continuation that needs the same credential — but
+        // the cloned secret zeroizes on drop with the request future.
+        let mut stream = provider.chat_with_auth(req.clone(), auth.clone()).await?;
         let mut assistant_text = String::new();
         // F-599: buffer every `ChatChunk::ToolCall` emitted in this stream
         // pass and dispatch the buffered set as one batch after the stream
@@ -1600,9 +1659,17 @@ impl Orchestrator {
         // F-587: see `rerun_message`.
         credentials: Option<CredentialContext>,
     ) -> Result<MessageId> {
-        // F-587: pull the active provider's credential before regeneration
-        // begins, identical to `run_turn`. Backend errors fail the rerun.
-        pull_active_credential(&credentials).await?;
+        // F-587 / F-744: pull the active provider's credential before
+        // regeneration begins, identical to `run_turn`. Backend errors
+        // fail the rerun.
+        let pulled_secret = pull_active_credential(&credentials).await?;
+        let provider_auth = build_provider_auth(
+            credentials
+                .as_ref()
+                .map(|c| c.provider_id.as_str())
+                .unwrap_or(""),
+            pulled_secret,
+        );
 
         // Read the log up to the current tip; filter prior supersede markers
         // so a second rerun doesn't rebuild context from already-hidden
@@ -1689,6 +1756,7 @@ impl Orchestrator {
             &ctx,
             auto_approve,
             instance_id,
+            provider_auth,
         )
         .await?;
 
@@ -1742,8 +1810,15 @@ impl Orchestrator {
         // F-587: see `rerun_message`.
         credentials: Option<CredentialContext>,
     ) -> Result<MessageId> {
-        // F-587: same pull-once contract as `run_turn` / `rerun_replace`.
-        pull_active_credential(&credentials).await?;
+        // F-587 / F-744: same pull-once contract as `run_turn` / `rerun_replace`.
+        let pulled_secret = pull_active_credential(&credentials).await?;
+        let provider_auth = build_provider_auth(
+            credentials
+                .as_ref()
+                .map(|c| c.provider_id.as_str())
+                .unwrap_or(""),
+            pulled_secret,
+        );
 
         let history = read_since(&session.log_path, 0)
             .await
@@ -1822,6 +1897,7 @@ impl Orchestrator {
             &ctx,
             auto_approve,
             instance_id,
+            provider_auth,
         )
         .await?;
 
@@ -1868,8 +1944,15 @@ impl Orchestrator {
         // F-587: see `rerun_message`.
         credentials: Option<CredentialContext>,
     ) -> Result<MessageId> {
-        // F-587: same pull-once contract as `run_turn` / `rerun_replace`.
-        pull_active_credential(&credentials).await?;
+        // F-587 / F-744: same pull-once contract as `run_turn` / `rerun_replace`.
+        let pulled_secret = pull_active_credential(&credentials).await?;
+        let provider_auth = build_provider_auth(
+            credentials
+                .as_ref()
+                .map(|c| c.provider_id.as_str())
+                .unwrap_or(""),
+            pulled_secret,
+        );
 
         let history = read_since(&session.log_path, 0)
             .await
@@ -1940,6 +2023,7 @@ impl Orchestrator {
             &ctx,
             auto_approve,
             instance_id,
+            provider_auth,
         )
         .await?;
 
@@ -2903,6 +2987,7 @@ mod tests {
                 &ctx,
                 true,
                 None,
+                forge_providers::ProviderAuth::None,
             )
             .await
             .expect("turn completes");
@@ -2998,6 +3083,7 @@ mod tests {
             &ctx,
             true,
             None,
+            forge_providers::ProviderAuth::None,
         )
         .await
         .expect("turn completes");
@@ -3114,6 +3200,7 @@ mod tests {
             &ctx,
             true,
             None,
+            forge_providers::ProviderAuth::None,
         )
         .await
         .expect("turn completes");
@@ -3196,6 +3283,7 @@ mod tests {
             &ctx,
             true, // auto-approve so write.x doesn't block on a prompt
             None,
+            forge_providers::ProviderAuth::None,
         )
         .await
         .expect("turn completes");
@@ -3296,6 +3384,7 @@ mod tests {
             &ctx,
             true,
             None,
+            forge_providers::ProviderAuth::None,
         )
         .await
         .expect("turn completes");
@@ -3415,6 +3504,7 @@ mod tests {
             &ctx,
             true,
             None,
+            forge_providers::ProviderAuth::None,
         )
         .await
         .expect("first turn completes");
@@ -3452,6 +3542,7 @@ mod tests {
             &ctx,
             true,
             None,
+            forge_providers::ProviderAuth::None,
         )
         .await
         .expect("follow-up turn completes");
@@ -3566,6 +3657,7 @@ mod tests {
             &ctx,
             true,
             None,
+            forge_providers::ProviderAuth::None,
         )
         .await
         .expect("turn completes despite tool panic");

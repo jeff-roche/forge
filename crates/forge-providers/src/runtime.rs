@@ -28,7 +28,7 @@ use crate::openai::custom::CustomOpenAiProvider;
 use crate::openai::OpenAiProvider;
 #[cfg(any(test, feature = "testing"))]
 use crate::MockProvider;
-use crate::{ChatChunk, ChatRequest, Provider};
+use crate::{ChatChunk, ChatRequest, Provider, ProviderAuth};
 
 /// Tagged-union of every concrete [`Provider`] implementation. Each chat
 /// call dispatches via `match` to the appropriate inner — no dynamic
@@ -88,6 +88,35 @@ impl Provider for RuntimeProvider {
                 RuntimeProvider::CustomOpenAi(p) => Box::pin(async move { p.chat(req).await }),
                 #[cfg(any(test, feature = "testing"))]
                 RuntimeProvider::Mock(p) => Box::pin(async move { p.chat(req).await }),
+            };
+            fut.await
+        }
+    }
+
+    /// F-744: dispatch the per-turn credential to the active inner provider.
+    /// The credential is moved into the boxed future for the active variant
+    /// only — sibling variants never see it.
+    fn chat_with_auth(
+        &self,
+        req: ChatRequest,
+        auth: ProviderAuth,
+    ) -> impl std::future::Future<Output = Result<BoxStream<'static, ChatChunk>>> + Send {
+        let cloned = self.clone();
+        async move {
+            let fut: futures::future::BoxFuture<'static, _> = match cloned {
+                RuntimeProvider::Anthropic(p) => {
+                    Box::pin(async move { p.chat_with_auth(req, auth).await })
+                }
+                RuntimeProvider::OpenAi(p) => {
+                    Box::pin(async move { p.chat_with_auth(req, auth).await })
+                }
+                RuntimeProvider::CustomOpenAi(p) => {
+                    Box::pin(async move { p.chat_with_auth(req, auth).await })
+                }
+                #[cfg(any(test, feature = "testing"))]
+                RuntimeProvider::Mock(p) => {
+                    Box::pin(async move { p.chat_with_auth(req, auth).await })
+                }
             };
             fut.await
         }
@@ -164,6 +193,18 @@ impl Provider for SwappableProvider {
         //    yank the network connection out from under an active turn.
         let snapshot: RuntimeProvider = self.inner.read().clone();
         async move { snapshot.chat(req).await }
+    }
+
+    /// F-744: same snapshot semantics as [`Self::chat`]; the credential
+    /// moves into the snapshot's bound future so a mid-turn swap cannot
+    /// see or interfere with the in-flight credential.
+    fn chat_with_auth(
+        &self,
+        req: ChatRequest,
+        auth: ProviderAuth,
+    ) -> impl std::future::Future<Output = Result<BoxStream<'static, ChatChunk>>> + Send {
+        let snapshot: RuntimeProvider = self.inner.read().clone();
+        async move { snapshot.chat_with_auth(req, auth).await }
     }
 }
 

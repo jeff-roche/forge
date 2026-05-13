@@ -14,7 +14,10 @@
 use std::io;
 
 use crate::http_util::{self, HttpClientConfig};
-use crate::{ChatBlock, ChatChunk, ChatMessage, ChatRequest, ChatRole, Provider, StreamErrorKind};
+use crate::{
+    ChatBlock, ChatChunk, ChatMessage, ChatRequest, ChatRole, Provider, ProviderAuth,
+    StreamErrorKind,
+};
 use forge_core::Result;
 use futures::stream::{self, BoxStream, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
@@ -48,6 +51,20 @@ impl OllamaProvider {
 }
 
 impl Provider for OllamaProvider {
+    /// F-744: explicit no-op override. Ollama is keyless, so the
+    /// per-turn credential from the orchestrator is dropped here without
+    /// reaching the network. The default trait impl would do the same
+    /// thing, but the explicit override documents the intent and pins
+    /// the contract so a future refactor can't silently start
+    /// authenticating against a local daemon.
+    fn chat_with_auth(
+        &self,
+        req: ChatRequest,
+        _auth: ProviderAuth,
+    ) -> impl std::future::Future<Output = Result<BoxStream<'static, ChatChunk>>> + Send {
+        self.chat(req)
+    }
+
     #[tracing::instrument(
         name = "provider.chat",
         skip_all,

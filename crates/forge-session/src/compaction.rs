@@ -298,6 +298,7 @@ impl Drop for ReleaseCompactingOnDrop {
 /// call without intervening writes selects the same turns again — callers
 /// (typically the orchestrator's auto-trigger) gate on
 /// `summarizing_in_flight` to avoid that.
+#[allow(clippy::too_many_arguments)]
 pub async fn compact<P: Provider>(
     session: Arc<Session>,
     provider: Arc<P>,
@@ -306,6 +307,12 @@ pub async fn compact<P: Provider>(
     fraction: f64,
     pinned: &HashSet<MessageId>,
     trigger: CompactTrigger,
+    // F-744: auth seam threaded from the orchestrator so the privileged
+    // summary call uses the same per-turn credential as the live turn.
+    // `ProviderAuth::None` preserves the pre-F-744 behaviour for keyless
+    // providers (Ollama) and for callers that don't wire the seam
+    // (existing unit tests, embedders).
+    auth: forge_providers::ProviderAuth,
 ) -> Result<CompactionResult> {
     // Refuse to recurse: the privileged summary call below could in
     // principle drive the byte budget further, but auto-triggering must
@@ -365,7 +372,9 @@ pub async fn compact<P: Provider>(
     // the unfiltered post-cap total — used to tell the caller how much was
     // discarded via the [`Event::CompactionTruncated`] marker emitted below.
     let req = build_summary_request(&excerpt);
-    let mut stream = provider.chat(req).await?;
+    // F-744: route through the auth seam so the privileged summary call
+    // uses the per-turn credential supplied by the orchestrator.
+    let mut stream = provider.chat_with_auth(req, auth).await?;
     let mut summary_text = String::new();
     let mut truncated = false;
     let mut accumulated_bytes: u64 = 0;
@@ -748,6 +757,7 @@ mod tests {
             DEFAULT_COMPACT_FRACTION,
             &HashSet::new(),
             CompactTrigger::AutoAt98Pct,
+            forge_providers::ProviderAuth::None,
         )
         .await
         .unwrap();
@@ -823,6 +833,7 @@ mod tests {
             DEFAULT_COMPACT_FRACTION,
             &pinned,
             CompactTrigger::UserRequested,
+            forge_providers::ProviderAuth::None,
         )
         .await
         .unwrap_err();
@@ -874,6 +885,7 @@ mod tests {
             DEFAULT_COMPACT_FRACTION,
             &HashSet::new(),
             CompactTrigger::AutoAt98Pct,
+            forge_providers::ProviderAuth::None,
         )
         .await
         .unwrap();
@@ -971,6 +983,7 @@ mod tests {
             DEFAULT_COMPACT_FRACTION,
             &HashSet::new(),
             CompactTrigger::AutoAt98Pct,
+            forge_providers::ProviderAuth::None,
         )
         .await
         .unwrap();
@@ -1013,6 +1026,7 @@ mod tests {
             DEFAULT_COMPACT_FRACTION,
             &HashSet::new(),
             CompactTrigger::UserRequested,
+            forge_providers::ProviderAuth::None,
         )
         .await
         .unwrap_err();
