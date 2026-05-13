@@ -132,9 +132,18 @@ pub enum ChatChunk {
     Done(String),
     /// Terminal, structured stream failure. The chunk stream closes after
     /// yielding this variant — callers should treat the current turn as aborted.
+    ///
+    /// F-749: `status` carries the HTTP response status code when the failure
+    /// originated from an HTTP-level non-2xx response (auth, rate-limit, 5xx,
+    /// etc.). `None` indicates the failure happened at the transport / SSE
+    /// adapter / parse layer rather than as an HTTP status. Surfaced through
+    /// the orchestrator so the UI's `TurnErrorKind` classifier can distinguish
+    /// `Auth` (401) / `RateLimit` (429) / `Server` (5xx) from non-status
+    /// failures without parsing the human-readable message text.
     Error {
         kind: StreamErrorKind,
         message: String,
+        status: Option<u16>,
     },
 }
 

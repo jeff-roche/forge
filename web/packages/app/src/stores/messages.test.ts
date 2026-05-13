@@ -588,4 +588,58 @@ describe('messages store', () => {
       expect(turn.tool_count).toBeUndefined();
     });
   });
+
+  describe('TurnError events (F-749)', () => {
+    it('replaces an empty streaming assistant turn at the same message_id', () => {
+      // Mirror the orchestrator's protocol: it emits a finalised empty
+      // assistant turn immediately before the TurnError so the slot exists.
+      pushEvent(SID, { kind: 'UserMessage', text: 'hi', message_id: 'msg-1' });
+      pushEvent(SID, { kind: 'AssistantMessage', text: '', message_id: 'msg-1' });
+      pushEvent(SID, {
+        kind: 'TurnError',
+        message_id: 'msg-1',
+        error_kind: 'auth',
+        message: 'rejected',
+        retriable: false,
+      });
+      const state = getMessagesState(SID);
+      // The transcript ends up as [user, turn_error] — no dangling empty bubble.
+      expect(state.turns.map((t) => t.type)).toEqual(['user', 'turn_error']);
+      const err = state.turns[1]!;
+      if (err.type !== 'turn_error') throw new Error('expected turn_error');
+      expect(err.error_kind).toBe('auth');
+      expect(err.retriable).toBe(false);
+      expect(state.awaitingResponse).toBe(false);
+      expect(state.streamingMessageId).toBeNull();
+    });
+
+    it('appends a turn_error when no assistant placeholder exists', () => {
+      pushEvent(SID, { kind: 'UserMessage', text: 'hi', message_id: 'msg-1' });
+      pushEvent(SID, {
+        kind: 'TurnError',
+        message_id: 'msg-99',
+        error_kind: 'network',
+        message: 'transport error',
+        retriable: true,
+      });
+      const state = getMessagesState(SID);
+      expect(state.turns.map((t) => t.type)).toEqual(['user', 'turn_error']);
+    });
+
+    it('preserves retry_after_secs and raw onto the turn', () => {
+      pushEvent(SID, {
+        kind: 'TurnError',
+        message_id: 'msg-1',
+        error_kind: 'rate_limit',
+        message: 'rate limit',
+        retriable: true,
+        retry_after_secs: 17,
+        raw: 'HTTP 429: too many requests',
+      });
+      const turn = getMessagesState(SID).turns[0]!;
+      if (turn.type !== 'turn_error') throw new Error('expected turn_error');
+      expect(turn.retry_after_secs).toBe(17);
+      expect(turn.raw).toBe('HTTP 429: too many requests');
+    });
+  });
 });

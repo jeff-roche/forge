@@ -9,11 +9,12 @@ use forge_core::{
     credentials::Credentials,
     ids::{AgentInstanceId, MessageId, ProviderId, StepId, ToolCallId},
     read_since, ApprovalScope, ApprovalSource, Event, EventSink, RerunVariant, StepKind,
-    StepOutcome,
+    StepOutcome, TurnErrorKind, TURN_ERROR_RAW_CAP_BYTES,
 };
 use forge_ipc::sidecar::{SecretBytes, SidecarCredentials, SidecarMessage};
 use forge_providers::{
     ChatBlock, ChatChunk, ChatMessage, ChatRequest, ChatRole, Provider, ProviderAuth,
+    StreamErrorKind,
 };
 use futures::StreamExt;
 use secrecy::ExposeSecret;
@@ -191,6 +192,57 @@ fn build_provider_auth(provider_id: &str, pulled: Option<secrecy::SecretString>)
         Some(s) => ProviderAuth::ApiKey(s),
         None => ProviderAuth::None,
     }
+}
+
+/// F-749: classify a terminal `ChatChunk::Error` into the typed
+/// [`TurnErrorKind`] the UI dispatches on. HTTP status — when present —
+/// is authoritative (`401`/`403` → Auth, `429` → RateLimit, `5xx` → Server);
+/// otherwise the SSE / NDJSON kind decides (`LineTooLong` and stream parse
+/// failures → MalformedResponse, timeouts / transport → Network).
+///
+/// `retriable` mirrors the spec: false for auth (the credential must change
+/// first) and true for everything else. The UI gates the Retry button
+/// directly on this verdict so the classification stays in one place.
+fn classify_chunk_error(kind: StreamErrorKind, status: Option<u16>) -> (TurnErrorKind, bool) {
+    if let Some(code) = status {
+        return match code {
+            401 | 403 => (TurnErrorKind::Auth, false),
+            429 => (
+                TurnErrorKind::RateLimit {
+                    retry_after_secs: None,
+                },
+                true,
+            ),
+            500..=599 => (TurnErrorKind::Server, true),
+            _ => (TurnErrorKind::Unknown, true),
+        };
+    }
+    match kind {
+        StreamErrorKind::LineTooLong => (TurnErrorKind::MalformedResponse, true),
+        StreamErrorKind::IdleTimeout
+        | StreamErrorKind::WallClockTimeout
+        | StreamErrorKind::Transport => (TurnErrorKind::Network, true),
+    }
+}
+
+/// F-749: byte-cap the raw provider error before it lands on the event log.
+/// Drops to `None` for empty input so the wire shape omits the field
+/// (matches `serde(skip_serializing_if = "Option::is_none")`). UTF-8-safe —
+/// walks character boundaries so a multi-byte codepoint is never split.
+fn truncate_raw_error(s: &str) -> Option<String> {
+    if s.is_empty() {
+        return None;
+    }
+    if s.len() <= TURN_ERROR_RAW_CAP_BYTES {
+        return Some(s.to_string());
+    }
+    let cut = s
+        .char_indices()
+        .take_while(|(i, _)| *i < TURN_ERROR_RAW_CAP_BYTES)
+        .last()
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(0);
+    Some(format!("{}…", &s[..cut]))
 }
 
 use crate::byte_budget::ByteBudget;
@@ -725,12 +777,44 @@ pub(crate) async fn run_request_loop<P: Provider>(
                     break;
                 }
 
-                ChatChunk::Error { kind, message } => {
-                    // Stream aborted under a provider-layer bound (line cap,
-                    // idle timeout, wall-clock timeout, transport error).
-                    // Drop any buffered tool calls — they never reached
-                    // the dispatcher and emitting partial Tool* events
-                    // would leave a half-bracketed step window.
+                ChatChunk::Error {
+                    kind,
+                    message,
+                    status,
+                } => {
+                    // Stream aborted under a provider-layer bound (HTTP non-2xx,
+                    // line cap, idle timeout, wall-clock timeout, transport
+                    // error). Drop any buffered tool calls — they never reached
+                    // the dispatcher and emitting partial Tool* events would
+                    // leave a half-bracketed step window.
+                    //
+                    // F-749: emit the typed `TurnError` so the UI can render
+                    // the failure as an inline error card at the turn's slot.
+                    // The classifier maps HTTP status (when present) onto
+                    // `Auth` / `RateLimit` / `Server` and falls back on the
+                    // stream-error kind for transport / SSE classes.
+                    let (error_kind, retriable) = classify_chunk_error(kind, status);
+                    let raw = truncate_raw_error(&message);
+                    let user_facing = match &error_kind {
+                        TurnErrorKind::Auth => {
+                            "Provider rejected the credential. Open provider settings to update it.".to_string()
+                        }
+                        TurnErrorKind::RateLimit { .. } => {
+                            "Provider rate limit hit. Retry will become available shortly.".to_string()
+                        }
+                        TurnErrorKind::Network => {
+                            "Network error talking to the provider. Check your connection and retry.".to_string()
+                        }
+                        TurnErrorKind::Server => {
+                            "Provider returned a server error. Retry to see if the issue cleared.".to_string()
+                        }
+                        TurnErrorKind::MalformedResponse => {
+                            "Provider response could not be parsed. Retry to see if it recovers.".to_string()
+                        }
+                        TurnErrorKind::Unknown => {
+                            "Provider call failed. See details to diagnose.".to_string()
+                        }
+                    };
                     events
                         .emit(Event::AssistantMessage {
                             id: msg_id.clone(),
@@ -742,6 +826,16 @@ pub(crate) async fn run_request_loop<P: Provider>(
                             text: Arc::from(assistant_text.as_str()),
                             branch_parent: branch_parent.clone(),
                             branch_variant_index,
+                        })
+                        .await?;
+                    events
+                        .emit(Event::TurnError {
+                            id: msg_id.clone(),
+                            at: Utc::now(),
+                            kind: error_kind,
+                            message: user_facing,
+                            retriable,
+                            raw,
                         })
                         .await?;
                     // F-139: close the Model step with an Error outcome

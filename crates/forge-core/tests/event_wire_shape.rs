@@ -562,6 +562,147 @@ fn background_agent_completed_wire_shape() {
 }
 
 #[test]
+fn turn_error_auth_wire_shape() {
+    // F-749: auth failure surfaces as a typed `TurnError` so the UI can
+    // render the "Open provider settings" CTA card.
+    assert_wire_eq(
+        Event::TurnError {
+            id: msg_id("mid-9"),
+            at: fixed_time(),
+            kind: forge_core::TurnErrorKind::Auth,
+            message: "Provider rejected the credential.".into(),
+            retriable: false,
+            raw: Some("HTTP 401: invalid api key".into()),
+        },
+        json!({
+            "type": "turn_error",
+            "id": "mid-9",
+            "at": "2026-04-18T10:00:00Z",
+            "kind": { "kind": "auth" },
+            "message": "Provider rejected the credential.",
+            "retriable": false,
+            "raw": "HTTP 401: invalid api key",
+        }),
+    );
+}
+
+#[test]
+fn turn_error_rate_limit_with_retry_after_wire_shape() {
+    // F-749: rate-limit carries the parsed `Retry-After` seconds so the
+    // card can render a live countdown next to a disabled Retry button.
+    assert_wire_eq(
+        Event::TurnError {
+            id: msg_id("mid-10"),
+            at: fixed_time(),
+            kind: forge_core::TurnErrorKind::RateLimit {
+                retry_after_secs: Some(42),
+            },
+            message: "Provider rate limit hit.".into(),
+            retriable: true,
+            raw: None,
+        },
+        json!({
+            "type": "turn_error",
+            "id": "mid-10",
+            "at": "2026-04-18T10:00:00Z",
+            "kind": { "kind": "rate_limit", "retry_after_secs": 42 },
+            "message": "Provider rate limit hit.",
+            "retriable": true,
+        }),
+    );
+}
+
+#[test]
+fn turn_error_network_omits_raw_when_none() {
+    // F-749: `raw` is `serde(skip_serializing_if = "Option::is_none")` so
+    // the field disappears from the wire when absent.
+    assert_wire_eq(
+        Event::TurnError {
+            id: msg_id("mid-11"),
+            at: fixed_time(),
+            kind: forge_core::TurnErrorKind::Network,
+            message: "Network error.".into(),
+            retriable: true,
+            raw: None,
+        },
+        json!({
+            "type": "turn_error",
+            "id": "mid-11",
+            "at": "2026-04-18T10:00:00Z",
+            "kind": { "kind": "network" },
+            "message": "Network error.",
+            "retriable": true,
+        }),
+    );
+}
+
+#[test]
+fn turn_error_server_wire_shape() {
+    assert_wire_eq(
+        Event::TurnError {
+            id: msg_id("mid-12"),
+            at: fixed_time(),
+            kind: forge_core::TurnErrorKind::Server,
+            message: "Provider 503.".into(),
+            retriable: true,
+            raw: None,
+        },
+        json!({
+            "type": "turn_error",
+            "id": "mid-12",
+            "at": "2026-04-18T10:00:00Z",
+            "kind": { "kind": "server" },
+            "message": "Provider 503.",
+            "retriable": true,
+        }),
+    );
+}
+
+#[test]
+fn turn_error_malformed_response_wire_shape() {
+    assert_wire_eq(
+        Event::TurnError {
+            id: msg_id("mid-13"),
+            at: fixed_time(),
+            kind: forge_core::TurnErrorKind::MalformedResponse,
+            message: "Provider stream parse error.".into(),
+            retriable: true,
+            raw: None,
+        },
+        json!({
+            "type": "turn_error",
+            "id": "mid-13",
+            "at": "2026-04-18T10:00:00Z",
+            "kind": { "kind": "malformed_response" },
+            "message": "Provider stream parse error.",
+            "retriable": true,
+        }),
+    );
+}
+
+#[test]
+fn turn_error_unknown_wire_shape() {
+    assert_wire_eq(
+        Event::TurnError {
+            id: msg_id("mid-14"),
+            at: fixed_time(),
+            kind: forge_core::TurnErrorKind::Unknown,
+            message: "Unknown provider failure.".into(),
+            retriable: true,
+            raw: None,
+        },
+        json!({
+            "type": "turn_error",
+            "id": "mid-14",
+            "at": "2026-04-18T10:00:00Z",
+            "kind": { "kind": "unknown" },
+            "message": "Unknown provider failure.",
+            "retriable": true,
+        }),
+    );
+}
+
+#[test]
 fn log_line_wire_shape() {
     // Dev-mode bridge from the daemon's `tracing` subscriber to the
     // webview console. `level` is the lowercase `tracing::Level` so the
@@ -1081,6 +1222,7 @@ fn variant_label(e: &Event) -> &'static str {
         Event::SessionResumed { .. } => "session_resumed",
         Event::SessionInterrupted { .. } => "session_interrupted",
         Event::LogLine { .. } => "log_line",
+        Event::TurnError { .. } => "turn_error",
     }
 }
 

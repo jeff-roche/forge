@@ -15,10 +15,10 @@
 
 use crate::http_util::{self, HttpClientConfig};
 use crate::sse::{self, SseError, SseEvent};
-use crate::{ChatChunk, ChatRequest, Provider, ProviderAuth};
+use crate::{ChatChunk, ChatRequest, Provider, ProviderAuth, StreamErrorKind};
 use bytes::Bytes;
 use forge_core::Result;
-use futures::stream::{BoxStream, StreamExt};
+use futures::stream::{self, BoxStream, StreamExt};
 use secrecy::{ExposeSecret, SecretString};
 
 pub mod custom;
@@ -216,12 +216,22 @@ pub(crate) fn chat_request(
 
         let status = resp.status();
         if !status.is_success() {
+            // F-749: HTTP-level failure surfaces as a terminal `ChatChunk::Error`
+            // carrying the wire status code so the orchestrator can route it
+            // onto `TurnErrorKind::Auth` / `RateLimit` / `Server` without
+            // re-parsing the message text. See the matching branch on
+            // `AnthropicProvider::chat_with_auth`.
+            let code = status.as_u16();
             let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!(
-                "openai chat HTTP {status}: {}",
-                http_util::truncate(&body, 500)
-            )
-            .into());
+            let preview = http_util::truncate(&body, 500);
+            let message = format!("openai chat HTTP {status}: {preview}");
+            return Ok(Box::pin(stream::once(async move {
+                ChatChunk::Error {
+                    kind: StreamErrorKind::Transport,
+                    message,
+                    status: Some(code),
+                }
+            })) as BoxStream<'static, ChatChunk>);
         }
 
         Ok(decode_openai_stream(resp.bytes_stream(), cfg))
@@ -258,6 +268,7 @@ where
             Err(e) => vec![ChatChunk::Error {
                 kind: http_util::map_sse_error(&e),
                 message: e.to_string(),
+                status: None,
             }],
         };
         futures::stream::iter(chunks)

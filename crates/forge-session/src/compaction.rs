@@ -404,7 +404,16 @@ pub async fn compact<P: Provider>(
             ChatChunk::ToolCall { .. } => {
                 // Privileged summary call must not invoke tools — ignore.
             }
-            ChatChunk::Error { kind, message } => {
+            ChatChunk::Error {
+                kind,
+                message,
+                status,
+            } => {
+                // F-749: status is informational here — compaction is a
+                // privileged background path that already collapses every
+                // failure into one Err; the orchestrator's TurnError path
+                // doesn't route through this call.
+                let _ = status;
                 return Err(anyhow!(
                     "compact: provider stream aborted ({kind:?}): {message}"
                 ));

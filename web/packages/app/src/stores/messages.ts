@@ -105,6 +105,27 @@ export type SessionEvent =
       summary_msg_id: string;
       summarized_turns: number;
       trigger: 'AutoAt98Pct' | 'UserRequested';
+    }
+  // F-749: typed provider-call failure surfaced inline in the transcript.
+  // ChatPane renders a `<TurnErrorCard>` for each turn that hits this state
+  // at the position where the assistant response would have appeared. The
+  // store discards any partial assistant turn at `message_id` because the
+  // orchestrator's protocol guarantees no `AssistantDelta` lands after a
+  // `TurnError` — the empty bubble would otherwise dangle.
+  | {
+      kind: 'TurnError';
+      message_id: string;
+      error_kind:
+        | 'auth'
+        | 'rate_limit'
+        | 'network'
+        | 'server'
+        | 'malformed_response'
+        | 'unknown';
+      message: string;
+      retriable: boolean;
+      retry_after_secs?: number;
+      raw?: string;
     };
 
 // ---------------------------------------------------------------------------
@@ -187,6 +208,23 @@ export type ChatTurn =
       summary_msg_id: string;
       summarized_turns: number;
       trigger: 'AutoAt98Pct' | 'UserRequested';
+    }
+  // F-749: failed-turn marker. ChatPane renders the `<TurnErrorCard>` at
+  // this turn's position with action buttons keyed off `error_kind`.
+  | {
+      type: 'turn_error';
+      message_id: string;
+      error_kind:
+        | 'auth'
+        | 'rate_limit'
+        | 'network'
+        | 'server'
+        | 'malformed_response'
+        | 'unknown';
+      message: string;
+      retriable: boolean;
+      retry_after_secs?: number;
+      raw?: string;
     };
 
 // ---------------------------------------------------------------------------
@@ -703,6 +741,43 @@ export function pushEvent(sessionId: SessionId, event: SessionEvent): void {
             summarized_turns: event.summarized_turns,
             trigger: event.trigger,
           });
+        }),
+      );
+      break;
+    }
+
+    // F-749: failed turn — replace the empty/streaming assistant placeholder
+    // (the orchestrator emits an `AssistantMessage(stream_finalised=true,
+    // text="")` immediately before the `TurnError`) with the typed error
+    // turn so the card lands at the exact transcript slot the user
+    // expects. The originating user turn stays untouched.
+    case 'TurnError': {
+      setMessagesStore(
+        produce((s) => {
+          const state = s[sessionId]!;
+          const idx = state.turns.findIndex(
+            (t) => t.type === 'assistant' && t.message_id === event.message_id,
+          );
+          const next: Extract<ChatTurn, { type: 'turn_error' }> = {
+            type: 'turn_error',
+            message_id: event.message_id,
+            error_kind: event.error_kind,
+            message: event.message,
+            retriable: event.retriable,
+          };
+          if (event.retry_after_secs !== undefined) {
+            next.retry_after_secs = event.retry_after_secs;
+          }
+          if (event.raw !== undefined) {
+            next.raw = event.raw;
+          }
+          if (idx >= 0) {
+            state.turns[idx] = next;
+          } else {
+            state.turns.push(next);
+          }
+          state.streamingMessageId = null;
+          state.awaitingResponse = false;
         }),
       );
       break;

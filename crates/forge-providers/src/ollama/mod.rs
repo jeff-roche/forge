@@ -87,13 +87,19 @@ impl Provider for OllamaProvider {
                 .map_err(|e| anyhow::anyhow!("ollama chat request failed: {e}"))?;
 
             if !resp.status().is_success() {
+                // F-749: surface the HTTP status code on the error envelope
+                // so the orchestrator can classify Ollama 4xx/5xx into the
+                // matching `TurnErrorKind` (auth / rate_limit / server)
+                // without parsing the message string.
                 let status = resp.status();
+                let code = status.as_u16();
                 let body_text = resp.text().await.unwrap_or_default();
                 let preview = http_util::truncate(&body_text, 256);
                 return Ok(Box::pin(stream::once(async move {
                     ChatChunk::Error {
                         kind: StreamErrorKind::Transport,
                         message: format!("ollama HTTP {status}: {preview}"),
+                        status: Some(code),
                     }
                 })) as BoxStream<'static, ChatChunk>);
             }
@@ -110,11 +116,16 @@ impl Provider for OllamaProvider {
                         Err(e) => vec![ChatChunk::Error {
                             kind: StreamErrorKind::Transport,
                             message: format!("ollama NDJSON parse error: {e}"),
+                            // F-749: NDJSON decode failure has no HTTP status
+                            // attached; the orchestrator will classify on
+                            // `kind` instead and emit `MalformedResponse`.
+                            status: None,
                         }],
                     },
                     Err(e) => vec![ChatChunk::Error {
                         kind: StreamErrorKind::Transport,
                         message: format!("ollama stream read error: {e}"),
+                        status: None,
                     }],
                 };
                 stream::iter(chunks)

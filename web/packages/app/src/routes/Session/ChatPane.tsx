@@ -53,6 +53,7 @@ import {
 import { ApprovalPrompt } from '../../components/ApprovalPrompt/ApprovalPrompt';
 import { WhitelistedPill } from '../../components/ApprovalPrompt/WhitelistedPill';
 import { CompactButton } from './CompactButton';
+import { TurnErrorCard } from './TurnErrorCard';
 import {
   ContextPicker,
   detectAtTrigger,
@@ -1604,6 +1605,36 @@ export const ChatPane: Component<ChatPaneProps> = (props) => {
                 // the banner's `children` prop when they arrive with a
                 // matching `instance_id`; today the list is empty.
                 return <SubAgentBanner turn={turn} />;
+              case 'turn_error': {
+                // F-749: retry re-sends the originating user message as a
+                // new turn. The orchestrator's protocol guarantees the
+                // failing turn's `message_id` ties to the **immediately
+                // preceding** UserMessage event, so walking back through
+                // the transcript to find the nearest user turn before the
+                // error is sufficient. No new IPC primitive needed — the
+                // existing `sessionSendMessage` is the right call site.
+                const turns = state().turns;
+                const errorIdx = turns.findIndex(
+                  (t) => t.type === 'turn_error' && t.message_id === turn.message_id,
+                );
+                const priorUser = (() => {
+                  for (let i = errorIdx - 1; i >= 0; i--) {
+                    const t = turns[i];
+                    if (t && t.type === 'user') return t;
+                  }
+                  return null;
+                })();
+                const onRetry = (): void => {
+                  const id = sessionId();
+                  if (!id || !priorUser) return;
+                  setAwaitingResponse(id, true);
+                  setUserScrolledUp(false);
+                  sessionSendMessage(id, priorUser.text).catch((err) =>
+                    reportInvokeError(id, 'session_send_message', err),
+                  );
+                };
+                return <TurnErrorCard turn={turn} onRetry={onRetry} />;
+              }
               case 'context_compacted':
                 // F-598: inline summary marker. Anchors the user's eye to
                 // the boundary between summarized history (now collapsed

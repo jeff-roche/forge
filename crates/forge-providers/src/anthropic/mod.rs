@@ -14,10 +14,10 @@
 
 use crate::http_util::{self, HttpClientConfig};
 use crate::sse::{self, SseError, SseEvent};
-use crate::{ChatChunk, ChatRequest, Provider, ProviderAuth};
+use crate::{ChatChunk, ChatRequest, Provider, ProviderAuth, StreamErrorKind};
 use bytes::Bytes;
 use forge_core::Result;
-use futures::stream::{BoxStream, StreamExt};
+use futures::stream::{self, BoxStream, StreamExt};
 use secrecy::{ExposeSecret, SecretString};
 
 pub mod translate;
@@ -371,12 +371,22 @@ impl Provider for AnthropicProvider {
 
             let status = resp.status();
             if !status.is_success() {
+                // F-749: HTTP-level failure (401 / 429 / 5xx / …) is surfaced
+                // as a terminal `ChatChunk::Error` carrying the wire status
+                // code — not as a `Result::Err` — so the orchestrator sees a
+                // single uniform error pathway and the typed status threads
+                // straight to `TurnErrorKind` (auth / rate_limit / server).
+                let code = status.as_u16();
                 let body = resp.text().await.unwrap_or_default();
-                return Err(anyhow::anyhow!(
-                    "anthropic chat HTTP {status}: {}",
-                    http_util::truncate(&body, 500)
-                )
-                .into());
+                let preview = http_util::truncate(&body, 500);
+                let message = format!("anthropic chat HTTP {status}: {preview}");
+                return Ok(Box::pin(stream::once(async move {
+                    ChatChunk::Error {
+                        kind: StreamErrorKind::Transport,
+                        message,
+                        status: Some(code),
+                    }
+                })) as BoxStream<'static, ChatChunk>);
             }
 
             Ok(decode_anthropic_stream(resp.bytes_stream(), cfg))
@@ -433,6 +443,7 @@ where
             Err(e) => vec![ChatChunk::Error {
                 kind: http_util::map_sse_error(&e),
                 message: e.to_string(),
+                status: None,
             }],
         };
         futures::stream::iter(chunks)
