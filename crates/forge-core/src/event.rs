@@ -64,6 +64,11 @@ pub enum EndReason {
     UserExit,
     Error(String),
     Completed,
+    /// F-747: session window closed by the operator. Emitted by the daemon's
+    /// `IpcMessage::Shutdown` arm before it archives and exits. Distinct from
+    /// `UserExit` (CLI `exit`) and `Completed` (turn finished cleanly in
+    /// ephemeral mode) so subscribers can render the right transcript footer.
+    Closed,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

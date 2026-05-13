@@ -8,7 +8,7 @@
 use anyhow::{Context, Result};
 use tauri::{
     image::Image, AppHandle, Manager, RunEvent, Runtime, WebviewUrl, WebviewWindow,
-    WebviewWindowBuilder,
+    WebviewWindowBuilder, WindowEvent,
 };
 
 use crate::window_spec::WindowSpec;
@@ -240,6 +240,12 @@ pub fn run() -> Result<()> {
             // F-727: dashboard `Attach to session` picker. Returns the
             // attachable (detached) subset of `session_list`.
             crate::session_spawn_ipc::list_sessions,
+            // F-747: graceful daemon shutdown when a session window is
+            // closed. Called from the `WindowEvent::CloseRequested` hook
+            // below (registered on the same builder via `on_window_event`)
+            // and intentionally not from the dashboard — that is the
+            // window-close path's responsibility alone.
+            crate::session_close_ipc::session_close,
             // F-734: catalog `+ Add MCP server` modal. Writes a single
             // entry into the workspace or user-scope `.mcp.json` document.
             crate::mcp_ipc::add_mcp_server,
@@ -248,6 +254,55 @@ pub fn run() -> Result<()> {
             // window label other than `dashboard`.
             crate::git_ipc::git_branch,
         ])
+        // F-747: hook the window-close event so a closing session window
+        // triggers graceful daemon shutdown (Shutdown IPC → SIGTERM →
+        // SIGKILL escalation). The handler does NOT prevent close — it
+        // spawns a background tokio task running `run_session_close` and
+        // returns immediately so the user-visible window disappears
+        // instantly. Daemon cleanup races the parent app's lifecycle:
+        // if the user closes the dashboard before the task completes,
+        // `RunEvent::Exit` may interrupt it, but the daemon's own SIGTERM
+        // signal handler still runs `archive_or_purge` so no resources
+        // leak.
+        .on_window_event(|window, event| {
+            if !matches!(event, WindowEvent::CloseRequested { .. }) {
+                return;
+            }
+            let label = window.label().to_string();
+            let Some(session_id) = label.strip_prefix("session-").map(str::to_string) else {
+                return;
+            };
+            let app_handle = window.app_handle().clone();
+            // `tauri::async_runtime::spawn` posts onto Tauri's owned tokio
+            // runtime — the tao event loop calling `on_window_event` is NOT
+            // necessarily inside a tokio context, so a bare `tokio::spawn`
+            // here would panic. The handler returns immediately so the
+            // window-close UX stays instant; daemon reaping races the
+            // parent app's lifecycle (see the `RunEvent::Exit` flush below).
+            tauri::async_runtime::spawn(async move {
+                let state = match app_handle.try_state::<crate::ipc::BridgeState>() {
+                    Some(s) => s,
+                    None => {
+                        tracing::warn!(
+                            target: "forge_shell::window_manager",
+                            session_id = %session_id,
+                            "session window closed but BridgeState not managed; daemon will be left running",
+                        );
+                        return;
+                    }
+                };
+                if let Err(e) =
+                    crate::session_close_ipc::run_session_close(&state.bridge, &session_id).await
+                {
+                    tracing::warn!(
+                        target: "forge_shell::window_manager",
+                        session_id = %session_id,
+                        error = %e,
+                        "session_close orchestration failed on window close",
+                    );
+                }
+            });
+        })
         .setup(|app| {
             crate::ipc::manage_bridge(&app.handle().clone());
             crate::ipc::manage_terminals(&app.handle().clone());

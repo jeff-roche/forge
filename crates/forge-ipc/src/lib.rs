@@ -158,7 +158,23 @@ pub enum IpcMessage {
     /// In-flight turns finish on the previous provider — see
     /// `SwappableProvider::swap` for the exact semantic.
     SwitchProvider(SwitchProvider),
+    /// F-747: client → session request for graceful daemon shutdown.
+    /// Emitted by the Tauri shell's `session_close` IPC when the operator
+    /// closes a session window. The daemon emits
+    /// `Event::SessionEnded { reason: Closed }`, archives the session dir,
+    /// removes the UDS socket + pid file, and exits with status 0.
+    /// Idempotent on the daemon side: a second `Shutdown` frame received
+    /// after the shutdown signal fires is dropped silently by the broken
+    /// connection — the shell tolerates the resulting "connection refused"
+    /// and treats the session as already closed.
+    Shutdown(Shutdown),
 }
+
+/// F-747: client → session: graceful shutdown request. No fields today —
+/// the daemon resolves the session from the connection. Mirror of
+/// [`PauseSession`] / [`ResumeSession`] in shape.
+#[derive(Debug, Serialize, Deserialize, Default, Clone, PartialEq, Eq)]
+pub struct Shutdown {}
 
 /// F-640: client → session: swap the in-process `SwappableProvider`'s
 /// inner. `provider_id` matches the dashboard's `[providers.active]`
@@ -729,6 +745,26 @@ mod tests {
             "deadline did not fire promptly: {:?}",
             elapsed
         );
+    }
+
+    /// F-747: pin the wire shape of `Shutdown`. The Tauri shell's
+    /// `session_close` IPC emits this frame to request graceful daemon
+    /// shutdown; any drift here would break the window-close → daemon-exit
+    /// chain silently and leak orphaned `forged` processes.
+    #[test]
+    fn shutdown_serializes_to_pinned_shape() {
+        let msg = IpcMessage::Shutdown(Shutdown::default());
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(json, r#"{"t":"Shutdown"}"#);
+    }
+
+    #[tokio::test]
+    async fn shutdown_round_trips_over_unix_stream() {
+        let (mut a, mut b) = UnixStream::pair().unwrap();
+        let sent = IpcMessage::Shutdown(Shutdown::default());
+        write_frame(&mut a, &sent).await.unwrap();
+        let got: IpcMessage = read_frame(&mut b).await.unwrap();
+        assert!(matches!(got, IpcMessage::Shutdown(_)));
     }
 
     /// F-640: pin the wire shape of `SwitchProvider`. The dashboard's
