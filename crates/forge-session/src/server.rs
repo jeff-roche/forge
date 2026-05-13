@@ -83,8 +83,21 @@ fn idle_timeout() -> Duration {
 /// `AgentScope::User`; the synthesized root uses `Isolation::Process`),
 /// so we unwrap the spawn error into an `eprintln` rather than
 /// propagating.
-async fn build_agent_runtime(workspace_path: Option<&Path>) -> Option<AgentRuntime> {
-    let user_home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+///
+/// `user_home_override` is the same test-isolation seam used by
+/// [`load_mcp_manager`]: when `Some`, the user-scope `~/.agents/` loader
+/// reads from this directory instead of `dirs::home_dir()`. Production
+/// callers pass `None`. Without this seam, a developer with personal
+/// agent defs in `~/.agents/` would see them merged into test fixtures
+/// and break length-sensitive assertions.
+async fn build_agent_runtime(
+    workspace_path: Option<&Path>,
+    user_home_override: Option<&Path>,
+) -> Option<AgentRuntime> {
+    let user_home = user_home_override
+        .map(Path::to_path_buf)
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(|| PathBuf::from("/"));
     // Workspace-anchored load when we have one; fall back to user-only so
     // embedder-less sessions (tests, ephemeral CLI runs) still get agent
     // defs the user has authored.
@@ -990,7 +1003,8 @@ pub async fn serve_with_session_swappable<P: Provider + 'static>(
     // F-601: built before the dispatcher cache so the active agent's
     // `memory_enabled` flag can decide whether `memory.write` registers
     // and whether the memory body is appended to the system prompt.
-    let agent_runtime: Option<AgentRuntime> = build_agent_runtime(workspace_path.as_deref()).await;
+    let agent_runtime: Option<AgentRuntime> =
+        build_agent_runtime(workspace_path.as_deref(), user_home_override.as_deref()).await;
 
     // F-602: consult the user's `[memory.enabled.<agent>]` settings entry
     // before deciding whether memory is on. The Dashboard's Memory toggle

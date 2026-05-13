@@ -2570,7 +2570,7 @@ async fn resolve_bg_session<R: Runtime>(
 
     // Lazy init — workspace root is the authoritative source for agent defs.
     let workspace_root = cached_workspace_root(state, session_id).await?;
-    let user_home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    let user_home = resolve_user_home_dir(state);
 
     let defs = forge_agents::load_agents(&workspace_root, &user_home)
         .map_err(|e| format!("load agent defs: {e}"))?;
