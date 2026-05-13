@@ -342,6 +342,37 @@ describe('<ProvidersPage> (F-729)', () => {
       expect(title).toContain('Add provider modal');
     });
 
+    it('pre-F-755 payload with has_credential true but model missing renders the generic unconfigured copy (F-755 review)', async () => {
+      // Locks in the consolidated tooltip logic: when `credential_state`
+      // is absent and `has_credential` is true, the resolved state is
+      // `'present'`, so `rowTooltip`'s auth branch (entered because
+      // `model_available` is false) must NOT mention "needs an API key"
+      // or "keyring" — both of those would be a regression of the
+      // divergence the F-755 code reviewer flagged. The pill stays at
+      // `auth` via `pillVariant`'s `!model_available` arm, and the
+      // tooltip falls through to the generic copy.
+      const legacyRow: ProviderEntry = {
+        id: 'openai',
+        display_name: 'OpenAI',
+        credential_required: true,
+        has_credential: true,
+        model_available: false,
+        enabled: true,
+      };
+      setInvokeForTesting(
+        (async (cmd: string) => {
+          if (cmd === 'dashboard_list_providers') return [legacyRow];
+          return undefined;
+        }) as never,
+      );
+      const { findAllByTestId } = renderPage();
+      const rows = await findAllByTestId('provider-row');
+      const title = rows[0]?.getAttribute('title') ?? '';
+      expect(title).not.toContain('needs an API key');
+      expect(title.toLowerCase()).not.toContain('keyring');
+      expect(title).toContain('is unconfigured');
+    });
+
     it('present-credential row tooltip reads as ready', async () => {
       const readyRow: ProviderEntry = {
         id: 'anthropic',

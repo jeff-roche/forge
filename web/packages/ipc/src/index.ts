@@ -15,6 +15,7 @@ export type { ApprovalLevel } from './generated/ApprovalLevel';
 export type { ApprovalScope } from './generated/ApprovalScope';
 export type { CatalogSettings } from './generated/CatalogSettings';
 export type { CompactTrigger } from './generated/CompactTrigger';
+export type { CredentialState } from './generated/CredentialState';
 export type { CustomOpenAiConfig } from './generated/CustomOpenAiConfig';
 export type { DashboardSettings } from './generated/DashboardSettings';
 export type { FetchedUrl } from './generated/FetchedUrl';

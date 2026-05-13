@@ -4,7 +4,9 @@
 // change.
 
 import { invoke } from '../lib/tauri';
-import type { GitBranchOutput } from '@forge/ipc';
+import type { CredentialState, GitBranchOutput } from '@forge/ipc';
+
+export type { CredentialState };
 
 // ---------------------------------------------------------------------------
 // Sessions
@@ -49,24 +51,6 @@ export async function openSession(id: string): Promise<void> {
 // ---------------------------------------------------------------------------
 // Provider selection (F-586)
 // ---------------------------------------------------------------------------
-
-/**
- * F-755: tri-state credential probe result. `has_credential: boolean`
- * collapsed "the keyring backend errored" onto the same value as "no
- * entry stored", leaving the Providers page unable to distinguish them.
- * `CredentialState` carries the third state so the UI can render
- * targeted remediation copy:
- *   - `present`        — the credential is stored and reachable
- *   - `missing`        — `store.has(...)` returned `Ok(false)` (add an API key)
- *   - `backend_error`  — `store.has(...)` returned `Err(_)` (unlock the
- *                        keyring, start gnome-keyring-daemon, etc.)
- *
- * For rows where credentials are irrelevant (Vertex, keyless
- * `custom_openai:<name>`), the shell reports `'present'` so the
- * `credential_required && credential_state !== 'present'` predicate
- * trivially falls through to "ready".
- */
-export type CredentialState = 'present' | 'missing' | 'backend_error';
 
 /**
  * One row of `dashboard_list_providers`. Stable id (slug), display name,

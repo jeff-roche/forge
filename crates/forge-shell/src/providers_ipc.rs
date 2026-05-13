@@ -181,7 +181,8 @@ const BUILTIN_PROVIDERS: &[BuiltinDescriptor] = &[
 /// are irrelevant (Vertex / keyless `custom_openai:<name>`), the state is
 /// reported as `Present` so the UI predicate (`credential_required &&
 /// credential_state !== 'present'`) cleanly falls through to "ready".
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
 #[serde(rename_all = "snake_case")]
 pub enum CredentialState {
     Present,
