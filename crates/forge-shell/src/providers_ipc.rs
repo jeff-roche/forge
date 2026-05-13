@@ -167,6 +167,29 @@ const BUILTIN_PROVIDERS: &[BuiltinDescriptor] = &[
     // loop below; users add new ones through the Add Provider modal.
 ];
 
+/// F-755: tri-state credential probe result. The dashboard collapsed
+/// "missing entry" and "keyring backend failed" onto a single
+/// `has_credential = false` signal, leaving the Providers page unable to
+/// tell the user which remediation actually applies (add an API key vs
+/// unlock the keyring). `CredentialState` carries the distinction across
+/// the wire so `ProvidersPage` can render targeted copy per shape.
+///
+/// `Present` and `Missing` map 1:1 to the historical `has_credential =
+/// true / false` values for credentialed providers. `BackendError` is the
+/// new third state: the credential store errored (locked keyring, Secret
+/// Service down, dbus auth required, etc.). For rows where credentials
+/// are irrelevant (Vertex / keyless `custom_openai:<name>`), the state is
+/// reported as `Present` so the UI predicate (`credential_required &&
+/// credential_state !== 'present'`) cleanly falls through to "ready".
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../../../web/packages/ipc/src/generated/")]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialState {
+    Present,
+    Missing,
+    BackendError,
+}
+
 /// One row of the `dashboard_list_providers` response — what the dashboard renders
 /// per card.
 ///
@@ -178,9 +201,11 @@ const BUILTIN_PROVIDERS: &[BuiltinDescriptor] = &[
 ///
 /// `has_credential` is `false` when the keyring backend reports no entry
 /// for the provider id, when the backend is unavailable (treated as
-/// "absent" by contract), or when the credential is irrelevant. The
-/// dashboard renders the warning glyph only when
-/// `credential_required && !has_credential`.
+/// "absent" by contract), or when the credential is irrelevant. Kept on
+/// the wire for back-compat with pre-F-755 consumers — F-755 readers
+/// should prefer `credential_state`, which distinguishes "missing entry"
+/// from "backend unreachable". The dashboard renders the warning glyph
+/// only when `credential_required && credential_state != Present`.
 ///
 /// `endpoint` is populated only for `custom_openai:<name>` rows so the
 /// Providers page's Edit dialog can pre-fill its inputs from the row
@@ -191,6 +216,8 @@ pub struct ProviderEntry {
     pub display_name: String,
     pub credential_required: bool,
     pub has_credential: bool,
+    /// F-755: tri-state credential probe. See [`CredentialState`].
+    pub credential_state: CredentialState,
     pub model_available: bool,
     /// Optional human-readable model id for the dashboard's secondary line
     /// (e.g. the configured `model` field of a `[providers.custom_openai.X]`
@@ -230,13 +257,16 @@ fn default_enabled_true() -> bool {
 /// drive every shape (missing keys, unavailable backend, custom entries,
 /// etc.) without a live keyring.
 ///
-/// `cred_present(id)` returns `true` when the credential store reported
-/// the entry as present. Backend-failure callers should pass a closure
-/// that returns `false` for every id — matching the spec's "if the keyring
-/// backend is unavailable, treat as `false`".
+/// `cred_probe(id)` returns the tri-state probe outcome
+/// ([`CredentialState`]): `Present` when the store reports the entry is
+/// stored, `Missing` when the store reports no entry, `BackendError`
+/// when the store errored (keyring locked, Secret Service unreachable).
+/// `has_credential` on the resulting row is derived as
+/// `credential_state == Present` so pre-F-755 consumers retain their
+/// bool-shape view unchanged.
 pub fn build_provider_list(
     settings: &forge_core::settings::AppSettings,
-    cred_present: impl Fn(&str) -> bool,
+    cred_probe: impl Fn(&str) -> CredentialState,
 ) -> Vec<ProviderEntry> {
     // A built-in only appears in the list when the user has explicitly
     // added it — i.e. `providers.enabled.<id>` is present (with any bool
@@ -285,20 +315,23 @@ pub fn build_provider_list(
                 // = false` so the dashboard does NOT prompt for an API key.
                 let is_vertex = matches!(auth_kind, Some(forge_core::BuiltinAuthKind::Vertex));
                 let effective_credential_required = descriptor.credential_required && !is_vertex;
+                // Probe the keychain only when a credential is actually
+                // required — ADC-backed (Vertex) rows skip the probe and
+                // report `Present` so the dashboard's pill predicate
+                // (`credential_required && credential_state != Present`)
+                // trivially falls through to `ready`.
+                let credential_state = if effective_credential_required {
+                    cred_probe(id)
+                } else {
+                    CredentialState::Present
+                };
                 ProviderEntry {
                     id: id.to_string(),
                     display_name,
                     credential_required: effective_credential_required,
-                    // Probe the keychain only when a credential is actually
-                    // required — ADC-backed (Vertex) rows report `false` and
-                    // the dashboard's pill predicate
-                    // (`credential_required && !has_credential`) trivially
-                    // falls through to `ready`.
-                    has_credential: if effective_credential_required {
-                        cred_present(id)
-                    } else {
-                        false
-                    },
+                    has_credential: matches!(credential_state, CredentialState::Present)
+                        && effective_credential_required,
+                    credential_state,
                     // Built-ins always claim a model is available — the daemon
                     // ships a default and the orchestrator resolves the concrete
                     // model id at request time. Per-instance overrides land via
@@ -348,13 +381,22 @@ pub fn build_provider_list(
     for (name, entry) in &settings.providers.custom_openai {
         let id = format!("{CUSTOM_OPENAI_PREFIX}{name}");
         let model_available = !entry.model.is_empty();
+        let credential_required =
+            !matches!(entry.auth, forge_core::settings::AuthShapeSettings::None);
+        // Keyless custom_openai rows (e.g. local Ollama via auth = none)
+        // skip the probe — the credential is irrelevant — and report
+        // `Present` so the pill / tooltip flow falls through to "ready".
+        let credential_state = if credential_required {
+            cred_probe(&id)
+        } else {
+            CredentialState::Present
+        };
         out.push(ProviderEntry {
             display_name: format!("{} — {}", PROVIDER_CUSTOM_OPENAI, name),
-            credential_required: !matches!(
-                entry.auth,
-                forge_core::settings::AuthShapeSettings::None
-            ),
-            has_credential: cred_present(&id),
+            credential_required,
+            has_credential: matches!(credential_state, CredentialState::Present)
+                && credential_required,
+            credential_state,
             model_available,
             model: if model_available {
                 Some(entry.model.clone())
@@ -480,13 +522,31 @@ pub fn validate_provider_id(provider_id: &str) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "webview")]
-async fn cred_presence_map(store: &Arc<dyn Credentials>, ids: &[String]) -> Vec<(String, bool)> {
+async fn cred_presence_map(
+    store: &Arc<dyn Credentials>,
+    ids: &[String],
+) -> Vec<(String, CredentialState)> {
     use futures::future::join_all;
     let probes = ids.iter().map(|id| async move {
-        // F-587 contract: Ok(None) → false, Err(_) → false (treat as absent
-        // when the backend is unavailable, per the F-586 spec).
-        let present = store.has(id).await.unwrap_or(false);
-        (id.clone(), present)
+        // F-755: tri-state probe — distinguish "no entry" from "backend
+        // unreachable" so the Providers page can render targeted
+        // remediation copy. Pre-F-755 the `Err(_)` arm collapsed onto
+        // `false`, telling the user to add an API key when the
+        // actionable fix was to unlock their keyring.
+        let state = match store.has(id).await {
+            Ok(true) => CredentialState::Present,
+            Ok(false) => CredentialState::Missing,
+            Err(e) => {
+                tracing::warn!(
+                    target: "forge_shell::providers::credentials",
+                    provider_id = %id,
+                    error = %e,
+                    "credential presence probe failed; reporting backend_error to dashboard",
+                );
+                CredentialState::BackendError
+            }
+        };
+        (id.clone(), state)
     });
     join_all(probes).await
 }
@@ -518,10 +578,18 @@ pub async fn dashboard_list_providers<R: Runtime>(
     }
     let store = creds.store();
     let presence = cred_presence_map(&store, &ids).await;
-    let presence_map: std::collections::HashMap<String, bool> = presence.into_iter().collect();
+    let presence_map: std::collections::HashMap<String, CredentialState> =
+        presence.into_iter().collect();
 
     Ok(build_provider_list(&settings, |id| {
-        presence_map.get(id).copied().unwrap_or(false)
+        // Unprobed ids (rare race: a new section appears between the
+        // probe pass and `build_provider_list`) fall back to `Missing`
+        // — same conservative bias the pre-F-755 `unwrap_or(false)`
+        // already applied.
+        presence_map
+            .get(id)
+            .copied()
+            .unwrap_or(CredentialState::Missing)
     }))
 }
 
@@ -891,9 +959,13 @@ pub async fn add_provider<R: Runtime>(
         .map_err(|e| format!("{ADD_PROVIDER_ERROR}{e}"))?;
     let store = creds.store();
     let presence = cred_presence_map(&store, std::slice::from_ref(&input.id)).await;
-    let presence_map: std::collections::HashMap<String, bool> = presence.into_iter().collect();
+    let presence_map: std::collections::HashMap<String, CredentialState> =
+        presence.into_iter().collect();
     let rows = build_provider_list(&settings, |id| {
-        presence_map.get(id).copied().unwrap_or(false)
+        presence_map
+            .get(id)
+            .copied()
+            .unwrap_or(CredentialState::Missing)
     });
     rows.into_iter().find(|r| r.id == input.id).ok_or_else(|| {
         format!(
@@ -1486,9 +1558,13 @@ pub async fn update_provider<R: Runtime>(
         .map_err(|e| format!("{UPDATE_PROVIDER_ERROR}{e}"))?;
     let store = creds.store();
     let presence = cred_presence_map(&store, std::slice::from_ref(&input.id)).await;
-    let presence_map: std::collections::HashMap<String, bool> = presence.into_iter().collect();
+    let presence_map: std::collections::HashMap<String, CredentialState> =
+        presence.into_iter().collect();
     let rows = build_provider_list(&settings, |id| {
-        presence_map.get(id).copied().unwrap_or(false)
+        presence_map
+            .get(id)
+            .copied()
+            .unwrap_or(CredentialState::Missing)
     });
     rows.into_iter().find(|r| r.id == input.id).ok_or_else(|| {
         format!(
@@ -1833,7 +1909,7 @@ mod tests {
     #[test]
     fn build_provider_list_emits_builtins_in_stable_order() {
         let s = settings_with_all_builtins_enabled();
-        let entries = build_provider_list(&s, |_| false);
+        let entries = build_provider_list(&s, |_| CredentialState::Missing);
         let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
         assert_eq!(
             ids,
@@ -1848,11 +1924,11 @@ mod tests {
         // Adding a provider through the Add modal writes the key; only then
         // does the row appear.
         let s = empty_settings();
-        assert!(build_provider_list(&s, |_| false).is_empty());
+        assert!(build_provider_list(&s, |_| CredentialState::Missing).is_empty());
 
         let mut s = empty_settings();
         s.providers.enabled.insert("anthropic".into(), true);
-        let entries = build_provider_list(&s, |_| false);
+        let entries = build_provider_list(&s, |_| CredentialState::Missing);
         let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
         assert_eq!(ids, vec!["anthropic"], "only the added built-in is listed");
     }
@@ -1860,7 +1936,13 @@ mod tests {
     #[test]
     fn build_provider_list_marks_anthropic_credential_present_when_store_says_so() {
         let s = settings_with_all_builtins_enabled();
-        let entries = build_provider_list(&s, |id| id == "anthropic");
+        let entries = build_provider_list(&s, |id| {
+            if id == "anthropic" {
+                CredentialState::Present
+            } else {
+                CredentialState::Missing
+            }
+        });
         let anthropic = entries.iter().find(|e| e.id == "anthropic").unwrap();
         assert!(anthropic.credential_required);
         assert!(anthropic.has_credential);
@@ -1887,7 +1969,7 @@ mod tests {
         );
         // Even if cred_present claims true (it won't — there's no entry),
         // the credential_required flag must be false for vertex rows.
-        let entries = build_provider_list(&s, |_| false);
+        let entries = build_provider_list(&s, |_| CredentialState::Missing);
         let row = entries
             .iter()
             .find(|e| e.id == "anthropic:vertex-work")
@@ -1906,7 +1988,7 @@ mod tests {
         s.providers
             .enabled
             .insert("anthropic:work".to_string(), true);
-        let entries = build_provider_list(&s, |_| false);
+        let entries = build_provider_list(&s, |_| CredentialState::Missing);
         let row = entries
             .iter()
             .find(|e| e.id == "anthropic:work")
@@ -1920,13 +2002,112 @@ mod tests {
     #[test]
     fn build_provider_list_treats_keyring_failure_as_absent() {
         // Spec: "if the keyring backend is unavailable, treat as `false`".
+        // F-755 keeps the `has_credential = false` contract for pre-F-755
+        // consumers and adds `credential_state = BackendError` for new
+        // consumers (Providers page) so the locked-keyring case can be
+        // distinguished from the missing-entry case.
         let s = settings_with_all_builtins_enabled();
-        let entries = build_provider_list(&s, |_| false);
+        let entries = build_provider_list(&s, |_| CredentialState::BackendError);
         for e in &entries {
             if e.credential_required {
                 assert!(!e.has_credential, "{e:?}");
+                assert_eq!(e.credential_state, CredentialState::BackendError, "{e:?}");
             }
         }
+    }
+
+    /// F-755: missing-entry probe surfaces `credential_state = Missing`.
+    /// `has_credential = false` is retained for pre-F-755 consumers.
+    #[test]
+    fn build_provider_list_surfaces_missing_credential_state() {
+        let s = settings_with_all_builtins_enabled();
+        let entries = build_provider_list(&s, |_| CredentialState::Missing);
+        for e in &entries {
+            if e.credential_required {
+                assert!(!e.has_credential, "{e:?}");
+                assert_eq!(e.credential_state, CredentialState::Missing, "{e:?}");
+            }
+        }
+    }
+
+    /// F-755: present-entry probe surfaces `credential_state = Present` and
+    /// keeps `has_credential = true`.
+    #[test]
+    fn build_provider_list_surfaces_present_credential_state() {
+        let s = settings_with_all_builtins_enabled();
+        let entries = build_provider_list(&s, |_| CredentialState::Present);
+        for e in &entries {
+            if e.credential_required {
+                assert!(e.has_credential, "{e:?}");
+                assert_eq!(e.credential_state, CredentialState::Present, "{e:?}");
+            }
+        }
+    }
+
+    /// F-755: Vertex rows skip the probe entirely (gcloud ADC supplies
+    /// auth at request time) and report `credential_state = Present` so
+    /// the dashboard pill predicate (`credential_required && state !=
+    /// Present`) falls through to "ready". Even when the closure would
+    /// have reported a backend error, Vertex stays `Present`.
+    #[test]
+    fn build_provider_list_vertex_anthropic_reports_present_credential_state() {
+        let mut s = forge_core::settings::AppSettings::default();
+        s.providers
+            .enabled
+            .insert("anthropic:vertex-work".to_string(), true);
+        s.providers.anthropic.insert(
+            "vertex-work".to_string(),
+            forge_core::BuiltinInstanceEntry {
+                auth_kind: forge_core::BuiltinAuthKind::Vertex,
+                vertex_project: Some("my-proj".to_string()),
+                vertex_region: Some("us-central1".to_string()),
+            },
+        );
+        let entries = build_provider_list(&s, |_| CredentialState::BackendError);
+        let row = entries
+            .iter()
+            .find(|e| e.id == "anthropic:vertex-work")
+            .expect("vertex instance row");
+        assert!(!row.credential_required);
+        assert_eq!(row.credential_state, CredentialState::Present, "{row:?}");
+    }
+
+    /// F-755: keyless `custom_openai:<name>` rows (auth = none) skip the
+    /// probe — the credential is irrelevant — and report
+    /// `credential_state = Present` for the same reason as Vertex rows.
+    #[test]
+    fn build_provider_list_keyless_custom_openai_reports_present_credential_state() {
+        let s = settings_with_custom(
+            "ollama",
+            CustomOpenAiEntry {
+                base_url: "http://127.0.0.1:11434".into(),
+                model: "qwen2.5".into(),
+                model_list: vec![],
+                auth: AuthShapeSettings::None,
+                api_key: None,
+            },
+        );
+        let entries = build_provider_list(&s, |_| CredentialState::BackendError);
+        let row = entries
+            .iter()
+            .find(|e| e.id == "custom_openai:ollama")
+            .expect("keyless custom_openai row");
+        assert!(!row.credential_required);
+        assert_eq!(row.credential_state, CredentialState::Present, "{row:?}");
+    }
+
+    /// F-755: wire-format pin. Serde renames `BackendError` to
+    /// `backend_error` so the TS surface can match on snake_case
+    /// alongside `present` / `missing`. Pinned to guard against a future
+    /// `#[serde(rename_all = ...)]` drift.
+    #[test]
+    fn credential_state_serializes_snake_case() {
+        let json_present = serde_json::to_string(&CredentialState::Present).unwrap();
+        let json_missing = serde_json::to_string(&CredentialState::Missing).unwrap();
+        let json_backend = serde_json::to_string(&CredentialState::BackendError).unwrap();
+        assert_eq!(json_present, "\"present\"");
+        assert_eq!(json_missing, "\"missing\"");
+        assert_eq!(json_backend, "\"backend_error\"");
     }
 
     #[test]
@@ -1944,7 +2125,7 @@ mod tests {
         for id in &[PROVIDER_ANTHROPIC, PROVIDER_OPENAI] {
             s.providers.enabled.insert((*id).to_string(), true);
         }
-        let entries = build_provider_list(&s, |_| false);
+        let entries = build_provider_list(&s, |_| CredentialState::Missing);
         assert_eq!(entries.len(), 3);
         let custom = entries.last().unwrap();
         assert_eq!(custom.id, "custom_openai:vllm-local");
@@ -1966,7 +2147,13 @@ mod tests {
                 api_key: Some("sk-test".into()),
             },
         );
-        let entries = build_provider_list(&s, |id| id == "custom_openai:together");
+        let entries = build_provider_list(&s, |id| {
+            if id == "custom_openai:together" {
+                CredentialState::Present
+            } else {
+                CredentialState::Missing
+            }
+        });
         let custom = entries
             .iter()
             .find(|e| e.id == "custom_openai:together")
@@ -1987,7 +2174,7 @@ mod tests {
                 api_key: None,
             },
         );
-        let entries = build_provider_list(&s, |_| false);
+        let entries = build_provider_list(&s, |_| CredentialState::Missing);
         let custom = entries
             .iter()
             .find(|e| e.id == "custom_openai:stub")
@@ -2700,7 +2887,7 @@ model = "m"
     fn build_provider_list_reports_disabled_when_flag_is_false() {
         let mut s = settings_with_all_builtins_enabled();
         s.providers.enabled.insert("anthropic".into(), false);
-        let entries = build_provider_list(&s, |_| false);
+        let entries = build_provider_list(&s, |_| CredentialState::Missing);
         let anthropic = entries.iter().find(|e| e.id == "anthropic").unwrap();
         assert!(!anthropic.enabled);
         // Other built-ins keep their persisted `true`.

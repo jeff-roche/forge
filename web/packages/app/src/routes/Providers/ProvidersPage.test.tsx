@@ -256,6 +256,148 @@ describe('<ProvidersPage> (F-729)', () => {
       expect(queryByTestId('active-badge-openai')).toBeNull();
     });
 
+    // -----------------------------------------------------------------
+    // F-755: credential_state distinguishes missing-entry vs keyring-locked
+    // -----------------------------------------------------------------
+
+    it('keyring-locked row tooltip names the backend failure (F-755)', async () => {
+      const lockedRow: ProviderEntry = {
+        id: 'anthropic',
+        display_name: 'Anthropic',
+        credential_required: true,
+        has_credential: false,
+        credential_state: 'backend_error',
+        model_available: true,
+        model: 'claude-sonnet-4',
+        enabled: true,
+      };
+      setInvokeForTesting(
+        (async (cmd: string) => {
+          if (cmd === 'dashboard_list_providers') return [lockedRow];
+          return undefined;
+        }) as never,
+      );
+      const { findAllByTestId } = renderPage();
+      const rows = await findAllByTestId('provider-row');
+      const title = rows[0]?.getAttribute('title') ?? '';
+      // The remediation must NOT route the user to the Add-provider
+      // modal — a key may already be stored; the actionable fix is
+      // unlocking the keyring.
+      expect(title).not.toContain('Add provider modal');
+      expect(title).not.toContain('needs an API key');
+      // It MUST name the backend failure and offer at least one
+      // OS-specific remediation pointer.
+      expect(title.toLowerCase()).toContain('credential store is unreachable');
+      expect(title.toLowerCase()).toMatch(/keyring|secret service|credential manager|login keychain/);
+    });
+
+    it('missing-entry row tooltip points at the Add provider modal (F-755 back-compat)', async () => {
+      const missingRow: ProviderEntry = {
+        id: 'anthropic',
+        display_name: 'Anthropic',
+        credential_required: true,
+        has_credential: false,
+        credential_state: 'missing',
+        model_available: true,
+        model: 'claude-sonnet-4',
+        enabled: true,
+      };
+      setInvokeForTesting(
+        (async (cmd: string) => {
+          if (cmd === 'dashboard_list_providers') return [missingRow];
+          return undefined;
+        }) as never,
+      );
+      const { findAllByTestId } = renderPage();
+      const rows = await findAllByTestId('provider-row');
+      const title = rows[0]?.getAttribute('title') ?? '';
+      expect(title).toContain('needs an API key');
+      expect(title).toContain('Add provider modal');
+      expect(title.toLowerCase()).not.toContain('keyring');
+    });
+
+    it('pre-F-755 payloads (no credential_state) fall back to has_credential', async () => {
+      // Legacy fixture: credential_state absent. The Providers page must
+      // not crash and must keep the historical missing-entry copy when
+      // has_credential is false.
+      const legacyRow: ProviderEntry = {
+        id: 'openai',
+        display_name: 'OpenAI',
+        credential_required: true,
+        has_credential: false,
+        model_available: true,
+        model: 'gpt-4',
+        enabled: true,
+      };
+      setInvokeForTesting(
+        (async (cmd: string) => {
+          if (cmd === 'dashboard_list_providers') return [legacyRow];
+          return undefined;
+        }) as never,
+      );
+      const { findAllByTestId } = renderPage();
+      const rows = await findAllByTestId('provider-row');
+      const title = rows[0]?.getAttribute('title') ?? '';
+      expect(title).toContain('needs an API key');
+      expect(title).toContain('Add provider modal');
+    });
+
+    it('pre-F-755 payload with has_credential true but model missing renders the generic unconfigured copy (F-755 review)', async () => {
+      // Locks in the consolidated tooltip logic: when `credential_state`
+      // is absent and `has_credential` is true, the resolved state is
+      // `'present'`, so `rowTooltip`'s auth branch (entered because
+      // `model_available` is false) must NOT mention "needs an API key"
+      // or "keyring" — both of those would be a regression of the
+      // divergence the F-755 code reviewer flagged. The pill stays at
+      // `auth` via `pillVariant`'s `!model_available` arm, and the
+      // tooltip falls through to the generic copy.
+      const legacyRow: ProviderEntry = {
+        id: 'openai',
+        display_name: 'OpenAI',
+        credential_required: true,
+        has_credential: true,
+        model_available: false,
+        enabled: true,
+      };
+      setInvokeForTesting(
+        (async (cmd: string) => {
+          if (cmd === 'dashboard_list_providers') return [legacyRow];
+          return undefined;
+        }) as never,
+      );
+      const { findAllByTestId } = renderPage();
+      const rows = await findAllByTestId('provider-row');
+      const title = rows[0]?.getAttribute('title') ?? '';
+      expect(title).not.toContain('needs an API key');
+      expect(title.toLowerCase()).not.toContain('keyring');
+      expect(title).toContain('is unconfigured');
+    });
+
+    it('present-credential row tooltip reads as ready', async () => {
+      const readyRow: ProviderEntry = {
+        id: 'anthropic',
+        display_name: 'Anthropic',
+        credential_required: true,
+        has_credential: true,
+        credential_state: 'present',
+        model_available: true,
+        model: 'claude-sonnet-4',
+        enabled: true,
+      };
+      setInvokeForTesting(
+        (async (cmd: string) => {
+          if (cmd === 'dashboard_list_providers') return [readyRow];
+          return undefined;
+        }) as never,
+      );
+      const { findAllByTestId } = renderPage();
+      const rows = await findAllByTestId('provider-row');
+      const title = rows[0]?.getAttribute('title') ?? '';
+      expect(title).toContain('is ready');
+      expect(title.toLowerCase()).not.toContain('keyring');
+      expect(title).not.toContain('needs an API key');
+    });
+
     it('clicking Set active fires set_active_provider with the row id', async () => {
       const calls: string[] = [];
       setInvokeForTesting(
