@@ -173,11 +173,16 @@ async fn list_agent_memory_returns_one_row_per_loaded_agent() {
         serde_json::json!({ "workspaceRoot": canonical_ws }),
     );
     let arr = entries.as_array().expect("entries array");
-    assert_eq!(arr.len(), 2);
+    // Two seeded workspace agents plus the always-injected
+    // `forge-default` built-in (see `forge_agents::load_agents`). Rows are
+    // sorted alphabetically by `agent_id`, so `forge-default` lands last.
+    assert_eq!(arr.len(), 3);
     assert_eq!(arr[0]["agent_id"], "alpha");
     assert_eq!(arr[0]["def_enabled"], true);
     assert_eq!(arr[1]["agent_id"], "beta");
     assert_eq!(arr[1]["def_enabled"], false);
+    assert_eq!(arr[2]["agent_id"], forge_agents::FORGE_DEFAULT_AGENT_NAME);
+    assert_eq!(arr[2]["def_enabled"], false);
 }
 
 #[tokio::test(flavor = "multi_thread")]
