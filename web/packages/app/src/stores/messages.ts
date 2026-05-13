@@ -792,6 +792,18 @@ export function pushEvent(sessionId: SessionId, event: SessionEvent): void {
     // text="")` immediately before the `TurnError`) with the typed error
     // turn so the card lands at the exact transcript slot the user
     // expects. The originating user turn stays untouched.
+    //
+    // Event-ordering assumption: the orchestrator emits the finalised
+    // (empty) `AssistantMessage` BEFORE the `TurnError` on every error
+    // path — see `orchestrator.rs` `ChatChunk::Error` arm. That ordering
+    // is what lets us "replace" the assistant slot via the `idx >= 0`
+    // branch. The fallback `idx < 0` branch covers out-of-order delivery
+    // (replay glitches, log truncation between AssistantMessage and
+    // TurnError, or a future orchestrator path that emits TurnError
+    // standalone): we append the error card as a fresh turn rather than
+    // dropping the failure on the floor, and we still clear
+    // `streamingMessageId` + `awaitingResponse` so the composer unlocks
+    // regardless of which arm fires.
     case 'TurnError': {
       setMessagesStore(
         produce((s) => {

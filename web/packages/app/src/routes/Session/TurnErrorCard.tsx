@@ -23,7 +23,6 @@ import {
   createMemo,
   onCleanup,
 } from 'solid-js';
-import { useNavigate } from '@solidjs/router';
 import { Button } from '@forge/design';
 import type { ChatTurn } from '../../stores/messages';
 
@@ -60,25 +59,16 @@ export interface TurnErrorCardProps {
    */
   onRetry?: () => void;
   /**
-   * Navigation callback for the auth CTA. When omitted the component falls
-   * back to `useNavigate('/providers')`. Tests inject a stub to assert the
-   * click path without booting the router.
+   * Navigation callback for the auth CTA. Required for `auth` errors —
+   * the parent (`ChatPane`) creates a `useNavigate('/providers')` closure
+   * and passes it through. Decoupling the router dep from this component
+   * keeps it pure presentation and lets tests mount it without booting
+   * the router context.
    */
   onOpenProviderSettings?: () => void;
 }
 
 export const TurnErrorCard: Component<TurnErrorCardProps> = (props) => {
-  // Try to read solid-router's navigator. Tests that mount the card outside
-  // a `<Router>` rely on the injected `onOpenProviderSettings` prop and
-  // never hit `useNavigate` — guard the call so the component doesn't
-  // throw during a non-router render.
-  let routerNavigate: ((to: string) => void) | null = null;
-  try {
-    routerNavigate = useNavigate();
-  } catch {
-    routerNavigate = null;
-  }
-
   const [detailsOpen, setDetailsOpen] = createSignal(false);
 
   // Countdown only matters when retry_after_secs is known. Re-derives once
@@ -118,13 +108,7 @@ export const TurnErrorCard: Component<TurnErrorCardProps> = (props) => {
   };
 
   const handleOpenProviderSettings = (): void => {
-    if (props.onOpenProviderSettings) {
-      props.onOpenProviderSettings();
-      return;
-    }
-    if (routerNavigate) {
-      routerNavigate('/providers');
-    }
+    props.onOpenProviderSettings?.();
   };
 
   return (
