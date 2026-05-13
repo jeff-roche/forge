@@ -29,7 +29,7 @@ pub use event::{
     ApprovalPreview, ApprovalSource, ContextRef, EndReason, Event, LogLineLevel, TurnErrorKind,
     TURN_ERROR_RAW_CAP_BYTES,
 };
-pub use event_log::{read_since, EventLog, MAX_LINE_BYTES};
+pub use event_log::{read_since, recover_tail, EventLog, RecoveredTail, MAX_LINE_BYTES};
 pub use event_sink::EventSink;
 pub use ids::{
     AgentId, AgentInstanceId, MessageId, ProviderId, SessionId, StepId, TerminalId, ToolCallId,

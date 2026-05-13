@@ -131,10 +131,20 @@ impl Session {
 
     /// F-748: re-open an existing event log instead of truncating it. Used
     /// when a daemon is re-spawned for an existing `session_id` (crash-
-    /// restart prompt). Seeds the seq counter from the count of persisted
-    /// events so subsequent `emit` calls continue the monotonic sequence,
+    /// restart prompt). Seeds the seq counter from the last well-formed
+    /// event so subsequent `emit` calls continue the monotonic sequence,
     /// and `current_seq()` returns the resume anchor for the bridge to
     /// pass as `Subscribe { since }`.
+    ///
+    /// F-748 review fix: a daemon SIGKILL'd mid-`write_all` can leave a
+    /// truncated or malformed final line. The strict [`forge_core::read_since`]
+    /// errors out on that line — the previous code path therefore failed
+    /// to resume at all when a real crash corrupted the tail. The fix:
+    /// run the recovery scanner [`forge_core::recover_tail`] which
+    /// reports the byte offset of the last well-formed line; truncate
+    /// the file to that offset before reopening for append. This makes
+    /// both `resume()` AND future strict readers tolerant of one bad
+    /// trailing line.
     ///
     /// On a missing log file this falls through to [`Self::create`] — the
     /// caller is expected to gate on file existence when it matters
@@ -143,14 +153,34 @@ impl Session {
         if !log_path.exists() {
             return Self::create(log_path).await;
         }
-        let existing = forge_core::read_since(&log_path, 0)
+        let recovered = forge_core::recover_tail(&log_path)
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
-        let resumed_seq = existing.len() as u64;
+
+        // Truncate any corrupt suffix so the on-disk file is well-formed
+        // again. `set_len` is durable across the upcoming `EventLog::open`
+        // because the open() call re-opens the file under the same path.
+        // We only call truncate when the file has actual garbage past the
+        // last good byte; otherwise this is a no-op.
+        let file_len = tokio::fs::metadata(&log_path).await?.len();
+        if recovered.safe_byte_len < file_len {
+            let file = tokio::fs::OpenOptions::new()
+                .write(true)
+                .open(&log_path)
+                .await?;
+            file.set_len(recovered.safe_byte_len).await?;
+            file.sync_all().await?;
+            drop(file);
+        }
+
         let log = EventLog::open(&log_path)
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
-        Ok(Self::with_log_at_seq(log_path, log, resumed_seq))
+        Ok(Self::with_log_at_seq(
+            log_path,
+            log,
+            recovered.last_good_seq,
+        ))
     }
 
     fn with_log_at_seq(log_path: PathBuf, log: EventLog, seq: u64) -> Self {
@@ -977,5 +1007,106 @@ mod tests {
         assert_eq!(session.current_seq().await, 0);
         // The log file exists with the schema header but no events.
         assert!(log_path.exists(), "resume must create the log when absent");
+    }
+
+    // F-748 review fix: a daemon SIGKILL'd mid-`write_all` can leave a
+    // truncated or malformed final line in the JSONL log. `Session::resume`
+    // must (a) seed seq from the last well-formed event (not the count of
+    // attempted lines, which would over-count corrupt rows), and (b)
+    // truncate the corrupt suffix so subsequent emits land at a contiguous
+    // strictly-increasing seq AND the reopened log parses cleanly under
+    // the strict reader.
+    #[tokio::test]
+    async fn resume_recovers_from_corrupt_trailing_line() {
+        use tokio::io::AsyncWriteExt;
+
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("events.jsonl");
+
+        // Write a clean log with two well-formed events.
+        let first = Arc::new(Session::create(log_path.clone()).await.unwrap());
+        first
+            .emit(Event::UserMessage {
+                id: "m1".to_string().into(),
+                at: Utc::now(),
+                text: Arc::from("good-prefix-1"),
+                context: Vec::new(),
+                branch_parent: None,
+            })
+            .await
+            .unwrap();
+        first
+            .emit(Event::UserMessage {
+                id: "m2".to_string().into(),
+                at: Utc::now(),
+                text: Arc::from("good-prefix-2"),
+                context: Vec::new(),
+                branch_parent: None,
+            })
+            .await
+            .unwrap();
+        // Flush + close the first session so the file handle releases.
+        drop(first);
+
+        // Simulate a SIGKILL mid-write by appending a partial /
+        // unparseable line that does not end with a newline. This is the
+        // exact shape a kernel-aborted `write_all` leaves behind when
+        // the buffered writer flushed an incomplete envelope.
+        let mut f = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&log_path)
+            .await
+            .unwrap();
+        f.write_all(b"{\"UserMessage\":{\"id\":\"truncated")
+            .await
+            .unwrap();
+        f.sync_all().await.unwrap();
+        drop(f);
+        let corrupt_len = tokio::fs::metadata(&log_path).await.unwrap().len();
+
+        // Resume must succeed; the seq must seed at the last GOOD event
+        // (2), not bump for the corrupt half-line.
+        let resumed = Session::resume(log_path.clone()).await.unwrap();
+        assert_eq!(
+            resumed.current_seq().await,
+            2,
+            "resume must seed from last good event seq, not count corrupt tail"
+        );
+
+        // The file should have been truncated past the corrupt suffix.
+        let trimmed_len = tokio::fs::metadata(&log_path).await.unwrap().len();
+        assert!(
+            trimmed_len < corrupt_len,
+            "resume must truncate the corrupt tail: was {corrupt_len} bytes, now {trimmed_len}",
+        );
+
+        // Strict reader must now parse the file cleanly with exactly the
+        // two pre-crash events visible.
+        let visible = forge_core::read_since(&log_path, 0).await.unwrap();
+        assert_eq!(visible.len(), 2);
+
+        // Subsequent emit must produce a contiguous, strictly-increasing
+        // seq — the resumed counter is at 2, so the next emit is seq 3.
+        resumed
+            .emit(Event::UserMessage {
+                id: "m3".to_string().into(),
+                at: Utc::now(),
+                text: Arc::from("after-recovery"),
+                context: Vec::new(),
+                branch_parent: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(resumed.current_seq().await, 3);
+
+        // The strict reader still parses cleanly after the new write
+        // landed — proves the truncation left the file in a state the
+        // append path can extend without re-introducing corruption.
+        let after = forge_core::read_since(&log_path, 0).await.unwrap();
+        assert_eq!(after.len(), 3);
+        assert!(matches!(
+            &after[2].1,
+            Event::UserMessage { text, .. } if &**text == "after-recovery"
+        ));
     }
 }
