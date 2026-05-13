@@ -74,16 +74,18 @@ mod tests {
 
     #[test]
     fn approval_preview_shows_path_and_content_summary() {
+        // Pin the exact wire shape — same DoD contract as the `fs.read`
+        // and `shell.exec` tests in this milestone. `forge_fs::write_preview`
+        // owns the format string; locking it here means a change there fails
+        // this test loudly before it can drift the web client's consent card.
         let preview = FsWriteTool.approval_preview(&json!({
             "path": "/tmp/bar.txt",
             "content": "hello",
         }));
-        assert!(
-            preview.description.contains("/tmp/bar.txt"),
-            "preview missing path: {}",
+        assert_eq!(
             preview.description,
+            "Write file /tmp/bar.txt (5 bytes)\nhello",
         );
-        assert!(!preview.description.is_empty(), "preview must not be blank",);
     }
 
     #[test]
