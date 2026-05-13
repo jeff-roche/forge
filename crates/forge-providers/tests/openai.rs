@@ -529,7 +529,7 @@ async fn chat_against_real_openai() {
             ChatChunk::ToolCall { .. } => {
                 // unexpected for this prompt — model shouldn't request a tool
             }
-            ChatChunk::Error { kind, message } => {
+            ChatChunk::Error { kind, message, .. } => {
                 panic!("openai returned error: kind={kind:?}, message={message}")
             }
         }

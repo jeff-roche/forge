@@ -636,7 +636,7 @@ async fn chat_against_real_anthropic() {
             ChatChunk::ToolCall { .. } => {
                 // unexpected for this prompt — model shouldn't request a tool
             }
-            ChatChunk::Error { kind, message } => {
+            ChatChunk::Error { kind, message, .. } => {
                 panic!("anthropic returned error: kind={kind:?}, message={message}")
             }
         }
