@@ -95,6 +95,7 @@ async fn rerun_replace_supersedes_original_message_in_fresh_replay() {
             None,
             None, // F-587: keyless test wiring
             None, // F-601: no active agent — memory off in this test
+            None,
         )
         .await
         .unwrap();

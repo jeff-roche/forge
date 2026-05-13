@@ -79,11 +79,20 @@ async fn full_headless_turn_emits_correct_event_sequence() {
 
     let sock_path = dir.path().join("session.sock");
 
+    // Isolate the daemon's user-scope `~/.mcp.json` loader from the
+    // developer's real home — without this, any host with entries in
+    // `~/.mcp.json` adds a leading `Event::McpState` to the captured
+    // event tape and the sequence assertion below fails. The override
+    // is honored by `forge-session::main` only in debug builds.
+    let user_home = dir.path().join("user_home");
+    std::fs::create_dir_all(&user_home).unwrap();
+
     let mut child = tokio::process::Command::new(FORGED)
         .arg("--auto-approve-unsafe")
         .env("FORGE_SESSION_ID", "headless-test-001")
         .env("FORGE_SOCKET_PATH", &sock_path)
         .env("FORGE_MOCK_SEQUENCE_FILE", &mock_path)
+        .env("FORGE_USER_HOME_FOR_TEST", &user_home)
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .spawn()

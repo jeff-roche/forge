@@ -66,6 +66,7 @@ async fn session_hello_command_round_trips_via_tauri_invoke() {
             Some("tauri-hello".to_string()),
             None, // F-587: keyless test wiring
             None, // F-601: no active agent — memory off in this test
+            None,
         )
         .await
         .unwrap();

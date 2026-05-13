@@ -2570,7 +2570,7 @@ async fn resolve_bg_session<R: Runtime>(
 
     // Lazy init — workspace root is the authoritative source for agent defs.
     let workspace_root = cached_workspace_root(state, session_id).await?;
-    let user_home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    let user_home = resolve_user_home_dir(state);
 
     let defs = forge_agents::load_agents(&workspace_root, &user_home)
         .map_err(|e| format!("load agent defs: {e}"))?;
@@ -3918,7 +3918,7 @@ pub async fn list_mcp_servers<R: Runtime>(
     } else {
         Some(resolve_workspace_root_for_command(webview.label(), &workspace_root, &state).await?)
     };
-    let user_home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    let user_home = resolve_user_home_dir(&state);
     let entries = collect_mcp_servers(workspace_path.as_deref(), &user_home)?;
     Ok(entries.into_iter().filter(|e| e.matches(&scope)).collect())
 }
@@ -3949,7 +3949,7 @@ pub async fn list_agents<R: Runtime>(
     } else {
         Some(resolve_workspace_root_for_command(webview.label(), &workspace_root, &state).await?)
     };
-    let user_home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    let user_home = resolve_user_home_dir(&state);
     let entries = collect_agents(workspace_path.as_deref(), &user_home)?;
     Ok(entries.into_iter().filter(|e| e.matches(&scope)).collect())
 }

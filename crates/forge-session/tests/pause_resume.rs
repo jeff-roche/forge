@@ -83,9 +83,17 @@ fn extract_event(msg: &IpcMessage) -> Option<Event> {
 
 /// Spawn a `serve_with_session` daemon. Returns the socket path and the
 /// shared `Session` so tests can inspect `is_paused()` directly.
+///
+/// An empty user-home directory is wired through `user_home_override` so
+/// the daemon's `~/.mcp.json` loader does not see the developer's real
+/// home. Without this, a populated host `~/.mcp.json` prepends an
+/// `Event::McpState` to the event stream and the pause/resume sequence
+/// assertions below pick up the wrong "first event".
 async fn spawn_daemon(dir: &TempDir, scripts: Vec<String>) -> (std::path::PathBuf, Arc<Session>) {
     let log_path = dir.path().join("events.jsonl");
     let sock_path = dir.path().join("test.sock");
+    let user_home = dir.path().join("user_home");
+    std::fs::create_dir_all(&user_home).unwrap();
 
     let session = Arc::new(Session::create(log_path).await.unwrap());
     let provider = Arc::new(MockProvider::from_responses(scripts).unwrap());
@@ -93,6 +101,7 @@ async fn spawn_daemon(dir: &TempDir, scripts: Vec<String>) -> (std::path::PathBu
     let server_session = Arc::clone(&session);
     let server_provider = Arc::clone(&provider);
     let server_sock = sock_path.clone();
+    let server_user_home = user_home.clone();
     tokio::spawn(async move {
         serve_with_session(
             &server_sock,
@@ -104,6 +113,7 @@ async fn spawn_daemon(dir: &TempDir, scripts: Vec<String>) -> (std::path::PathBu
             None,
             None,
             None,
+            Some(server_user_home),
         )
         .await
         .unwrap();
@@ -400,6 +410,7 @@ async fn pause_during_tool_approval_does_not_kill_in_flight_tool() {
             server_provider,
             false, // auto_approve OFF — tool approval blocks
             false,
+            None,
             None,
             None,
             None,

@@ -51,6 +51,11 @@ async fn subscribe_mid_stream_receives_historical_then_live_events() {
     let dir = TempDir::new().unwrap();
     let log_path = dir.path().join("events.jsonl");
     let sock_path = dir.path().join("test.sock");
+    // Isolate the daemon's user-scope `~/.mcp.json` loader from the
+    // developer's real home; otherwise a populated host `~/.mcp.json`
+    // adds an extra `Event::McpState` and `event_seq` reaches 4.
+    let user_home = dir.path().join("user_home");
+    std::fs::create_dir_all(&user_home).unwrap();
 
     // Create session and pre-write 3 events (seq 1, 2, 3)
     let session = Arc::new(Session::create(log_path).await.unwrap());
@@ -62,6 +67,7 @@ async fn subscribe_mid_stream_receives_historical_then_live_events() {
     let server_session = Arc::clone(&session);
     let server_sock = sock_path.clone();
     let provider = Arc::new(MockProvider::with_default_path());
+    let server_user_home = user_home.clone();
     tokio::spawn(async move {
         serve_with_session(
             &server_sock,
@@ -73,6 +79,7 @@ async fn subscribe_mid_stream_receives_historical_then_live_events() {
             None,
             None, // F-587: keyless test wiring
             None, // F-601: no active agent — memory off in this test
+            Some(server_user_home),
         )
         .await
         .unwrap();

@@ -128,6 +128,25 @@ async fn main() -> Result<()> {
         .ok()
         .filter(|s| !s.trim().is_empty());
 
+    // Test-isolation seam for the user-scope `~/.mcp.json` loader (mirrors
+    // the F-743 shell-side `resolve_user_home_dir` test override). Spawned
+    // `forged` subprocesses in integration tests set `FORGE_USER_HOME_FOR_TEST`
+    // to a tempdir so `load_mcp_manager` does not see the developer's real
+    // `~/.mcp.json` (CI passes because `$HOME` is clean; local runs leak).
+    //
+    // Gated on `debug_assertions`: disabled in the default release profile;
+    // a profiling build with `[profile.release] debug-assertions = true`
+    // would still honour it. The `FOR_TEST` naming convention is the real
+    // safety contract — never set this env var in production.
+    let user_home_override = if cfg!(debug_assertions) {
+        std::env::var("FORGE_USER_HOME_FOR_TEST")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+    } else {
+        None
+    };
+
     // Provider selection (F-038, F-743):
     //   1. explicit `--provider <spec>` flag, OR `FORGE_PROVIDER` env.
     //
@@ -156,6 +175,11 @@ async fn main() -> Result<()> {
                 None,
                 // F-601: typed active-agent — `None` here keeps memory off.
                 active_agent,
+                // Test isolation: `Some(tempdir)` when
+                // `FORGE_USER_HOME_FOR_TEST` is set in a build with
+                // `debug_assertions = true`; `None` otherwise, in which case
+                // `load_mcp_manager` falls back to `dirs::home_dir()`.
+                user_home_override,
             )
             .await
         }
@@ -172,6 +196,7 @@ async fn main() -> Result<()> {
                 // F-743: Ollama is keyless; no credential pull.
                 None,
                 active_agent,
+                user_home_override,
             )
             .await
         }

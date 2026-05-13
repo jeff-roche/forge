@@ -49,6 +49,7 @@ async fn spawn_daemon(path: &Path, session_id: &str) -> TempDir {
             Some(sid),
             None, // F-587: keyless test wiring
             None, // F-601: no active agent — memory off in this test
+            None,
         )
         .await
         .unwrap();

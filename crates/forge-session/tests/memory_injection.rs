@@ -148,6 +148,7 @@ async fn serve_with_session_accepts_typed_active_agent_parameter() {
             // workspace — the rules in `resolve_session_memory` quietly
             // disable memory and the session continues normally.
             Some("scribe".to_string()),
+            None,
         )
         .await
         .unwrap();

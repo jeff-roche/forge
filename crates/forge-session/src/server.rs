@@ -83,8 +83,21 @@ fn idle_timeout() -> Duration {
 /// `AgentScope::User`; the synthesized root uses `Isolation::Process`),
 /// so we unwrap the spawn error into an `eprintln` rather than
 /// propagating.
-async fn build_agent_runtime(workspace_path: Option<&Path>) -> Option<AgentRuntime> {
-    let user_home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+///
+/// `user_home_override` is the same test-isolation seam used by
+/// [`load_mcp_manager`]: when `Some`, the user-scope `~/.agents/` loader
+/// reads from this directory instead of `dirs::home_dir()`. Production
+/// callers pass `None`. Without this seam, a developer with personal
+/// agent defs in `~/.agents/` would see them merged into test fixtures
+/// and break length-sensitive assertions.
+async fn build_agent_runtime(
+    workspace_path: Option<&Path>,
+    user_home_override: Option<&Path>,
+) -> Option<AgentRuntime> {
+    let user_home = user_home_override
+        .map(Path::to_path_buf)
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(|| PathBuf::from("/"));
     // Workspace-anchored load when we have one; fall back to user-only so
     // embedder-less sessions (tests, ephemeral CLI runs) still get agent
     // defs the user has authored.
@@ -379,8 +392,20 @@ pub fn event_log_path(session_id: &str, workspace: Option<&Path>) -> PathBuf {
 /// missing `$HOME` (extremely unusual — CI without `HOME` set) skips the
 /// user-scope file and loads workspace only. That's the fail-open path:
 /// we'd rather run with fewer servers than fail the whole session.
-async fn load_mcp_manager(workspace_path: Option<&Path>) -> Option<Arc<forge_mcp::McpManager>> {
-    let user_dir = dirs::home_dir();
+///
+/// `user_home_override` is the test-isolation seam (mirrors the F-743
+/// shell-side `resolve_user_home_dir` pattern): when `Some`, it replaces
+/// `dirs::home_dir()` so an integration test can point the user-scope
+/// `.mcp.json` loader at a tempdir instead of the developer's real
+/// `~/.mcp.json`. Production callers (`forge-session::main`) pass `None`
+/// and the platform resolver is used unchanged.
+async fn load_mcp_manager(
+    workspace_path: Option<&Path>,
+    user_home_override: Option<&Path>,
+) -> Option<Arc<forge_mcp::McpManager>> {
+    let user_dir = user_home_override
+        .map(Path::to_path_buf)
+        .or_else(dirs::home_dir);
     let merged = match workspace_path {
         Some(ws) => match (user_dir.as_deref(), forge_mcp::config::load_workspace(ws)) {
             (Some(home), ws_result) => match (forge_mcp::config::load_user_from(home), ws_result) {
@@ -655,6 +680,7 @@ pub async fn serve(path: &Path, auto_approve: bool, ephemeral: bool) -> Result<(
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -774,6 +800,13 @@ pub async fn serve_with_session<P: Provider + 'static>(
     // only safe way to give different connections in a persistent-mode
     // daemon distinct active agents.
     active_agent: Option<String>,
+    // Test-isolation seam for the user-scope `~/.mcp.json` loader (mirrors
+    // the F-743 shell-side `resolve_user_home_dir` pattern). When `Some`,
+    // `load_mcp_manager` resolves the user-scope `.mcp.json` against this
+    // directory instead of `dirs::home_dir()`, so an integration test can
+    // isolate from the developer's real `~/.mcp.json`. Production callers
+    // pass `None` and the platform resolver is used unchanged.
+    user_home_override: Option<PathBuf>,
 ) -> Result<()> {
     serve_with_session_swappable(
         path,
@@ -786,6 +819,7 @@ pub async fn serve_with_session<P: Provider + 'static>(
         session_id,
         credentials,
         active_agent,
+        user_home_override,
     )
     .await
 }
@@ -812,6 +846,10 @@ pub async fn serve_with_session_swappable<P: Provider + 'static>(
     session_id: Option<String>,
     credentials: Option<CredentialContext>,
     active_agent: Option<String>,
+    // See [`serve_with_session`] for the contract — production passes
+    // `None`; integration tests pass a tempdir path to isolate the
+    // user-scope `.mcp.json` loader from the developer's real home.
+    user_home_override: Option<PathBuf>,
 ) -> Result<()> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -901,7 +939,7 @@ pub async fn serve_with_session_swappable<P: Provider + 'static>(
     // `list_mcp_servers` / `toggle_mcp_server` / `import_mcp_config`
     // Tauri command bounces through this session's UDS so a toggle
     // affects running tool-call dispatch immediately.
-    let mcp = load_mcp_manager(workspace_path.as_deref()).await;
+    let mcp = load_mcp_manager(workspace_path.as_deref(), user_home_override.as_deref()).await;
 
     // F-371: build `session_id` before spawning the MCP state forwarder so
     // the forwarder can carry it on every structured log line. Moved up
@@ -965,7 +1003,8 @@ pub async fn serve_with_session_swappable<P: Provider + 'static>(
     // F-601: built before the dispatcher cache so the active agent's
     // `memory_enabled` flag can decide whether `memory.write` registers
     // and whether the memory body is appended to the system prompt.
-    let agent_runtime: Option<AgentRuntime> = build_agent_runtime(workspace_path.as_deref()).await;
+    let agent_runtime: Option<AgentRuntime> =
+        build_agent_runtime(workspace_path.as_deref(), user_home_override.as_deref()).await;
 
     // F-602: consult the user's `[memory.enabled.<agent>]` settings entry
     // before deciding whether memory is on. The Dashboard's Memory toggle

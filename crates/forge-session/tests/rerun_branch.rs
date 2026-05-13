@@ -98,6 +98,7 @@ async fn rerun_branch_keeps_both_variants_and_branch_selected_gates_display() {
             None,
             None, // F-587: keyless test wiring
             None, // F-601: no active agent — memory off in this test
+            None,
         )
         .await
         .unwrap();
@@ -291,6 +292,7 @@ async fn select_branch_with_variant_zero_resolves_to_parent() {
             None,
             None, // F-587: keyless test wiring
             None, // F-601: no active agent — memory off in this test
+            None,
         )
         .await
         .unwrap();

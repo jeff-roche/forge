@@ -65,13 +65,23 @@ impl EventSink for ChannelSink {
 /// Spawn a `forge-session` daemon bound to `socket_path` with the given
 /// `workspace`. The workspace tempdir is returned so the caller's `.mcp.json`
 /// seeding drives the daemon's `load_mcp_manager` path.
+///
+/// An empty tempdir is wired through `serve_with_session`'s
+/// `user_home_override` so the daemon's user-scope `.mcp.json` loader does
+/// not see the developer's real `~/.mcp.json`. Without the override, any
+/// host with a populated user-tier MCP config inflates the daemon's server
+/// count and breaks length-sensitive assertions (CI passes only because
+/// `$HOME/.mcp.json` is absent there). The user-home tempdir is returned
+/// alongside the log dir so it outlives the spawned task.
 async fn spawn_daemon_with_workspace(
     socket_path: &Path,
     session_id: &str,
     workspace: std::path::PathBuf,
-) -> (Arc<Session>, TempDir) {
+) -> (Arc<Session>, TempDir, TempDir) {
     let log_dir = TempDir::new().unwrap();
     let log_path = log_dir.path().join("events.jsonl");
+    let user_home = TempDir::new().unwrap();
+    let user_home_path = user_home.path().to_path_buf();
     let session = Arc::new(Session::create(log_path).await.unwrap());
     let session_for_spawn = Arc::clone(&session);
     let provider = Arc::new(MockProvider::with_default_path());
@@ -88,6 +98,7 @@ async fn spawn_daemon_with_workspace(
             Some(sid),
             None, // F-587: keyless test wiring
             None, // F-601: no active agent — memory off in this test
+            Some(user_home_path),
         )
         .await
         .unwrap();
@@ -99,7 +110,7 @@ async fn spawn_daemon_with_workspace(
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    (session, log_dir)
+    (session, log_dir, user_home)
 }
 
 /// Write a `.mcp.json` declaring `name` as a stdio server pointing at
@@ -179,7 +190,7 @@ async fn session_list_mcp_servers_round_trips_against_daemon() {
     let workspace = TempDir::new().unwrap();
     seed_mcp_config(workspace.path(), "fixture", "/nonexistent/mcp-binary");
 
-    let (_session, _log) =
+    let (_session, _log, _home) =
         spawn_daemon_with_workspace(&sock, "list-session", workspace.path().to_path_buf()).await;
     let (bridge, _rx) = connect_bridge(&sock, "list-session").await;
 
@@ -203,7 +214,7 @@ async fn toggle_mcp_server_off_emits_disabled_state_event() {
     let workspace = TempDir::new().unwrap();
     seed_mcp_config(workspace.path(), "fixture", "/nonexistent/mcp-binary");
 
-    let (_session, _log) =
+    let (_session, _log, _home) =
         spawn_daemon_with_workspace(&sock, "toggle-session", workspace.path().to_path_buf()).await;
     let (bridge, mut rx) = connect_bridge(&sock, "toggle-session").await;
 
@@ -247,7 +258,7 @@ async fn toggle_mcp_server_on_restarts_disabled_server() {
     let workspace = TempDir::new().unwrap();
     seed_mcp_config(workspace.path(), "fixture", "/nonexistent/mcp-binary");
 
-    let (_session, _log) =
+    let (_session, _log, _home) =
         spawn_daemon_with_workspace(&sock, "restart-session", workspace.path().to_path_buf()).await;
     let (bridge, mut rx) = connect_bridge(&sock, "restart-session").await;
 
@@ -313,7 +324,7 @@ async fn toggle_mcp_server_unknown_name_reports_error() {
     let workspace = TempDir::new().unwrap();
     seed_mcp_config(workspace.path(), "fixture", "/nonexistent/mcp-binary");
 
-    let (_session, _log) =
+    let (_session, _log, _home) =
         spawn_daemon_with_workspace(&sock, "unknown-session", workspace.path().to_path_buf()).await;
     let (bridge, _rx) = connect_bridge(&sock, "unknown-session").await;
 
@@ -378,7 +389,7 @@ async fn running_session_toggle_disables_live_server() {
     let workspace = TempDir::new().unwrap();
     seed_mcp_config(workspace.path(), "mock", &mock_bin);
 
-    let (_session, _log) =
+    let (_session, _log, _home) =
         spawn_daemon_with_workspace(&sock, "running-session", workspace.path().to_path_buf()).await;
     let (bridge, mut rx) = connect_bridge(&sock, "running-session").await;
 
@@ -495,7 +506,7 @@ async fn import_mcp_config_dry_run_does_not_write_file() {
     )
     .unwrap();
 
-    let (_session, _log) =
+    let (_session, _log, _home) =
         spawn_daemon_with_workspace(&sock, "import-dry-session", workspace.path().to_path_buf())
             .await;
     let (bridge, _rx) = connect_bridge(&sock, "import-dry-session").await;
@@ -538,7 +549,7 @@ async fn import_mcp_config_apply_writes_merged_file() {
     )
     .unwrap();
 
-    let (_session, _log) = spawn_daemon_with_workspace(
+    let (_session, _log, _home) = spawn_daemon_with_workspace(
         &sock,
         "import-apply-session",
         workspace.path().to_path_buf(),
@@ -567,7 +578,7 @@ async fn import_mcp_config_unknown_source_reports_error() {
     let sock = sock_dir.path().join("import-bad.sock");
     let workspace = TempDir::new().unwrap();
 
-    let (_session, _log) =
+    let (_session, _log, _home) =
         spawn_daemon_with_workspace(&sock, "import-bad-session", workspace.path().to_path_buf())
             .await;
     let (bridge, _rx) = connect_bridge(&sock, "import-bad-session").await;

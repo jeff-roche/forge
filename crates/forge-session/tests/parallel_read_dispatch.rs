@@ -112,6 +112,7 @@ async fn two_real_fs_read_calls_dispatch_in_parallel_without_approval() {
             None,
             None, // F-587: keyless test wiring
             None, // F-601: no active agent — memory off in this test
+            None,
         )
         .await
         .unwrap();
