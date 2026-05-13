@@ -70,6 +70,13 @@ pub mod providers_ipc;
 // are always compiled so non-webview unit tests link without Tauri; the
 // `#[tauri::command]` wrapper is gated behind `webview`.
 pub mod session_spawn_ipc;
+// F-747: graceful daemon shutdown on session window close. Pure
+// orchestration (`orchestrate_session_close`, `LivenessProbe`, `Signaler`),
+// pid-file readers, and timeout constants are always compiled so non-webview
+// unit tests + the escalation harness can exercise the three-stage
+// graceful → SIGTERM → SIGKILL escalation without Tauri or a live daemon;
+// the `#[tauri::command]` wrapper is gated behind `webview`.
+pub mod session_close_ipc;
 // F-593: `usage_summary` Tauri command, plus the cross-workspace toggle and
 // monthly-file walker that backs it. Gated behind `webview` because the
 // command itself depends on Tauri types; the helpers it ships are exercised

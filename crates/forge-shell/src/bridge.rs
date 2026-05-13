@@ -31,7 +31,7 @@ use forge_ipc::{
     ClientInfo, CompactTranscript, DeleteBranch, Hello, HelloAck, ImportMcpConfig,
     InterruptSession, IpcMessage, IpcReadTimeout, ListMcpServers, McpImportResult, McpServersList,
     McpToggleResult, PauseSession, RefineHandoff, RerunMessage, ResumeSession, SelectBranch,
-    SendUserMessage, Subscribe, SwitchProvider, ToggleMcpServer, ToolCallApproved,
+    SendUserMessage, Shutdown, Subscribe, SwitchProvider, ToggleMcpServer, ToolCallApproved,
     ToolCallRejected, DEFAULT_PUMP_DEADLINE, PROTO_VERSION, SCHEMA_VERSION,
 };
 use serde::Serialize;
@@ -525,6 +525,45 @@ impl SessionBridge {
         let mut writer = writer.lock().await;
         let frame = IpcMessage::SwitchProvider(SwitchProvider { provider_id });
         write_frame(&mut *writer, &frame).await
+    }
+
+    /// F-747: request graceful daemon shutdown for `session_id`. Writes
+    /// `IpcMessage::Shutdown` to the per-connection UDS writer; the daemon
+    /// emits `Event::SessionEnded { reason: Closed }`, archives the session
+    /// dir, removes its UDS socket + pid file, and exits with status 0.
+    ///
+    /// Returns `Err` when there is no live connection for `session_id` —
+    /// callers (the `session_close` Tauri command) treat that as "daemon
+    /// is already gone" and proceed to the SIGTERM/SIGKILL escalation path
+    /// on the externally-known pid file. The send-side `Err` is also
+    /// tolerated as "already closed": a half-closed UDS or a daemon that
+    /// raced ahead of the frame is the same observable outcome.
+    pub async fn shutdown(&self, session_id: &str) -> Result<()> {
+        let writer = self.writer_for(session_id).await?;
+        let mut writer = writer.lock().await;
+        let frame = IpcMessage::Shutdown(Shutdown::default());
+        write_frame(&mut *writer, &frame).await
+    }
+
+    /// F-747: drop a session's connection state from the registry without
+    /// touching the daemon. Used by `session_close` after the daemon has
+    /// exited (graceful, SIGTERM, or SIGKILL) so a future re-attach to the
+    /// same session id does not reuse a stale writer / reader pair.
+    /// Idempotent: dropping an unknown session is a no-op.
+    pub async fn drop_connection(&self, session_id: &str) {
+        let mut map = self.connections.inner.lock().await;
+        if let Some(conn) = map.remove(session_id) {
+            if let Some(task) = conn.reader_task {
+                task.abort();
+            }
+        }
+        // Also drop the cached workspace root so a recycled session id does
+        // not inherit the prior cache (see the TODO in `SessionConnections`).
+        self.connections
+            .workspace_roots
+            .lock()
+            .await
+            .remove(session_id);
     }
 
     /// F-604: interrupt the in-flight assistant turn and fetch the

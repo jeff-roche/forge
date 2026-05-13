@@ -16,7 +16,7 @@ use forge_ipc::{HelloAck, IpcEvent, IpcMessage, PROTO_VERSION, SCHEMA_VERSION};
 use forge_providers::{MockProvider, Provider, RuntimeProvider, SwappableProvider};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{signal, SignalKind};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, Mutex, Notify};
 
 use crate::archive::archive_or_purge;
 use crate::orchestrator::{
@@ -335,6 +335,7 @@ fn ipc_message_kind(msg: &IpcMessage) -> &'static str {
         IpcMessage::InterruptSession(_) => "InterruptSession",
         IpcMessage::RefineHandoff(_) => "RefineHandoff",
         IpcMessage::SwitchProvider(_) => "SwitchProvider",
+        IpcMessage::Shutdown(_) => "Shutdown",
     }
 }
 
@@ -1094,6 +1095,9 @@ pub async fn serve_with_session_swappable<P: Provider + 'static>(
             mcp,
             dispatcher_cache,
             credentials.clone(),
+            // F-747: ephemeral mode exits on stream EOF; no graceful-shutdown
+            // path is needed because `forge run agent` controls the lifecycle.
+            None,
         )
         .await;
     }
@@ -1132,10 +1136,18 @@ pub async fn serve_with_session_swappable<P: Provider + 'static>(
     // daemon can run `archive_or_purge` on its own session dir before exit.
     // Without this, `forge session kill` SIGTERMs an unhandled signal and
     // the live session dir is left behind under `sessions/<id>/`.
+    //
+    // F-747: also race against an in-process `shutdown_notify` that any
+    // connection can `notify_waiters()` on receipt of `IpcMessage::Shutdown`
+    // (Tauri shell's `session_close` IPC, fired when the session window is
+    // closed). The shutdown path runs the same `archive_or_purge` arm as
+    // the signal handlers so socket + pid-file cleanup is unified.
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
+    let shutdown_notify = Arc::new(Notify::new());
 
     loop {
+        let shutdown_for_select = Arc::clone(&shutdown_notify);
         tokio::select! {
             accept = listener.accept() => {
                 let (stream, _) = accept?;
@@ -1154,6 +1166,7 @@ pub async fn serve_with_session_swappable<P: Provider + 'static>(
                 let dispatcher_cache = Arc::clone(&dispatcher_cache);
                 let credentials_for_conn = credentials.clone();
                 let swap_for_conn = swap.clone();
+                let shutdown_for_conn = Arc::clone(&shutdown_notify);
                 tokio::spawn(async move {
                     // F-371: capture session_id for logging *before* the move
                     // into `handle_connection` consumes the Arc.
@@ -1177,6 +1190,7 @@ pub async fn serve_with_session_swappable<P: Provider + 'static>(
                         mcp,
                         dispatcher_cache,
                         credentials_for_conn,
+                        Some(shutdown_for_conn),
                     )
                     .await
                     {
@@ -1191,6 +1205,14 @@ pub async fn serve_with_session_swappable<P: Provider + 'static>(
             }
             _ = sigterm.recv() => break,
             _ = sigint.recv() => break,
+            _ = shutdown_for_select.notified() => {
+                tracing::info!(
+                    target: "forge_session::server",
+                    session_id = %session_id,
+                    "graceful shutdown requested via Shutdown IPC; archiving and exiting",
+                );
+                break;
+            }
         }
     }
 
@@ -1260,6 +1282,11 @@ async fn handle_connection<P: Provider + 'static>(
     dispatcher_cache: Arc<crate::dispatcher_cache::DispatcherCache>,
     // F-587: per-turn credential pull binding. `None` for keyless providers.
     credentials: Option<CredentialContext>,
+    // F-747: persistent-mode shutdown signal. `Some(notify)` lets the
+    // `IpcMessage::Shutdown` arm wake the outer accept loop (so it runs
+    // `archive_or_purge` + socket / pid-file cleanup) and exit. `None` in
+    // ephemeral mode where there is no outer loop to signal.
+    shutdown_notify: Option<Arc<Notify>>,
 ) -> Result<()> {
     // ── Handshake ──────────────────────────────────────────────────────────────
     // F-354: both handshake reads are subject to a bounded deadline so a
@@ -1921,6 +1948,63 @@ async fn handle_connection<P: Provider + 'static>(
                             );
                             break;
                         }
+                    }
+
+                    Some(IpcMessage::Shutdown(_)) => {
+                        // F-747: operator closed the session window — the
+                        // shell's `session_close` IPC translates the Tauri
+                        // `CloseRequested` event into this frame.
+                        //
+                        // Emit `SessionEnded { reason: Closed, archived: true }`
+                        // first so subscribers (live + replay-on-next-attach)
+                        // see the canonical end marker. Then wake the outer
+                        // accept loop's shutdown channel; the loop runs
+                        // `archive_or_purge` (removes the UDS socket) and the
+                        // pid-file is removed by `OwnedPidFile::drop` when
+                        // `forged` returns from `main`. Idempotent: if a
+                        // second `Shutdown` frame races in after the
+                        // emission, the duplicate emit is logged + ignored;
+                        // the broken connection on the second send is
+                        // tolerated by the shell as "already closed".
+                        //
+                        // `archived: true` reflects what the outer loop will
+                        // do — persistent mode runs `archive_or_purge` with
+                        // `SessionPersistence::Persist` which renames the
+                        // live session dir under `sessions/archived/`. The
+                        // arm is unreachable in ephemeral mode (the daemon
+                        // exits on the single stream's EOF without an outer
+                        // shutdown channel) — we guard with the
+                        // `shutdown_notify.is_some()` check so a stray frame
+                        // in tests that spawn the ephemeral binary doesn't
+                        // mis-claim archival.
+                        let archived = shutdown_notify.is_some();
+                        if let Err(e) = session.emit(forge_core::Event::SessionEnded {
+                            at: chrono::Utc::now(),
+                            reason: forge_core::EndReason::Closed,
+                            archived,
+                        }).await {
+                            tracing::error!(
+                                target: "forge_session::server",
+                                session_id = %session_id,
+                                error = %e,
+                                "failed to emit SessionEnded on Shutdown",
+                            );
+                        }
+                        if let Some(notify) = shutdown_notify.as_ref() {
+                            notify.notify_waiters();
+                        } else {
+                            tracing::debug!(
+                                target: "forge_session::server",
+                                session_id = %session_id,
+                                "Shutdown received in ephemeral mode; ignoring",
+                            );
+                        }
+                        // Do NOT `break` here — the live_rx arm above
+                        // observes the SessionEnded broadcast and breaks
+                        // naturally, after writing the frame to the client.
+                        // Breaking from the cmd arm would race the
+                        // SessionEnded frame and the shell would never
+                        // see it.
                     }
 
                     Some(IpcMessage::SwitchProvider(s)) => {

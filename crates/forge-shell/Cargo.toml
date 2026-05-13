@@ -65,6 +65,10 @@ rand = "0.8"
 # prompt markers.
 hex = "0.4"
 thiserror = "1"
+# F-747: pidfd-based signal delivery + `kill(pid, 0)` liveness probe in the
+# `session_close_ipc` escalation path. Linux uses the full syscall surface;
+# non-Linux stubs preserve the signature behind cfg-gates.
+libc = "0.2"
 # F-359: typed `Host<&str>` discriminates DNS names from IP literals
 # *without* requiring bracket-stripping on `Url::host_str()`. reqwest
 # already pulls this transitively; naming it here is explicit.

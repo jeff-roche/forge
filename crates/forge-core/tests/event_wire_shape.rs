@@ -731,6 +731,27 @@ fn session_ended_with_error_wire_shape() {
 }
 
 #[test]
+fn session_ended_closed_wire_shape() {
+    // F-747: window-close shutdown emits `reason: Closed` so the dashboard
+    // (and any replay consumer) can distinguish operator window-close from
+    // `UserExit` / `Completed`. Pinning the wire string here prevents a
+    // future rename from silently breaking the dashboard's footer copy.
+    assert_wire_eq(
+        Event::SessionEnded {
+            at: fixed_time(),
+            reason: EndReason::Closed,
+            archived: true,
+        },
+        json!({
+            "type": "session_ended",
+            "at": "2026-04-18T10:00:00Z",
+            "reason": "Closed",
+            "archived": true,
+        }),
+    );
+}
+
+#[test]
 fn step_started_wire_shape() {
     // F-139: step-trace open. `instance_id: None` is the top-level-turn
     // case (F-140 populates it once `AgentMonitor` is wired through

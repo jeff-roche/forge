@@ -217,7 +217,22 @@ pub fn verify_kill_target(pid: libc::pid_t, recorded_start_time: u64) -> anyhow:
 #[cfg(target_os = "linux")]
 pub fn pidfd_send_sigterm(pid: libc::pid_t) -> anyhow::Result<()> {
     let pidfd = pidfd_open(pid)?;
-    pidfd_send_sigterm_via_fd(pid, &pidfd)
+    pidfd_send_signal_via_fd(pid, &pidfd, libc::SIGTERM)
+}
+
+/// F-747: race-free signal delivery for arbitrary `signal` via pidfd. Used
+/// by the shell's `session_close` escalation path to deliver SIGTERM then
+/// SIGKILL to a wedged `forged` whose pid is read from the on-disk pid file.
+/// Pid identity / reuse is the caller's responsibility — the canonical safe
+/// entry point is `kill_session_from_pid_file` (which re-reads
+/// `/proc/<pid>/stat` to confirm start-time). This helper exists so the
+/// escalation path can hold its own pidfd across `SIGTERM → wait → SIGKILL`
+/// transitions without re-opening (and re-racing) the pidfd between
+/// signals.
+#[cfg(target_os = "linux")]
+pub fn pidfd_send_signal_for_pid(pid: libc::pid_t, signal: libc::c_int) -> anyhow::Result<()> {
+    let pidfd = pidfd_open(pid)?;
+    pidfd_send_signal_via_fd(pid, &pidfd, signal)
 }
 
 /// Open a pidfd for `pid`. Caller owns the fd and must keep it alive to
@@ -241,14 +256,18 @@ fn pidfd_open(pid: libc::pid_t) -> anyhow::Result<OwnedPidFd> {
 }
 
 #[cfg(target_os = "linux")]
-fn pidfd_send_sigterm_via_fd(pid: libc::pid_t, pidfd: &OwnedPidFd) -> anyhow::Result<()> {
+fn pidfd_send_signal_via_fd(
+    pid: libc::pid_t,
+    pidfd: &OwnedPidFd,
+    signal: libc::c_int,
+) -> anyhow::Result<()> {
     // SAFETY: `pidfd` is a valid pidfd; `siginfo` is null per the syscall
     // contract to use the default action (sender context). `flags` is 0.
     let rc = unsafe {
         libc::syscall(
             libc::SYS_pidfd_send_signal,
             pidfd.as_raw(),
-            libc::SIGTERM,
+            signal,
             std::ptr::null::<libc::siginfo_t>(),
             0 as libc::c_uint,
         )
@@ -257,11 +276,11 @@ fn pidfd_send_sigterm_via_fd(pid: libc::pid_t, pidfd: &OwnedPidFd) -> anyhow::Re
         let err = std::io::Error::last_os_error();
         if err.raw_os_error() == Some(libc::ESRCH) {
             anyhow::bail!(
-                "pidfd_send_signal({pid}, SIGTERM): process exited between \
+                "pidfd_send_signal({pid}, {signal}): process exited between \
                  pidfd_open and signal; no signal delivered (ESRCH)"
             );
         }
-        anyhow::bail!("pidfd_send_signal({pid}, SIGTERM) failed: {err}");
+        anyhow::bail!("pidfd_send_signal({pid}, {signal}) failed: {err}");
     }
     Ok(())
 }
@@ -335,7 +354,7 @@ pub fn kill_session_from_pid_file(
         "refusing to signal pid {pid}: PID reuse detected \
          (recorded start-time {recorded_start_time}, current {current_start_time})"
     );
-    pidfd_send_sigterm_via_fd(pid, &pidfd)?;
+    pidfd_send_signal_via_fd(pid, &pidfd, libc::SIGTERM)?;
     Ok((pid, recorded_start_time))
 }
 

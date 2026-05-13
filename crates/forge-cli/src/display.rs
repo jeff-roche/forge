@@ -42,6 +42,10 @@ pub fn format_event(event: &Event) -> Option<String> {
             EndReason::Completed => Some("session ended: completed".into()),
             EndReason::UserExit => Some("session ended: user exit".into()),
             EndReason::Error(msg) => Some(format!("session ended: error — {msg}")),
+            // F-747: window-close shutdown via the Tauri shell's
+            // `session_close` IPC. The CLI never emits `Closed` itself but
+            // may tail a daemon shut down by the shell.
+            EndReason::Closed => Some("session ended: window closed".into()),
         },
         _ => None,
     }
